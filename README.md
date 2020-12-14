@@ -1,37 +1,25 @@
-# rockchip-kernel
+[English](./README.en.md) | 简体中文
 
 #### 介绍
-It provides openEuler kernel source for Rockchip SoCs
+
+此项目的目的是移植 openEuler 内核以支持 Rockchip 开发板。处于开发中，欢迎提交贡献。
+
+该仓库基于两个上游仓库 [openEuler 内核源码](https://gitee.com/openeuler/kernel) 和 [Rockchip 内核源码](https://github.com/rockchip-linux/kernel) .
 
 #### 软件架构
-软件架构说明
 
+Aarch64
 
-#### 安装教程
+#### 分支说明
 
-1.  xxxx
-2.  xxxx
-3.  xxxx
-
-#### 使用说明
-
-1.  xxxx
-2.  xxxx
-3.  xxxx
+- master：默认分支，暂时为空，存放入口信息。
+- openEuler-20.03-LTS：存放 [openEuler 20.03 LTS 版本内核代码](https://gitee.com/openeuler/kernel/tree/openEuler-1.0-LTS/) 仓库的镜像，作为移植工作的基础代码。
+- rockchip-develop-4.19：存放 [rockchip 内核 develop-4.19 分支代码](https://github.com/rockchip-linux/kernel/tree/develop-4.19) 仓库的镜像，作为移植工作的参考代码。
+- dev-4.19：开发主分支，基于 openEuler 内核代码（linux 4.19 版本），开展支持 rockchip 开发板的内核移植工作。
 
 #### 参与贡献
 
-1.  Fork 本仓库
-2.  新建 Feat_xxx 分支
-3.  提交代码
-4.  新建 Pull Request
+欢迎提交 PR，提交 PR 参考说明：https://gitee.com/openeuler/community/blob/master/CONTRIBUTING.md。
 
-
-#### 特技
-
-1.  使用 Readme\_XXX.md 来支持不同的语言，例如 Readme\_en.md, Readme\_zh.md
-2.  Gitee 官方博客 [blog.gitee.com](https://blog.gitee.com)
-3.  你可以 [https://gitee.com/explore](https://gitee.com/explore) 这个地址来了解 Gitee 上的优秀开源项目
-4.  [GVP](https://gitee.com/gvp) 全称是 Gitee 最有价值开源项目，是综合评定出的优秀开源项目
-5.  Gitee 官方提供的使用手册 [https://gitee.com/help](https://gitee.com/help)
-6.  Gitee 封面人物是一档用来展示 Gitee 会员风采的栏目 [https://gitee.com/gitee-stars/](https://gitee.com/gitee-stars/)
+如果是针对 openEuler 社区内核主线的贡献，建议提交给 https://gitee.com/openeuler/kernel。
+ 
