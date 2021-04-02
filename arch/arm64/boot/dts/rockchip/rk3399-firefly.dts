@@ -6,15 +6,18 @@
 /dts-v1/;
 #include <dt-bindings/input/linux-event-codes.h>
 #include <dt-bindings/pwm/pwm.h>
+
 #include "rk3399.dtsi"
 #include "rk3399-opp.dtsi"
+
+#include "rk3399-firefly-port.dtsi"
 
 / {
 	model = "Firefly-RK3399 Board";
 	compatible = "firefly,firefly-rk3399", "rockchip,rk3399";
 
 	chosen {
-                bootargs = "earlycon=uart8250,mmio32,0xff1a0000 swiotlb=1 rw root=PARTLABEL=rootfs rootfstype=ext4 rootwait overlayroot=device:dev=PARTLABEL=userdata,fstype=ext4,mkfs=1 coherent_pool=1m systemd.gpt_auto=0 cgroup_enable=memory swapaccount=1";
+        bootargs = "earlycon=uart8250,mmio32,0xff1a0000 swiotlb=1 rw root=PARTLABEL=rootfs rootfstype=ext4 rootwait overlayroot=device:dev=PARTLABEL=userdata,fstype=ext4,mkfs=1 coherent_pool=1m systemd.gpt_auto=0 cgroup_enable=memory swapaccount=1";
 		stdout-path = "serial2:1500000n8";
 	};
 
