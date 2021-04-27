@@ -28,6 +28,8 @@
 #define ARMCLKB				9
 
 /* sclk gates (special clocks) */
+#define SCLK_I2SOUT_SRC			64
+#define SCLK_I2S_8CH		SCLK_I2SOUT_SRC
 #define SCLK_I2C1			65
 #define SCLK_I2C2			66
 #define SCLK_I2C3			67
@@ -133,7 +135,18 @@
 #define SCLK_PCIEPHY_REF100M		167
 #define SCLK_DDRC			168
 #define SCLK_TESTCLKOUT1		169
+#define SCLK_USBPHY0_480M_SRC		168
+#define SCLK_USBPHY1_480M_SRC		169
+#define SCLK_DDRCLK			170
 #define SCLK_TESTCLKOUT2		170
+#define SCLK_UART0_SRC			172
+#define SCLK_UART_SRC			173
+#define SCLK_I2S0_DIV			174
+#define SCLK_I2S1_DIV			175
+#define SCLK_I2S2_DIV			176
+#define SCLK_SPDIF_DIV			177
+#define SCLK_CIF_OUT_SRC		178
+//#define SCLK_TESTCLKOUT1		179
 
 #define DCLK_VOP0			180
 #define DCLK_VOP1			181
