@@ -5,11 +5,7 @@
  */
 
 #include "dt-bindings/usb/pd.h"
-#ifdef rk3588
 #include "rk3588.dtsi"
-#else
-#include "rk3588s.dtsi"
-#endif
 #include "rk3588-firefly-rk806-single.dtsi"
 #include <dt-bindings/gpio/gpio.h>
 #include <dt-bindings/pwm/pwm.h>
@@ -282,28 +278,17 @@
 	status = "okay";
 };
 
-#ifdef rk3588
-
 &display_subsystem {
-       clocks = <&hdptxphy_hdmi_clk0>, <&hdptxphy_hdmi_clk1>;
-       clock-names = "hdmi0_phy_pll", "hdmi1_phy_pll";
+    clocks = <&hdptxphy_hdmi_clk0>, <&hdptxphy_hdmi_clk1>;
+    clock-names = "hdmi0_phy_pll", "hdmi1_phy_pll";
 };
 
 &hdptxphy_hdmi_clk1 {
-       status = "okay";
+    status = "okay";
 };
-
-#else
-
-&display_subsystem {
-       clocks = <&hdptxphy_hdmi_clk0>;
-       clock-names = "hdmi0_phy_pll";
-};
-
-#endif
 
 &hdptxphy_hdmi_clk0 {
-       status = "okay";
+    status = "okay";
 };
 
 /* vp0 & vp1 splice for 8K output */
