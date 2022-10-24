@@ -126,7 +126,7 @@
 };
 
 &hdmi1_in_vp1 {
-        status = "okay";
+    status = "okay";
 };
 
 &hdptxphy_hdmi1 {
