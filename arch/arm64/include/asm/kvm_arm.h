@@ -12,7 +12,6 @@
 #include <asm/types.h>
 
 /* Hyp Configuration Register (HCR) bits */
-#define HCR_TWEDEN	(UL(1) << 59)
 #define HCR_ATA		(UL(1) << 56)
 #define HCR_FWB		(UL(1) << 46)
 #define HCR_API		(UL(1) << 41)
@@ -57,13 +56,6 @@
 #define HCR_SWIO	(UL(1) << 1)
 #define HCR_VM		(UL(1) << 0)
 
-#ifdef CONFIG_ARM64_TWED
-#define HCR_TWEDEL_SHIFT	60
-#define HCR_TWEDEL_MAX		(UL(0xf))
-#define HCR_TWEDEL_MASK		(HCR_TWEDEL_MAX << HCR_TWEDEL_SHIFT)
-#define HCR_TWEDEL		(UL(1) << HCR_TWEDEL_SHIFT)
-#endif
-
 /*
  * The bits we set in HCR:
  * TLOR:	Trap LORegion register accesses
@@ -88,10 +80,11 @@
 			 HCR_FMO | HCR_IMO | HCR_PTW )
 #define HCR_VIRT_EXCP_MASK (HCR_VSE | HCR_VI | HCR_VF)
 #define HCR_HOST_NVHE_FLAGS (HCR_RW | HCR_API | HCR_APK | HCR_ATA)
+#define HCR_HOST_NVHE_PROTECTED_FLAGS (HCR_HOST_NVHE_FLAGS | HCR_TSC)
 #define HCR_HOST_VHE_FLAGS (HCR_RW | HCR_TGE | HCR_E2H)
 
 /* TCR_EL2 Registers bits */
-#define TCR_EL2_RES1		((1U << 31) | (1 << 23))
+#define TCR_EL2_RES1		((1 << 31) | (1 << 23))
 #define TCR_EL2_TBI		(1 << 20)
 #define TCR_EL2_PS_SHIFT	16
 #define TCR_EL2_PS_MASK		(7 << TCR_EL2_PS_SHIFT)
@@ -276,7 +269,7 @@
 #define CPTR_EL2_TFP_SHIFT 10
 
 /* Hyp Coprocessor Trap Register */
-#define CPTR_EL2_TCPAC	(1U << 31)
+#define CPTR_EL2_TCPAC	(1 << 31)
 #define CPTR_EL2_TAM	(1 << 30)
 #define CPTR_EL2_TTA	(1 << 20)
 #define CPTR_EL2_TFP	(1 << CPTR_EL2_TFP_SHIFT)
@@ -285,6 +278,8 @@
 #define CPTR_EL2_DEFAULT	CPTR_EL2_RES1
 
 /* Hyp Debug Configuration Register bits */
+#define MDCR_EL2_E2TB_MASK	(UL(0x3))
+#define MDCR_EL2_E2TB_SHIFT	(UL(24))
 #define MDCR_EL2_TTRF		(1 << 19)
 #define MDCR_EL2_TPMS		(1 << 14)
 #define MDCR_EL2_E2PB_MASK	(UL(0x3))
