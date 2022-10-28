@@ -73,6 +73,8 @@ config ARM64
 	select ARCH_USE_SYM_ANNOTATIONS
 	select ARCH_SUPPORTS_MEMORY_FAILURE
 	select ARCH_SUPPORTS_SHADOW_CALL_STACK if CC_HAVE_SHADOW_CALL_STACK
+	select ARCH_SUPPORTS_LTO_CLANG if CPU_LITTLE_ENDIAN
+	select ARCH_SUPPORTS_LTO_CLANG_THIN
 	select ARCH_SUPPORTS_ATOMIC_RMW
 	select ARCH_SUPPORTS_INT128 if CC_HAS_INT128 && (GCC_VERSION >= 50000 || CC_IS_CLANG)
 	select ARCH_SUPPORTS_NUMA_BALANCING
@@ -82,7 +84,6 @@ config ARM64
 	select ARCH_WANT_FRAME_POINTERS
 	select ARCH_WANT_HUGE_PMD_SHARE if ARM64_4K_PAGES || (ARM64_16K_PAGES && !ARM64_VA_BITS_36)
 	select ARCH_WANT_LD_ORPHAN_WARN
-	select ARCH_WANT_RESERVE_CRASH_KERNEL if KEXEC_CORE
 	select ARCH_HAS_UBSAN_SANITIZE_ALL
 	select ARM_AMBA
 	select ARM_ARCH_TIMER
@@ -110,6 +111,7 @@ config ARM64
 	select GENERIC_EARLY_IOREMAP
 	select GENERIC_IDLE_POLL_SETUP
 	select GENERIC_IRQ_IPI
+	select ARCH_WANTS_IRQ_RAW
 	select GENERIC_IRQ_MULTI_HANDLER
 	select GENERIC_IRQ_PROBE
 	select GENERIC_IRQ_SHOW
@@ -133,12 +135,13 @@ config ARM64
 	select HAVE_ARCH_AUDITSYSCALL
 	select HAVE_ARCH_BITREVERSE
 	select HAVE_ARCH_COMPILER_H
-	select HAVE_ARCH_HUGE_VMALLOC
 	select HAVE_ARCH_HUGE_VMAP
 	select HAVE_ARCH_JUMP_LABEL
 	select HAVE_ARCH_JUMP_LABEL_RELATIVE
 	select HAVE_ARCH_KASAN if !(ARM64_16K_PAGES && ARM64_VA_BITS_48)
+	select HAVE_ARCH_KASAN_VMALLOC if HAVE_ARCH_KASAN
 	select HAVE_ARCH_KASAN_SW_TAGS if HAVE_ARCH_KASAN
+	select HAVE_ARCH_KASAN_HW_TAGS if (HAVE_ARCH_KASAN && ARM64_MTE)
 	select HAVE_ARCH_KFENCE
 	select HAVE_ARCH_KGDB
 	select HAVE_ARCH_MMAP_RND_BITS
@@ -163,6 +166,8 @@ config ARM64
 	select HAVE_DYNAMIC_FTRACE
 	select HAVE_DYNAMIC_FTRACE_WITH_REGS \
 		if $(cc-option,-fpatchable-function-entry=2)
+	select FTRACE_MCOUNT_USE_PATCHABLE_FUNCTION_ENTRY \
+		if DYNAMIC_FTRACE_WITH_REGS
 	select HAVE_EFFICIENT_UNALIGNED_ACCESS
 	select HAVE_FAST_GUP
 	select HAVE_FTRACE_MCOUNT_RECORD
@@ -187,10 +192,10 @@ config ARM64
 	select HAVE_KPROBES
 	select HAVE_KRETPROBES
 	select HAVE_GENERIC_VDSO
-	select HOLES_IN_ZONE
 	select IOMMU_DMA if IOMMU_SUPPORT
 	select IRQ_DOMAIN
 	select IRQ_FORCED_THREADING
+	select KASAN_VMALLOC if KASAN_GENERIC
 	select MODULES_USE_ELF_RELA
 	select NEED_DMA_MAP_STATE
 	select NEED_SG_DMA_LENGTH
@@ -201,11 +206,13 @@ config ARM64
 	select PCI_SYSCALL if PCI
 	select POWER_RESET
 	select POWER_SUPPLY
+	select SET_FS
 	select SPARSE_IRQ
 	select SWIOTLB
 	select SYSCTL_EXCEPTION_TRACE
 	select THREAD_INFO_IN_TASK
-	select HAVE_LIVEPATCH_WO_FTRACE
+	select ARCH_SUPPORTS_SPECULATIVE_PAGE_FAULT
+	select HAVE_ARCH_USERFAULTFD_MINOR if USERFAULTFD
 	help
 	  ARM 64-bit (AArch64) Linux support.
 
@@ -336,7 +343,7 @@ config BROKEN_GAS_INST
 
 config KASAN_SHADOW_OFFSET
 	hex
-	depends on KASAN
+	depends on KASAN_GENERIC || KASAN_SW_TAGS
 	default 0xdfffa00000000000 if (ARM64_VA_BITS_48 || ARM64_VA_BITS_52) && !KASAN_SW_TAGS
 	default 0xdfffd00000000000 if ARM64_VA_BITS_47 && !KASAN_SW_TAGS
 	default 0xdffffe8000000000 if ARM64_VA_BITS_42 && !KASAN_SW_TAGS
@@ -349,12 +356,7 @@ config KASAN_SHADOW_OFFSET
 	default 0xeffffff900000000 if ARM64_VA_BITS_36 && KASAN_SW_TAGS
 	default 0xffffffffffffffff
 
-config ARCH_HAS_CPU_RELAX
-	def_bool y
-
 source "arch/arm64/Kconfig.platforms"
-
-source "kernel/livepatch/Kconfig"
 
 menu "Kernel Features"
 
@@ -493,7 +495,7 @@ config ARM64_ERRATUM_834220
 
 config ARM64_ERRATUM_845719
 	bool "Cortex-A53: 845719: a load might read incorrect data"
-	depends on AARCH32_EL0
+	depends on COMPAT
 	default y
 	help
 	  This option adds an alternative code sequence to work around ARM
@@ -771,15 +773,6 @@ config HISILICON_ERRATUM_161600802
 
 	  If unsure, say Y.
 
-config HISILICON_ERRATUM_1980005
-	bool "Hisilicon erratum IDC support"
-	default n
-	help
-	  The HiSilicon TSV100/200 SoC support idc but report wrong value to
-	  kernel.
-
-	  If unsure, say N.
-
 config QCOM_FALKOR_ERRATUM_1003
 	bool "Falkor E1003: Incorrect translation due to ASID change"
 	default y
@@ -830,24 +823,6 @@ config SOCIONEXT_SYNQUACER_PREITS
 	  MSI doorbell writes with non-zero values for the device ID.
 
 	  If unsure, say Y.
-
-config HISILICON_ERRATUM_HIP08_RU_PREFETCH
-	bool "HIP08 RU: HiSilicon HIP08 cache readunique might cause performance drop"
-	default y
-	help
-	  The HiSilicon HIP08 cache readunique might compromise performance,
-	  use cmdline "readunique_prefetch_disable" to disable RU prefetch.
-
-	  If unsure, say Y.
-
-config HISILICON_HIP08_RU_PREFETCH_DEFAULT_OFF
-	bool "HIP08 RU: disable HiSilicon HIP08 cache readunique by default"
-	depends on HISILICON_ERRATUM_HIP08_RU_PREFETCH
-	default n
-	help
-	  Disable HiSilicon HIP08 cache readunique by default.
-
-	  If unsure, say N.
 
 endmenu
 
@@ -1007,15 +982,6 @@ config SCHED_MC
 	  making when dealing with multi-core CPU chips at a cost of slightly
 	  increased overhead in some places. If unsure say N here.
 
-config SCHED_CLUSTER
-	bool "Cluster scheduler support"
-	help
-	  Cluster scheduler support improves the CPU scheduler's decision
-	  making when dealing with machines that have clusters of CPUs.
-	  Cluster usually means a couple of CPUs which are placed closely
-	  by sharing mid-level caches, last-level cache tags or internal
-	  busses.
-
 config SCHED_SMT
 	bool "SMT scheduler support"
 	help
@@ -1094,22 +1060,6 @@ config NODES_SHIFT
 	  Specify the maximum number of NUMA Nodes available on the target
 	  system.  Increases memory reserved to accommodate various tables.
 
-config NUMA_AWARE_SPINLOCKS
-	bool "Numa-aware spinlocks"
-	depends on NUMA
-	depends on QUEUED_SPINLOCKS
-	depends on PARAVIRT_SPINLOCKS
-	default y
-	help
-	  Introduce NUMA (Non Uniform Memory Access) awareness into
-	  the slow path of spinlocks.
-
-	  In this variant of qspinlock, the kernel will try to keep the lock
-	  on the same node, thus reducing the number of remote cache misses,
-	  while trading some of the short term fairness for better performance.
-
-	  Say N if you want absolute first come first serve fairness.
-
 config USE_PERCPU_NUMA_NODE_ID
 	def_bool y
 	depends on NUMA
@@ -1121,6 +1071,9 @@ config HAVE_SETUP_PER_CPU_AREA
 config NEED_PER_CPU_EMBED_FIRST_CHUNK
 	def_bool y
 	depends on NUMA
+
+config HOLES_IN_ZONE
+	def_bool y
 
 source "kernel/Kconfig.hz"
 
@@ -1155,18 +1108,6 @@ config ARCH_WANT_HUGE_PMD_SHARE
 config ARCH_HAS_CACHE_LINE_SIZE
 	def_bool y
 
-config ARCH_LLC_128_LINE_SIZE
-	bool "Force 128 bytes alignment for fitting LLC cacheline"
-	depends on ARM64
-	default y
-	help
-	  As specific machine's LLC cacheline size may be up to
-	  128 bytes, gaining performance improvement from fitting
-	  128 Bytes LLC cache aligned.
-
-config ARCH_HAS_FILTER_PGPROT
-	def_bool y
-
 config ARCH_ENABLE_SPLIT_PMD_PTLOCK
 	def_bool y if PGTABLE_LEVELS > 2
 
@@ -1180,19 +1121,6 @@ config PARAVIRT
 	  This changes the kernel so it can modify itself when it is run
 	  under a hypervisor, potentially improving performance significantly
 	  over full virtualization.
-
-config PARAVIRT_SPINLOCKS
-	bool "Paravirtualization layer for spinlocks"
-	depends on PARAVIRT && SMP
-	help
-	  Paravirtualized spinlocks allow a pvops backend to replace the
-	  spinlock implementation with something virtualization-friendly
-	  (for example, block the virtual CPU rather than spinning).
-
-	  It has a minimal impact on native kernels and gives a nice performance
-	  benefit on paravirtualized KVM kernels.
-
-	  If you are unsure how to answer this question, answer Y.
 
 config PARAVIRT_TIME_ACCOUNTING
 	bool "Paravirtual steal time accounting"
@@ -1218,7 +1146,6 @@ config KEXEC
 config KEXEC_FILE
 	bool "kexec file based system call"
 	select KEXEC_CORE
-	select HAVE_IMA_KEXEC if IMA
 	help
 	  This is new version of kexec system call. This system call is
 	  file based and takes file descriptors as system call argument
@@ -1259,18 +1186,6 @@ config CRASH_DUMP
 	  kdump/kexec.
 
 	  For more details see Documentation/admin-guide/kdump/kdump.rst
-
-config ARM64_CPU_PARK
-	bool "Support CPU PARK on kexec"
-	depends on SMP
-	depends on KEXEC_CORE
-	help
-	 This enables support for CPU PARK feature in
-	 order to save time of cpu down to up.
-	 CPU park is a state through kexec, spin loop
-	 instead of cpu die before jumping to new kernel,
-	 jumping out from loop to new kernel entry in
-	 smp_init.
 
 config XEN_DOM0
 	def_bool y
@@ -1319,15 +1234,6 @@ config UNMAP_KERNEL_AT_EL0
 
 	  If unsure, say Y.
 
-config MITIGATE_SPECTRE_BRANCH_HISTORY
-	bool "Mitigate Spectre style attacks against branch history" if EXPERT
-	default y
-	help
-	  Speculation attacks against some high-performance processors can
-	  make use of branch history to influence future speculation.
-	  When taking an exception from user-space, a sequence of branches
-	  or a firmware call overwrites the branch history.
-
 config RODATA_FULL_DEFAULT_ENABLED
 	bool "Apply r/o permissions of VM areas also to their linear aliases"
 	default y
@@ -1341,24 +1247,6 @@ config RODATA_FULL_DEFAULT_ENABLED
 
 	  This requires the linear region to be mapped down to pages,
 	  which may adversely affect performance in some cases.
-
-config ARM64_PMEM_RESERVE
-	bool
-
-config ARM64_PMEM_LEGACY
-	tristate "Support Persistent Memory (legacy) register via protected memory"
-	depends on BLK_DEV
-	select ARM64_PMEM_RESERVE
-	select PMEM_LEGACY
-	select PMEM_LEGACY_DEVICE
-	select LIBNVDIMM
-	help
-	  Protected memory ranges for persistent memory are described by the
-	  'memmap=nn[KMG]!ss[KMG]' kernel parameter".
-	  The kernel will offer those memory regions to the 'pmem' driver so
-	  they can be used for persistent storage.
-
-	  Say Y if unsure.
 
 config ARM64_SW_TTBR0_PAN
 	bool "Emulate Privileged Access Never using TTBR0_EL1 switching"
@@ -1377,17 +1265,10 @@ config ARM64_TAGGED_ADDR_ABI
 	  to system calls as pointer arguments. For details, see
 	  Documentation/arm64/tagged-address-abi.rst.
 
-config ARM64_ILP32
-	bool "Kernel support for ILP32"
-	depends on !ARM64_PTR_AUTH
-	help
-	  This option enables support for AArch64 ILP32 user space.  ILP32
-	  is an ABI where long and pointers are 32bits but it uses the AARCH64
-	  instruction set.
-
-menuconfig AARCH32_EL0
+menuconfig COMPAT
 	bool "Kernel support for 32-bit EL0"
 	depends on ARM64_4K_PAGES || EXPERT
+	select COMPAT_BINFMT_ELF if BINFMT_ELF
 	select HAVE_UID16
 	select OLD_SIGSUSPEND3
 	select COMPAT_OLD_SIGACTION
@@ -1403,7 +1284,7 @@ menuconfig AARCH32_EL0
 
 	  If you want to execute 32-bit userspace applications, say Y.
 
-if AARCH32_EL0
+if COMPAT
 
 config KUSER_HELPERS
 	bool "Enable kuser helpers page for 32-bit applications"
@@ -1434,8 +1315,7 @@ config KUSER_HELPERS
 
 config COMPAT_VDSO
 	bool "Enable vDSO for 32-bit applications"
-	depends on !CPU_BIG_ENDIAN
-	depends on (CC_IS_CLANG && LD_IS_LLD) || "$(CROSS_COMPILE_COMPAT)" != ""
+	depends on !CPU_BIG_ENDIAN && "$(CROSS_COMPILE_COMPAT)" != ""
 	select GENERIC_COMPAT_VDSO
 	default y
 	help
@@ -1456,7 +1336,6 @@ config THUMB2_COMPAT_VDSO
 
 menuconfig ARMV8_DEPRECATED
 	bool "Emulate deprecated/obsolete ARMv8 instructions"
-	depends on AARCH32_EL0
 	depends on SYSCTL
 	help
 	  Legacy software support may require certain instructions
@@ -1561,6 +1440,9 @@ config ARM64_PAN
 	 The feature is detected at runtime, and will remain as a 'nop'
 	 instruction if the cpu does not implement the feature.
 
+config AS_HAS_LDAPR
+	def_bool $(as-instr,.arch_extension rcpc)
+
 config AS_HAS_LSE_ATOMICS
 	def_bool $(as-instr,.arch_extension lse)
 
@@ -1600,6 +1482,27 @@ config ARM64_VHE
 endmenu
 
 menu "ARMv8.2 architectural features"
+
+config ARM64_UAO
+	bool "Enable support for User Access Override (UAO)"
+	default y
+	help
+	  User Access Override (UAO; part of the ARMv8.2 Extensions)
+	  causes the 'unprivileged' variant of the load/store instructions to
+	  be overridden to be privileged.
+
+	  This option changes get_user() and friends to use the 'unprivileged'
+	  variant of the load/store instructions. This ensures that user-space
+	  really did have access to the supplied memory. When addr_limit is
+	  set to kernel memory the UAO bit will be set, allowing privileged
+	  access to kernel memory.
+
+	  Choosing this option will cause copy_to_user() et al to use user-space
+	  memory permissions.
+
+	  The feature is detected at runtime, the kernel will use the
+	  regular load/store instructions if the cpu does not implement the
+	  feature.
 
 config ARM64_PMEM
 	bool "Enable support for persistent memory"
@@ -1642,15 +1545,6 @@ config ARM64_CNP
 	  Selecting this option allows the CNP feature to be detected
 	  at runtime, and does not affect PEs that do not implement
 	  this feature.
-
-config ARM64_UCE_KERNEL_RECOVERY
-	bool "arm64 uce kernel recovery for special scenario"
-	depends on ACPI_APEI_SEA
-	help
-	  With ARM v8.2 RAS Extension, SEA are usually triggered when memory
-	  error are consumed. In some cases, if the error address is in a
-	  user page there is a chance to recover. we can isolate this page
-	  and killing process instead of die.
 
 endmenu
 
@@ -1755,6 +1649,9 @@ endmenu
 
 menu "ARMv8.5 architectural features"
 
+config AS_HAS_ARMV8_5
+	def_bool $(cc-option,-Wa$(comma)-march=armv8.5-a)
+
 config ARM64_BTI
 	bool "Branch Target Identification support"
 	default y
@@ -1786,6 +1683,8 @@ config ARM64_BTI_KERNEL
 	# https://gcc.gnu.org/bugzilla/show_bug.cgi?id=94697
 	depends on !CC_IS_GCC || GCC_VERSION >= 100100
 	depends on !(CC_IS_CLANG && GCOV_KERNEL)
+	# https://bugs.llvm.org/show_bug.cgi?id=46258
+	depends on !CFI_CLANG || CLANG_VERSION >= 120000
 	depends on (!FUNCTION_GRAPH_TRACER || DYNAMIC_FTRACE_WITH_REGS)
 	help
 	  Build the kernel with Branch Target Identification annotations
@@ -1829,6 +1728,9 @@ config ARM64_MTE
 	bool "Memory Tagging Extension support"
 	default y
 	depends on ARM64_AS_HAS_MTE && ARM64_TAGGED_ADDR_ABI
+	depends on AS_HAS_ARMV8_5
+	# Required for tag checking in the uaccess routines
+	depends on ARM64_PAN
 	depends on AS_HAS_LSE_ATOMICS
 	select ARCH_USES_HIGH_VMA_FLAGS
 	help
@@ -1853,34 +1755,9 @@ config ARM64_MTE
 
 endmenu
 
-menu "ARMv8.6 architectural features"
-
-config ARM64_TWED
-	bool "Enable support for delayed trapping of WFE"
-	default y
-	help
-	  Delayed Trapping of WFE (part of the ARMv8.6 Extensions)
-
-endmenu
-
-menu "ARMv8.7 architectural features"
-
-config ARM64_EPAN
-	bool "Enable support for Enhanced Privileged Access Never (EPAN)"
-	default y
-	depends on ARM64_PAN
-	help
-	 Enhanced Privileged Access Never (EPAN) allows Privileged
-	 Access Never to be used with Execute-only mappings.
-
-	 The feature is detected at runtime, and will remain disabled
-	 if the cpu does not implement the feature.
-endmenu
-
 config ARM64_SVE
 	bool "ARM Scalable Vector Extension support"
 	default y
-	depends on !KVM || ARM64_VHE
 	help
 	  The Scalable Vector Extension (SVE) is an extension to the AArch64
 	  execution state which complements and extends the SIMD functionality
@@ -1909,12 +1786,6 @@ config ARM64_SVE
 	  booting the kernel.  If unsure and you are not observing these
 	  symptoms, you should assume that it is safe to say Y.
 
-	  CPUs that support SVE are architecturally required to support the
-	  Virtualization Host Extensions (VHE), so the kernel makes no
-	  provision for supporting SVE alongside KVM without VHE enabled.
-	  Thus, you will need to enable CONFIG_ARM64_VHE if you want to support
-	  KVM in the same kernel image.
-
 config ARM64_MODULE_PLTS
 	bool "Use PLTs to allow module memory to spill over into vmalloc area"
 	depends on MODULES
@@ -1938,7 +1809,6 @@ config ARM64_MODULE_PLTS
 config ARM64_PSEUDO_NMI
 	bool "Support for NMI-like interrupts"
 	select ARM_GIC_V3
-	select HAVE_PERF_EVENTS_NMI
 	help
 	  Adds support for mimicking Non-Maskable Interrupts through the use of
 	  GIC interrupt priority. This support requires version 3 or later of
@@ -2015,77 +1885,6 @@ config STACKPROTECTOR_PER_TASK
 	def_bool y
 	depends on STACKPROTECTOR && CC_HAVE_STACKPROTECTOR_SYSREG
 
-menuconfig ASCEND_FEATURES
-	bool "Support Ascend Features"
-	depends on ARM64
-	help
-	  The Ascend chip use the Hisilicon DaVinci architecture, and mainly
-	  focus on AI and machine leanring area, contains many external features.
-
-	  Enable this config to enable selective list of these features.
-
-	  If unsure, say Y
-
-if ASCEND_FEATURES
-
-config ASCEND_DVPP_MMAP
-	bool "Enable support for the DvPP mmap"
-	default y
-	help
-	  The DvPP means Davinci Video Pre-Processor, are mainly consist of VDEC
-	  (Video Decode), VENC(Video Encode), JPEG D/E (Decode/Encode), PNGD
-	  (PNG Decode) and VPC (Video Process) processors.
-
-	  The DvPP could only use a limit range of virtual address, just like the
-	  Ascend310/910 could only use the limit range of virtual address (default
-	  4 GB), so add a new mmap flag which is named MAP_DVPP to allocate the
-	  special memory for DvPP processor, the new flag is only valid for Ascend
-	  platform.
-
-config ASCEND_CLEAN_CDM
-	bool "move the management structure for HBM to DDR"
-	def_bool n
-	depends on COHERENT_DEVICE
-	help
-	  The cdm nodes sometimes are easiler to raise an ECC error and it may
-	  cause the kernel crash if the essential structures went wrong. So move
-	  the management structures for hbm nodes to the ddr nodes of the same
-	  partion to reduce the probability of kernel crashes.
-
-config ASCEND_OOM
-	bool "Enable support for disable oom killer"
-	default y
-	help
-	  In some cases we hopes that the oom will not kill the process when it occurs,
-	  be able to notify the black box to report the event, and be able to trigger
-	  the panic to locate the problem.
-	  vm.enable_oom_killer:
-		0: disable oom killer
-		1: enable oom killer (default,compatible with mainline)
-
-config ASCEND_CHARGE_MIGRATE_HUGEPAGES
-	bool "Enable support for migrate hugepages"
-	depends on HUGETLBFS
-	default y
-	help
-	  When reserved hugepages are used up, we attempts to apply for migrate
-	  hugepages. We expect that the migrated hugepages that are applied for
-	  can be charged in memcg to limit the memory usage.
-
-	  This option enable the feature to charge migrate hugepages to memory
-	  cgroup.
-
-config ASCEND_SHARE_POOL
-	bool "Enable support for the Share Pool Memory"
-	default n
-	depends on HAVE_ARCH_HUGE_VMALLOC
-	select ARCH_USES_HIGH_VMA_FLAGS
-	help
-	  This feature allows multiple processes to share virtual memory both
-	  in kernel and user level, which is only enabled for ascend platform.
-
-endif
-
 endmenu
 
 menu "Boot options"
@@ -2107,14 +1906,35 @@ config CMDLINE
 	  entering them here. As a minimum, you should specify the the
 	  root device (e.g. root=/dev/nfs).
 
+choice
+	prompt "Kernel command line type" if CMDLINE != ""
+	default CMDLINE_FROM_BOOTLOADER
+	help
+	  Choose how the kernel will handle the provided default kernel
+	  command line string.
+
+config CMDLINE_FROM_BOOTLOADER
+	bool "Use bootloader kernel arguments if available"
+	help
+	  Uses the command-line options passed by the boot loader. If
+	  the boot loader doesn't provide any, the default kernel command
+	  string provided in CMDLINE will be used.
+
+config CMDLINE_EXTEND
+	bool "Extend bootloader kernel arguments"
+	help
+	  The command-line arguments provided by the boot loader will be
+	  appended to the default kernel command string.
+
 config CMDLINE_FORCE
 	bool "Always use the default kernel command string"
-	depends on CMDLINE != ""
 	help
 	  Always use the default kernel command string, even if the boot
 	  loader passes other arguments to the kernel.
 	  This is useful if you cannot or don't want to change the
 	  command-line options your boot loader passes to the kernel.
+
+endchoice
 
 config EFI_STUB
 	bool
@@ -2150,10 +1970,6 @@ config DMI
 	  continue to boot on existing non-UEFI platforms.
 
 endmenu
-
-config COMPAT
-	def_bool y
-	depends on AARCH32_EL0 || ARM64_ILP32
 
 config SYSVIPC_COMPAT
 	def_bool y
