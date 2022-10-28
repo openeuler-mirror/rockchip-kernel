@@ -703,10 +703,12 @@ xfs_setattr_nonsize(
 			return error;
 	}
 
-	error = xfs_trans_alloc_ichange(ip, udqp, gdqp, NULL,
-			capable(CAP_FOWNER), &tp);
+	error = xfs_trans_alloc(mp, &M_RES(mp)->tr_ichange, 0, 0, 0, &tp);
 	if (error)
 		goto out_dqrele;
+
+	xfs_ilock(ip, XFS_ILOCK_EXCL);
+	xfs_trans_ijoin(tp, ip, 0);
 
 	/*
 	 * Change file ownership.  Must be the owner or privileged.
@@ -724,6 +726,21 @@ xfs_setattr_nonsize(
 		uid = (mask & ATTR_UID) ? iattr->ia_uid : iuid;
 
 		/*
+		 * Do a quota reservation only if uid/gid is actually
+		 * going to change.
+		 */
+		if (XFS_IS_QUOTA_RUNNING(mp) &&
+		    ((XFS_IS_UQUOTA_ON(mp) && !uid_eq(iuid, uid)) ||
+		     (XFS_IS_GQUOTA_ON(mp) && !gid_eq(igid, gid)))) {
+			ASSERT(tp);
+			error = xfs_qm_vop_chown_reserve(tp, ip, udqp, gdqp,
+						NULL, capable(CAP_FOWNER) ?
+						XFS_QMOPT_FORCE_RES : 0);
+			if (error)	/* out of quota */
+				goto out_cancel;
+		}
+
+		/*
 		 * CAP_FSETID overrides the following restrictions:
 		 *
 		 * The set-user-ID and set-group-ID bits of a file will be
@@ -738,7 +755,7 @@ xfs_setattr_nonsize(
 		 * in the transaction.
 		 */
 		if (!uid_eq(iuid, uid)) {
-			if (XFS_IS_UQUOTA_ON(mp)) {
+			if (XFS_IS_QUOTA_RUNNING(mp) && XFS_IS_UQUOTA_ON(mp)) {
 				ASSERT(mask & ATTR_UID);
 				ASSERT(udqp);
 				olddquot1 = xfs_qm_vop_chown(tp, ip,
@@ -747,7 +764,7 @@ xfs_setattr_nonsize(
 			inode->i_uid = uid;
 		}
 		if (!gid_eq(igid, gid)) {
-			if (XFS_IS_GQUOTA_ON(mp)) {
+			if (XFS_IS_QUOTA_RUNNING(mp) && XFS_IS_GQUOTA_ON(mp)) {
 				ASSERT(xfs_sb_version_has_pquotino(&mp->m_sb) ||
 				       !XFS_IS_PQUOTA_ON(mp));
 				ASSERT(mask & ATTR_GID);
@@ -771,6 +788,8 @@ xfs_setattr_nonsize(
 	if (mp->m_flags & XFS_MOUNT_WSYNC)
 		xfs_trans_set_sync(tp);
 	error = xfs_trans_commit(tp);
+
+	xfs_iunlock(ip, XFS_ILOCK_EXCL);
 
 	/*
 	 * Release any dquot(s) the inode had kept before chown.
@@ -798,6 +817,9 @@ xfs_setattr_nonsize(
 
 	return 0;
 
+out_cancel:
+	xfs_trans_cancel(tp);
+	xfs_iunlock(ip, XFS_ILOCK_EXCL);
 out_dqrele:
 	xfs_qm_dqrele(udqp);
 	xfs_qm_dqrele(gdqp);
@@ -1306,7 +1328,7 @@ xfs_setup_inode(
 	gfp_t			gfp_mask;
 
 	inode->i_ino = ip->i_ino;
-	inode->i_state |= I_NEW;
+	inode->i_state = I_NEW;
 
 	inode_sb_list_add(inode);
 	/* make the inode look hashed for the writeback code */

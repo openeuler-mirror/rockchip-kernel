@@ -92,7 +92,7 @@ static int read_block(struct inode *inode, void *addr, unsigned int block,
 dump:
 	ubifs_err(c, "bad data node (block %u, inode %lu)",
 		  block, inode->i_ino);
-	ubifs_dump_node(c, dn, UBIFS_MAX_DATA_NODE_SZ);
+	ubifs_dump_node(c, dn);
 	return -EINVAL;
 }
 
@@ -570,7 +570,7 @@ static int ubifs_write_end(struct file *file, struct address_space *mapping,
 	}
 
 	if (!PagePrivate(page)) {
-		attach_page_private(page, (void *)1);
+		SetPagePrivate(page);
 		atomic_long_inc(&c->dirty_pg_cnt);
 		__set_page_dirty_nobuffers(page);
 	}
@@ -947,7 +947,7 @@ static int do_writepage(struct page *page, int len)
 		release_existing_page_budget(c);
 
 	atomic_long_dec(&c->dirty_pg_cnt);
-	detach_page_private(page);
+	ClearPagePrivate(page);
 	ClearPageChecked(page);
 
 	kunmap(page);
@@ -1031,7 +1031,7 @@ static int ubifs_writepage(struct page *page, struct writeback_control *wbc)
 		if (page->index >= synced_i_size >> PAGE_SHIFT) {
 			err = inode->i_sb->s_op->write_inode(inode, NULL);
 			if (err)
-				goto out_redirty;
+				goto out_unlock;
 			/*
 			 * The inode has been written, but the write-buffer has
 			 * not been synchronized, so in case of an unclean
@@ -1059,17 +1059,11 @@ static int ubifs_writepage(struct page *page, struct writeback_control *wbc)
 	if (i_size > synced_i_size) {
 		err = inode->i_sb->s_op->write_inode(inode, NULL);
 		if (err)
-			goto out_redirty;
+			goto out_unlock;
 	}
 
 	return do_writepage(page, len);
-out_redirty:
-	/*
-	 * redirty_page_for_writepage() won't call ubifs_dirty_inode() because
-	 * it passes I_DIRTY_PAGES flag while calling __mark_inode_dirty(), so
-	 * there is no need to do space budget for dirty inode.
-	 */
-	redirty_page_for_writepage(wbc, page);
+
 out_unlock:
 	unlock_page(page);
 	return err;
@@ -1309,7 +1303,7 @@ static void ubifs_invalidatepage(struct page *page, unsigned int offset,
 		release_existing_page_budget(c);
 
 	atomic_long_dec(&c->dirty_pg_cnt);
-	detach_page_private(page);
+	ClearPagePrivate(page);
 	ClearPageChecked(page);
 }
 
@@ -1476,8 +1470,8 @@ static int ubifs_migrate_page(struct address_space *mapping,
 		return rc;
 
 	if (PagePrivate(page)) {
-		detach_page_private(page);
-		attach_page_private(newpage, (void *)1);
+		ClearPagePrivate(page);
+		SetPagePrivate(newpage);
 	}
 
 	if (mode != MIGRATE_SYNC_NO_COPY)
@@ -1493,24 +1487,15 @@ static int ubifs_releasepage(struct page *page, gfp_t unused_gfp_flags)
 	struct inode *inode = page->mapping->host;
 	struct ubifs_info *c = inode->i_sb->s_fs_info;
 
+	/*
+	 * An attempt to release a dirty page without budgeting for it - should
+	 * not happen.
+	 */
 	if (PageWriteback(page))
 		return 0;
-
-	/*
-	 * Page is private but not dirty, weird? There is one condition
-	 * making it happened. ubifs_writepage skipped the page because
-	 * page index beyonds isize (for example. truncated by other
-	 * process named A), then the page is invalidated by fadvise64
-	 * syscall before being truncated by process A.
-	 */
 	ubifs_assert(c, PagePrivate(page));
-	if (PageChecked(page))
-		release_new_page_budget(c);
-	else
-		release_existing_page_budget(c);
-
-	atomic_long_dec(&c->dirty_pg_cnt);
-	detach_page_private(page);
+	ubifs_assert(c, 0);
+	ClearPagePrivate(page);
 	ClearPageChecked(page);
 	return 1;
 }
@@ -1581,7 +1566,7 @@ static vm_fault_t ubifs_vm_page_mkwrite(struct vm_fault *vmf)
 	else {
 		if (!PageChecked(page))
 			ubifs_convert_page_budget(c);
-		attach_page_private(page, (void *)1);
+		SetPagePrivate(page);
 		atomic_long_inc(&c->dirty_pg_cnt);
 		__set_page_dirty_nobuffers(page);
 	}

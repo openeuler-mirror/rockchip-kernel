@@ -43,7 +43,7 @@ struct xfs_log_item {
 	struct list_head		li_cil;		/* CIL pointers */
 	struct xfs_log_vec		*li_lv;		/* active log vector */
 	struct xfs_log_vec		*li_lv_shadow;	/* standby vector */
-	xfs_csn_t			li_seq;		/* CIL commit seq */
+	xfs_lsn_t			li_seq;		/* CIL commit seq */
 };
 
 /*
@@ -69,7 +69,7 @@ struct xfs_item_ops {
 	void (*iop_pin)(struct xfs_log_item *);
 	void (*iop_unpin)(struct xfs_log_item *, int remove);
 	uint (*iop_push)(struct xfs_log_item *, struct list_head *);
-	void (*iop_committing)(struct xfs_log_item *lip, xfs_csn_t seq);
+	void (*iop_committing)(struct xfs_log_item *, xfs_lsn_t commit_lsn);
 	void (*iop_release)(struct xfs_log_item *);
 	xfs_lsn_t (*iop_committed)(struct xfs_log_item *, xfs_lsn_t);
 	int (*iop_recover)(struct xfs_log_item *lip,
@@ -140,6 +140,11 @@ typedef struct xfs_trans {
 	int64_t			t_res_fdblocks_delta; /* on-disk only chg */
 	int64_t			t_frextents_delta;/* superblock freextents chg*/
 	int64_t			t_res_frextents_delta; /* on-disk only chg */
+#if defined(DEBUG) || defined(XFS_WARN)
+	int64_t			t_ag_freeblks_delta; /* debugging counter */
+	int64_t			t_ag_flist_delta; /* debugging counter */
+	int64_t			t_ag_btree_delta; /* debugging counter */
+#endif
 	int64_t			t_dblocks_delta;/* superblock dblocks change */
 	int64_t			t_agcount_delta;/* superblock agcount change */
 	int64_t			t_imaxpct_delta;/* superblock imaxpct change */
@@ -159,6 +164,16 @@ typedef struct xfs_trans {
  * actually macros.
  */
 #define	xfs_trans_set_sync(tp)		((tp)->t_flags |= XFS_TRANS_SYNC)
+
+#if defined(DEBUG) || defined(XFS_WARN)
+#define	xfs_trans_agblocks_delta(tp, d)	((tp)->t_ag_freeblks_delta += (int64_t)d)
+#define	xfs_trans_agflist_delta(tp, d)	((tp)->t_ag_flist_delta += (int64_t)d)
+#define	xfs_trans_agbtree_delta(tp, d)	((tp)->t_ag_btree_delta += (int64_t)d)
+#else
+#define	xfs_trans_agblocks_delta(tp, d)
+#define	xfs_trans_agflist_delta(tp, d)
+#define	xfs_trans_agbtree_delta(tp, d)
+#endif
 
 /*
  * XFS transaction mechanism exported interfaces.
@@ -252,18 +267,5 @@ xfs_trans_item_relog(
 {
 	return lip->li_ops->iop_relog(lip, tp);
 }
-
-struct xfs_dquot;
-
-int xfs_trans_alloc_inode(struct xfs_inode *ip, struct xfs_trans_res *resv,
-		unsigned int dblocks, unsigned int rblocks, bool force,
-		struct xfs_trans **tpp);
-int xfs_trans_alloc_icreate(struct xfs_mount *mp, struct xfs_trans_res *resv,
-		struct xfs_dquot *udqp, struct xfs_dquot *gdqp,
-		struct xfs_dquot *pdqp, unsigned int dblocks,
-		struct xfs_trans **tpp);
-int xfs_trans_alloc_ichange(struct xfs_inode *ip, struct xfs_dquot *udqp,
-		struct xfs_dquot *gdqp, struct xfs_dquot *pdqp, bool force,
-		struct xfs_trans **tpp);
 
 #endif	/* __XFS_TRANS_H__ */

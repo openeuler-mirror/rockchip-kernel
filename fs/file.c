@@ -19,7 +19,6 @@
 #include <linux/bitops.h>
 #include <linux/spinlock.h>
 #include <linux/rcupdate.h>
-#include <linux/filescontrol.h>
 #include <linux/close_range.h>
 #include <net/sock.h>
 
@@ -86,21 +85,6 @@ static void copy_fdtable(struct fdtable *nfdt, struct fdtable *ofdt)
 	copy_fd_bitmaps(nfdt, ofdt, ofdt->max_fds);
 }
 
-/*
- * Note how the fdtable bitmap allocations very much have to be a multiple of
- * BITS_PER_LONG. This is not only because we walk those things in chunks of
- * 'unsigned long' in some places, but simply because that is how the Linux
- * kernel bitmaps are defined to work: they are not "bits in an array of bytes",
- * they are very much "bits in an array of unsigned long".
- *
- * The ALIGN(nr, BITS_PER_LONG) here is for clarity: since we just multiplied
- * by that "1024/sizeof(ptr)" before, we already know there are sufficient
- * clear low bits. Clang seems to realize that, gcc ends up being confused.
- *
- * On a 128-bit machine, the ALIGN() would actually matter. In the meantime,
- * let's consider it documentation (and maybe a test-case for gcc to improve
- * its code generation ;)
- */
 static struct fdtable * alloc_fdtable(unsigned int nr)
 {
 	struct fdtable *fdt;
@@ -116,7 +100,6 @@ static struct fdtable * alloc_fdtable(unsigned int nr)
 	nr /= (1024 / sizeof(struct file *));
 	nr = roundup_pow_of_two(nr + 1);
 	nr *= (1024 / sizeof(struct file *));
-	nr = ALIGN(nr, BITS_PER_LONG);
 	/*
 	 * Note that this can drive nr *below* what we had passed if sysctl_nr_open
 	 * had been set lower between the check in expand_files() and here.  Deal
@@ -284,19 +267,6 @@ static unsigned int count_open_files(struct fdtable *fdt)
 	return i;
 }
 
-/*
- * Note that a sane fdtable size always has to be a multiple of
- * BITS_PER_LONG, since we have bitmaps that are sized by this.
- *
- * 'max_fds' will normally already be properly aligned, but it
- * turns out that in the close_range() -> __close_range() ->
- * unshare_fd() -> dup_fd() -> sane_fdtable_size() we can end
- * up having a 'max_fds' value that isn't already aligned.
- *
- * Rather than make close_range() have to worry about this,
- * just make that BITS_PER_LONG alignment be part of a sane
- * fdtable size. Becuase that's really what it is.
- */
 static unsigned int sane_fdtable_size(struct fdtable *fdt, unsigned int max_fds)
 {
 	unsigned int count;
@@ -304,7 +274,7 @@ static unsigned int sane_fdtable_size(struct fdtable *fdt, unsigned int max_fds)
 	count = count_open_files(fdt);
 	if (max_fds < NR_OPEN_DEFAULT)
 		max_fds = NR_OPEN_DEFAULT;
-	return ALIGN(min(count, max_fds), BITS_PER_LONG);
+	return min(count, max_fds);
 }
 
 /*
@@ -336,10 +306,6 @@ struct files_struct *dup_fd(struct files_struct *oldf, unsigned int max_fds, int
 	new_fdt->open_fds = newf->open_fds_init;
 	new_fdt->full_fds_bits = newf->full_fds_bits_init;
 	new_fdt->fd = &newf->fd_array[0];
-#ifdef CONFIG_CGROUP_FILES
-	if (files_cgroup_enabled())
-		files_cgroup_assign(newf);
-#endif
 
 	spin_lock(&oldf->file_lock);
 	old_fdt = files_fdtable(oldf);
@@ -403,36 +369,10 @@ struct files_struct *dup_fd(struct files_struct *oldf, unsigned int max_fds, int
 	memset(new_fds, 0, (new_fdt->max_fds - open_files) * sizeof(struct file *));
 
 	rcu_assign_pointer(newf->fdt, new_fdt);
-#ifdef CONFIG_CGROUP_FILES
-	if (!files_cgroup_enabled())
-		return newf;
-	spin_lock(&newf->file_lock);
-	if (!files_cgroup_alloc_fd(newf, files_cgroup_count_fds(newf))) {
-		spin_unlock(&newf->file_lock);
-		return newf;
-	}
-	spin_unlock(&newf->file_lock);
 
-/* could not get enough FD resources.  Need to clean up. */
-	new_fds = new_fdt->fd;
-	for (i = open_files; i != 0; i--) {
-		struct file *f = *new_fds++;
-
-		if (f)
-			fput(f);
-	}
-	if (new_fdt != &newf->fdtab)
-		__free_fdtable(new_fdt);
-	*errorp = -EMFILE;
-#else
 	return newf;
-#endif
 
 out_release:
-#ifdef CONFIG_CGROUP_FILES
-	if (files_cgroup_enabled())
-		files_cgroup_remove(newf);
-#endif
 	kmem_cache_free(files_cachep, newf);
 out:
 	return NULL;
@@ -458,10 +398,6 @@ static struct fdtable *close_files(struct files_struct * files)
 			if (set & 1) {
 				struct file * file = xchg(&fdt->fd[i], NULL);
 				if (file) {
-#ifdef CONFIG_CGROUP_FILES
-					if (files_cgroup_enabled())
-						files_cgroup_unalloc_fd(files, 1);
-#endif
 					filp_close(file, files);
 					cond_resched();
 				}
@@ -470,10 +406,6 @@ static struct fdtable *close_files(struct files_struct * files)
 			set >>= 1;
 		}
 	}
-#ifdef CONFIG_CGROUP_FILES
-	if (files_cgroup_enabled())
-		files_cgroup_remove(files);
-#endif
 
 	return fdt;
 }
@@ -593,12 +525,6 @@ repeat:
 	 */
 	if (error)
 		goto repeat;
-#ifdef CONFIG_CGROUP_FILES
-	if (files_cgroup_enabled() && files_cgroup_alloc_fd(files, 1)) {
-		error = -EMFILE;
-		goto out;
-	}
-#endif
 
 	if (start <= files->next_fd)
 		files->next_fd = fd + 1;
@@ -641,10 +567,6 @@ EXPORT_SYMBOL(get_unused_fd_flags);
 static void __put_unused_fd(struct files_struct *files, unsigned int fd)
 {
 	struct fdtable *fdt = files_fdtable(files);
-#ifdef CONFIG_CGROUP_FILES
-	if (files_cgroup_enabled() && test_bit(fd, fdt->open_fds))
-		files_cgroup_unalloc_fd(files, 1);
-#endif
 	__clear_open_fd(fd, fdt);
 	if (fd < files->next_fd)
 		files->next_fd = fd;
@@ -895,68 +817,24 @@ void do_close_on_exec(struct files_struct *files)
 	spin_unlock(&files->file_lock);
 }
 
-static inline struct file *__fget_files_rcu(struct files_struct *files,
-                                            unsigned int fd, fmode_t mask, unsigned int refs)
-{
-	for (;;) {
-		struct file *file;
-		struct fdtable *fdt = rcu_dereference_raw(files->fdt);
-		struct file __rcu **fdentry;
-
-		if (unlikely(fd >= fdt->max_fds))
-			return NULL;
-
-		fdentry = fdt->fd + array_index_nospec(fd, fdt->max_fds);
-		file = rcu_dereference_raw(*fdentry);
-		if (unlikely(!file))
-			return NULL;
-
-		if (unlikely(file->f_mode & mask))
-			return NULL;
-
-		/*
-		 * Ok, we have a file pointer. However, because we do
-		 * this all locklessly under RCU, we may be racing with
-		 * that file being closed.
-		 *
-		 * Such a race can take two forms:
-		 *
-		 *  (a) the file ref already went down to zero,
-		 *      and get_file_rcu_many() fails. Just try
-		 *      again:
-		 */
-		if (unlikely(!get_file_rcu_many(file, refs)))
-			continue;
-
-		/*
-		 *  (b) the file table entry has changed under us.
-		 *       Note that we don't need to re-check the 'fdt->fd'
-		 *       pointer having changed, because it always goes
-		 *       hand-in-hand with 'fdt'.
-		 *
-		 * If so, we need to put our refs and try again.
-		 */
-		if (unlikely(rcu_dereference_raw(files->fdt) != fdt) ||
-		    unlikely(rcu_dereference_raw(*fdentry) != file)) {
-			fput_many(file, refs);
-			continue;
-		}
-
-		/*
-		 * Ok, we have a ref to the file, and checked that it
-		 * still exists.
-		 */
-		return file;
-	}
-}
-
 static struct file *__fget_files(struct files_struct *files, unsigned int fd,
 				 fmode_t mask, unsigned int refs)
 {
 	struct file *file;
 
 	rcu_read_lock();
-	file = __fget_files_rcu(files, fd, mask, refs);
+loop:
+	file = fcheck_files(files, fd);
+	if (file) {
+		/* File object ref couldn't be taken.
+		 * dup2() atomicity guarantee is the reason
+		 * we loop to catch the new file (or NULL pointer)
+		 */
+		if (file->f_mode & mask)
+			file = NULL;
+		else if (!get_file_rcu_many(file, refs))
+			goto loop;
+	}
 	rcu_read_unlock();
 
 	return file;
@@ -1095,7 +973,6 @@ static int do_dup2(struct files_struct *files,
 	struct file *file, unsigned fd, unsigned flags)
 __releases(&files->file_lock)
 {
-	int err;
 	struct file *tofree;
 	struct fdtable *fdt;
 
@@ -1115,17 +992,8 @@ __releases(&files->file_lock)
 	 */
 	fdt = files_fdtable(files);
 	tofree = fdt->fd[fd];
-	if (!tofree && fd_is_open(fd, fdt)) {
-		err = -EBUSY;
-		goto out;
-	}
-#ifdef CONFIG_CGROUP_FILES
-	if (files_cgroup_enabled() &&
-	    !tofree && files_cgroup_alloc_fd(files, 1)) {
-		err = -EMFILE;
-		goto out;
-	}
-#endif
+	if (!tofree && fd_is_open(fd, fdt))
+		goto Ebusy;
 	get_file(file);
 	rcu_assign_pointer(fdt->fd[fd], file);
 	__set_open_fd(fd, fdt);
@@ -1140,9 +1008,9 @@ __releases(&files->file_lock)
 
 	return fd;
 
-out:
+Ebusy:
 	spin_unlock(&files->file_lock);
-	return err;
+	return -EBUSY;
 }
 
 int replace_fd(unsigned fd, struct file *file, unsigned flags)

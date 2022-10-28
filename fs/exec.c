@@ -73,6 +73,9 @@
 #include "internal.h"
 
 #include <trace/events/sched.h>
+#include <trace/hooks/sched.h>
+
+EXPORT_TRACEPOINT_SYMBOL_GPL(task_rename);
 
 static int bprm_creds_from_file(struct linux_binprm *bprm);
 
@@ -143,6 +146,16 @@ SYSCALL_DEFINE1(uselib, const char __user *, library)
 	if (IS_ERR(file))
 		goto out;
 
+	/*
+	 * may_open() has already checked for this, so it should be
+	 * impossible to trip now. But we need to be extra cautious
+	 * and check again at the very end too.
+	 */
+	error = -EACCES;
+	if (WARN_ON_ONCE(!S_ISREG(file_inode(file)->i_mode) ||
+			 path_noexec(&file->f_path)))
+		goto exit;
+
 	fsnotify_open(file);
 
 	error = -ENOEXEC;
@@ -161,7 +174,7 @@ SYSCALL_DEFINE1(uselib, const char __user *, library)
 			break;
 	}
 	read_unlock(&binfmt_lock);
-
+exit:
 	fput(file);
 out:
   	return error;
@@ -222,7 +235,7 @@ static struct page *get_arg_page(struct linux_binprm *bprm, unsigned long pos,
 
 static void put_arg_page(struct page *page)
 {
-	put_page(page);
+	put_user_page(page);
 }
 
 static void free_arg_pages(struct linux_binprm *bprm)
@@ -484,14 +497,8 @@ static int bprm_stack_limits(struct linux_binprm *bprm)
 	 * the stack. They aren't stored until much later when we can't
 	 * signal to the parent that the child has run out of stack space.
 	 * Instead, calculate it here so it's possible to fail gracefully.
-	 *
-	 * In the case of argc = 0, make sure there is space for adding a
-	 * empty string (which will bump argc to 1), to ensure confused
-	 * userspace programs don't start processing from argv[1], thinking
-	 * argc can never be 0, to keep them from walking envp by accident.
-	 * See do_execveat_common().
 	 */
-	ptr_size = (max(bprm->argc, 1) + bprm->envc) * sizeof(void *);
+	ptr_size = (bprm->argc + bprm->envc) * sizeof(void *);
 	if (limit <= ptr_size)
 		return -E2BIG;
 	limit -= ptr_size;
@@ -909,6 +916,16 @@ static struct file *do_open_execat(int fd, struct filename *name, int flags)
 	if (IS_ERR(file))
 		goto out;
 
+	/*
+	 * may_open() has already checked for this, so it should be
+	 * impossible to trip now. But we need to be extra cautious
+	 * and check again at the very end too.
+	 */
+	err = -EACCES;
+	if (WARN_ON_ONCE(!S_ISREG(file_inode(file)->i_mode) ||
+			 path_noexec(&file->f_path)))
+		goto exit;
+
 	err = deny_write_access(file);
 	if (err)
 		goto exit;
@@ -1213,6 +1230,7 @@ void __set_task_comm(struct task_struct *tsk, const char *buf, bool exec)
 	strlcpy(tsk->comm, buf, sizeof(tsk->comm));
 	task_unlock(tsk);
 	perf_event_comm(tsk, exec);
+	trace_android_vh_set_task_comm(tsk);
 }
 
 /*
@@ -1224,7 +1242,6 @@ void __set_task_comm(struct task_struct *tsk, const char *buf, bool exec)
 int begin_new_exec(struct linux_binprm * bprm)
 {
 	struct task_struct *me = current;
-	struct files_struct *displaced;
 	int retval;
 
 	/* Once we are committed compute the creds */
@@ -1243,13 +1260,6 @@ int begin_new_exec(struct linux_binprm * bprm)
 	retval = de_thread(me);
 	if (retval)
 		goto out;
-
-	/* Ensure the files table is not shared. */
-	retval = unshare_files(&displaced);
-	if (retval)
-		goto out;
-	if (displaced)
-		put_files_struct(displaced);
 
 	/*
 	 * Must be called _before_ exec_mmap() as bprm->mm is
@@ -1274,9 +1284,6 @@ int begin_new_exec(struct linux_binprm * bprm)
 	bprm->mm = NULL;
 
 #ifdef CONFIG_POSIX_TIMERS
-	spin_lock_irq(&me->sighand->siglock);
-	posix_cpu_timers_exit(me);
-	spin_unlock_irq(&me->sighand->siglock);
 	exit_itimers(me->signal);
 	flush_itimer_signals();
 #endif
@@ -1773,6 +1780,7 @@ static int bprm_execve(struct linux_binprm *bprm,
 		       int fd, struct filename *filename, int flags)
 {
 	struct file *file;
+	struct files_struct *displaced;
 	int retval;
 
 	/*
@@ -1780,9 +1788,13 @@ static int bprm_execve(struct linux_binprm *bprm,
 	 */
 	io_uring_task_cancel();
 
-	retval = prepare_bprm_creds(bprm);
+	retval = unshare_files(&displaced);
 	if (retval)
 		return retval;
+
+	retval = prepare_bprm_creds(bprm);
+	if (retval)
+		goto out_files;
 
 	check_unsafe_exec(bprm);
 	current->in_execve = 1;
@@ -1797,14 +1809,11 @@ static int bprm_execve(struct linux_binprm *bprm,
 	bprm->file = file;
 	/*
 	 * Record that a name derived from an O_CLOEXEC fd will be
-	 * inaccessible after exec.  This allows the code in exec to
-	 * choose to fail when the executable is not mmaped into the
-	 * interpreter and an open file descriptor is not passed to
-	 * the interpreter.  This makes for a better user experience
-	 * than having the interpreter start and then immediately fail
-	 * when it finds the executable is inaccessible.
+	 * inaccessible after exec. Relies on having exclusive access to
+	 * current->files (due to unshare_files above).
 	 */
-	if (bprm->fdpath && get_close_on_exec(fd))
+	if (bprm->fdpath &&
+	    close_on_exec(fd, rcu_dereference_raw(current->files->fdt)))
 		bprm->interp_flags |= BINPRM_FLAGS_PATH_INACCESSIBLE;
 
 	/* Set the unchanging part of bprm->cred */
@@ -1822,6 +1831,8 @@ static int bprm_execve(struct linux_binprm *bprm,
 	rseq_execve(current);
 	acct_update_integrals(current);
 	task_numa_free(current, false);
+	if (displaced)
+		put_files_struct(displaced);
 	return retval;
 
 out:
@@ -1837,6 +1848,10 @@ out:
 out_unmark:
 	current->fs->in_exec = 0;
 	current->in_execve = 0;
+
+out_files:
+	if (displaced)
+		reset_files_struct(displaced);
 
 	return retval;
 }
@@ -1875,9 +1890,6 @@ static int do_execveat_common(int fd, struct filename *filename,
 	}
 
 	retval = count(argv, MAX_ARG_STRINGS);
-	if (retval == 0)
-		pr_warn_once("process '%s' launched '%s' with NULL argv: empty string added\n",
-			     current->comm, bprm->filename);
 	if (retval < 0)
 		goto out_free;
 	bprm->argc = retval;
@@ -1903,19 +1915,6 @@ static int do_execveat_common(int fd, struct filename *filename,
 	retval = copy_strings(bprm->argc, argv, bprm);
 	if (retval < 0)
 		goto out_free;
-
-	/*
-	 * When argv is empty, add an empty string ("") as argv[0] to
-	 * ensure confused userspace programs that start processing
-	 * from argv[1] won't end up walking envp. See also
-	 * bprm_stack_limits().
-	 */
-	if (bprm->argc == 0) {
-		retval = copy_string_kernel("", bprm);
-		if (retval < 0)
-			goto out_free;
-		bprm->argc = 1;
-	}
 
 	retval = bprm_execve(bprm, fd, filename, flags);
 out_free:
@@ -1945,8 +1944,6 @@ int kernel_execve(const char *kernel_filename,
 	}
 
 	retval = count_strings_kernel(argv);
-	if (WARN_ON_ONCE(retval == 0))
-		retval = -EINVAL;
 	if (retval < 0)
 		goto out_free;
 	bprm->argc = retval;

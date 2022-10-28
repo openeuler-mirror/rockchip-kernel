@@ -122,6 +122,7 @@ source "fs/quota/Kconfig"
 source "fs/autofs/Kconfig"
 source "fs/fuse/Kconfig"
 source "fs/overlayfs/Kconfig"
+source "fs/incfs/Kconfig"
 
 menu "Caches"
 
@@ -236,31 +237,6 @@ config HUGETLBFS
 
 config HUGETLB_PAGE
 	def_bool HUGETLBFS
-
-config HUGETLB_PAGE_FREE_VMEMMAP
-	def_bool HUGETLB_PAGE
-	depends on X86_64 || ARM64
-	depends on SPARSEMEM_VMEMMAP
-
-config HUGETLB_PAGE_FREE_VMEMMAP_DEFAULT_ON
-	bool "Default freeing vmemmap pages of HugeTLB to on"
-	default n
-	depends on HUGETLB_PAGE_FREE_VMEMMAP
-	help
-	  When using HUGETLB_PAGE_FREE_VMEMMAP, the freeing unused vmemmap
-	  pages associated with each HugeTLB page is default off. Say Y here
-	  to enable freeing vmemmap pages of HugeTLB by default. It can then
-	  be disabled on the command line via hugetlb_free_vmemmap=off.
-
-config DYNAMIC_HUGETLB
-	bool "Dynamic HugeTLB"
-	depends on X86_64
-	depends on HUGETLBFS
-	depends on MEMCG && CGROUP_HUGETLB
-	help
-	  Dynamic hugepage are used in memcg and can be splited into small
-	  pages automatically. The tasks in the memcg prefer to alloc dynamic
-	  hugepage.
 
 config MEMFD_CREATE
 	def_bool TMPFS || HUGETLBFS
@@ -377,12 +353,3 @@ config IO_WQ
 	bool
 
 endmenu
-
-config RESCTRL
-	bool "Support Memory Partitioning and Monitoring"
-	default n
-	depends on MPAM
-	select KERNFS
-	help
-	  Memory Partitioning and Monitoring. More exactly Memory system
-	  performance resource Partitioning and Monitoring

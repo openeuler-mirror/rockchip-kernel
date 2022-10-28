@@ -603,6 +603,7 @@ xfs_bmap_btree_to_extents(
 
 	ASSERT(cur);
 	ASSERT(whichfork != XFS_COW_FORK);
+	ASSERT(ifp->if_flags & XFS_IFEXTENTS);
 	ASSERT(ifp->if_format == XFS_DINODE_FMT_BTREE);
 	ASSERT(be16_to_cpu(rblock->bb_level) == 1);
 	ASSERT(be16_to_cpu(rblock->bb_numrecs) == 1);
@@ -1078,13 +1079,21 @@ xfs_bmap_add_attrfork(
 
 	blks = XFS_ADDAFORK_SPACE_RES(mp);
 
-	error = xfs_trans_alloc_inode(ip, &M_RES(mp)->tr_addafork, blks, 0,
-			rsvd, &tp);
+	error = xfs_trans_alloc(mp, &M_RES(mp)->tr_addafork, blks, 0,
+			rsvd ? XFS_TRANS_RESERVE : 0, &tp);
 	if (error)
 		return error;
+
+	xfs_ilock(ip, XFS_ILOCK_EXCL);
+	error = xfs_trans_reserve_quota_nblks(tp, ip, blks, 0, rsvd ?
+			XFS_QMOPT_RES_REGBLKS | XFS_QMOPT_FORCE_RES :
+			XFS_QMOPT_RES_REGBLKS);
+	if (error)
+		goto trans_cancel;
 	if (XFS_IFORK_Q(ip))
 		goto trans_cancel;
 
+	xfs_trans_ijoin(tp, ip, 0);
 	xfs_trans_log_inode(tp, ip, XFS_ILOG_CORE);
 	error = xfs_bmap_set_attrforkoff(ip, size, &version);
 	if (error)
@@ -3992,7 +4001,8 @@ xfs_bmapi_reserve_delalloc(
 	 * blocks.  This number gets adjusted later.  We return if we haven't
 	 * allocated blocks already inside this loop.
 	 */
-	error = xfs_quota_reserve_blkres(ip, alen);
+	error = xfs_trans_reserve_quota_nblks(NULL, ip, (long)alen, 0,
+						XFS_QMOPT_RES_REGBLKS);
 	if (error)
 		return error;
 
@@ -4038,7 +4048,8 @@ out_unreserve_blocks:
 	xfs_mod_fdblocks(mp, alen, false);
 out_unreserve_quota:
 	if (XFS_IS_QUOTA_ON(mp))
-		xfs_quota_unreserve_blkres(ip, alen);
+		xfs_trans_unreserve_quota_nblks(NULL, ip, (long)alen, 0,
+						XFS_QMOPT_RES_REGBLKS);
 	return error;
 }
 
@@ -4815,8 +4826,9 @@ xfs_bmap_del_extent_delay(
 	 * sb counters as we might have to borrow some blocks for the
 	 * indirect block accounting.
 	 */
-	ASSERT(!isrt);
-	error = xfs_quota_unreserve_blkres(ip, del->br_blockcount);
+	error = xfs_trans_reserve_quota_nblks(NULL, ip,
+			-((long)del->br_blockcount), 0,
+			isrt ? XFS_QMOPT_RES_RTBLKS : XFS_QMOPT_RES_REGBLKS);
 	if (error)
 		return error;
 	ip->i_delayed_blks -= del->br_blockcount;
@@ -5265,6 +5277,7 @@ __xfs_bunmapi(
 	xfs_fsblock_t		sum;
 	xfs_filblks_t		len = *rlen;	/* length to unmap in file */
 	xfs_fileoff_t		max_len;
+	xfs_agnumber_t		prev_agno = NULLAGNUMBER, agno;
 	xfs_fileoff_t		end;
 	struct xfs_iext_cursor	icur;
 	bool			done = false;
@@ -5355,6 +5368,16 @@ __xfs_bunmapi(
 		del = got;
 		wasdel = isnullstartblock(del.br_startblock);
 
+		/*
+		 * Make sure we don't touch multiple AGF headers out of order
+		 * in a single transaction, as that could cause AB-BA deadlocks.
+		 */
+		if (!wasdel && !isrt) {
+			agno = XFS_FSB_TO_AGNO(mp, del.br_startblock);
+			if (prev_agno != NULLAGNUMBER && prev_agno > agno)
+				break;
+			prev_agno = agno;
+		}
 		if (got.br_startoff < start) {
 			del.br_startoff = start;
 			del.br_blockcount -= start - got.br_startoff;
@@ -6205,11 +6228,6 @@ xfs_bmap_validate_extent(
 	struct xfs_mount	*mp = ip->i_mount;
 	xfs_fsblock_t		endfsb;
 	bool			isrt;
-
-	if (irec->br_startblock + irec->br_blockcount <= irec->br_startblock)
-		return __this_address;
-	if (irec->br_startoff + irec->br_blockcount <= irec->br_startoff)
-		return __this_address;
 
 	isrt = XFS_IS_REALTIME_INODE(ip);
 	endfsb = irec->br_startblock + irec->br_blockcount - 1;

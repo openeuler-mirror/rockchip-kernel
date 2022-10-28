@@ -43,6 +43,9 @@
 #include "internal.h"
 #include "mount.h"
 
+#define CREATE_TRACE_POINTS
+#include <trace/events/namei.h>
+
 /* [Feb-1997 T. Schoebel-Theuer]
  * Fundamental changes in the pathname lookup mechanisms (namei)
  * were necessary because of omirr.  The reason is that omirr needs
@@ -504,7 +507,7 @@ struct nameidata {
 	struct qstr	last;
 	struct path	root;
 	struct inode	*inode; /* path.dentry.d_inode */
-	unsigned int	flags, state;
+	unsigned int	flags;
 	unsigned	seq, m_seq, r_seq;
 	int		last_type;
 	unsigned	depth;
@@ -523,10 +526,6 @@ struct nameidata {
 	umode_t		dir_mode;
 } __randomize_layout;
 
-#define ND_ROOT_PRESET 1
-#define ND_ROOT_GRABBED 2
-#define ND_JUMPED 4
-
 static void set_nameidata(struct nameidata *p, int dfd, struct filename *name)
 {
 	struct nameidata *old = current->nameidata;
@@ -535,7 +534,6 @@ static void set_nameidata(struct nameidata *p, int dfd, struct filename *name)
 	p->name = name;
 	p->total_link_count = old ? old->total_link_count : 0;
 	p->saved = old;
-	p->state = 0;
 	current->nameidata = p;
 }
 
@@ -598,9 +596,9 @@ static void terminate_walk(struct nameidata *nd)
 		path_put(&nd->path);
 		for (i = 0; i < nd->depth; i++)
 			path_put(&nd->stack[i].link);
-		if (nd->state & ND_ROOT_GRABBED) {
+		if (nd->flags & LOOKUP_ROOT_GRABBED) {
 			path_put(&nd->root);
-			nd->state &= ~ND_ROOT_GRABBED;
+			nd->flags &= ~LOOKUP_ROOT_GRABBED;
 		}
 	} else {
 		nd->flags &= ~LOOKUP_RCU;
@@ -656,9 +654,9 @@ static bool legitimize_root(struct nameidata *nd)
 	if (!nd->root.mnt && (nd->flags & LOOKUP_IS_SCOPED))
 		return false;
 	/* Nothing to do if nd->root is zero or is managed by the VFS user. */
-	if (!nd->root.mnt || (nd->state & ND_ROOT_PRESET))
+	if (!nd->root.mnt || (nd->flags & LOOKUP_ROOT))
 		return true;
-	nd->state |= ND_ROOT_GRABBED;
+	nd->flags |= LOOKUP_ROOT_GRABBED;
 	return legitimize_path(nd, &nd->root, nd->root_seq);
 }
 
@@ -775,6 +773,81 @@ static inline int d_revalidate(struct dentry *dentry, unsigned int flags)
 		return 1;
 }
 
+#define INIT_PATH_SIZE 64
+
+static void success_walk_trace(struct nameidata *nd)
+{
+	struct path *pt = &nd->path;
+	struct inode *i = nd->inode;
+	char buf[INIT_PATH_SIZE], *try_buf;
+	int cur_path_size;
+	char *p;
+
+	/* When eBPF/ tracepoint is disabled, keep overhead low. */
+	if (!trace_inodepath_enabled())
+		return;
+
+	/* First try stack allocated buffer. */
+	try_buf = buf;
+	cur_path_size = INIT_PATH_SIZE;
+
+	while (cur_path_size <= PATH_MAX) {
+		/* Free previous heap allocation if we are now trying
+		 * a second or later heap allocation.
+		 */
+		if (try_buf != buf)
+			kfree(try_buf);
+
+		/* All but the first alloc are on the heap. */
+		if (cur_path_size != INIT_PATH_SIZE) {
+			try_buf = kmalloc(cur_path_size, GFP_KERNEL);
+			if (!try_buf) {
+				try_buf = buf;
+				sprintf(try_buf, "error:buf_alloc_failed");
+				break;
+			}
+		}
+
+		p = d_path(pt, try_buf, cur_path_size);
+
+		if (!IS_ERR(p)) {
+			char *end = mangle_path(try_buf, p, "\n");
+
+			if (end) {
+				try_buf[end - try_buf] = 0;
+				break;
+			} else {
+				/* On mangle errors, double path size
+				 * till PATH_MAX.
+				 */
+				cur_path_size = cur_path_size << 1;
+				continue;
+			}
+		}
+
+		if (PTR_ERR(p) == -ENAMETOOLONG) {
+			/* If d_path complains that name is too long,
+			 * then double path size till PATH_MAX.
+			 */
+			cur_path_size = cur_path_size << 1;
+			continue;
+		}
+
+		sprintf(try_buf, "error:d_path_failed_%lu",
+			-1 * PTR_ERR(p));
+		break;
+	}
+
+	if (cur_path_size > PATH_MAX)
+		sprintf(try_buf, "error:d_path_name_too_long");
+
+	trace_inodepath(i, try_buf);
+
+	if (try_buf != buf)
+		kfree(try_buf);
+	return;
+}
+
 /**
  * complete_walk - successful completion of path walk
  * @nd:  pointer nameidata
@@ -795,9 +868,8 @@ static int complete_walk(struct nameidata *nd)
 		 * We don't want to zero nd->root for scoped-lookups or
 		 * externally-managed nd->root.
 		 */
-		if (!(nd->state & ND_ROOT_PRESET))
-			if (!(nd->flags & LOOKUP_IS_SCOPED))
-				nd->root.mnt = NULL;
+		if (!(nd->flags & (LOOKUP_ROOT | LOOKUP_IS_SCOPED)))
+			nd->root.mnt = NULL;
 		if (!try_to_unlazy(nd))
 			return -ECHILD;
 	}
@@ -823,15 +895,21 @@ static int complete_walk(struct nameidata *nd)
 			return -EXDEV;
 	}
 
-	if (likely(!(nd->state & ND_JUMPED)))
+	if (likely(!(nd->flags & LOOKUP_JUMPED))) {
+		success_walk_trace(nd);
 		return 0;
+	}
 
-	if (likely(!(dentry->d_flags & DCACHE_OP_WEAK_REVALIDATE)))
+	if (likely(!(dentry->d_flags & DCACHE_OP_WEAK_REVALIDATE))) {
+		success_walk_trace(nd);
 		return 0;
+	}
 
 	status = dentry->d_op->d_weak_revalidate(dentry, nd->flags);
-	if (status > 0)
+	if (status > 0) {
+		success_walk_trace(nd);
 		return 0;
+	}
 
 	if (!status)
 		status = -ESTALE;
@@ -861,7 +939,7 @@ static int set_root(struct nameidata *nd)
 		} while (read_seqcount_retry(&fs->seq, seq));
 	} else {
 		get_fs_root(fs, &nd->root);
-		nd->state |= ND_ROOT_GRABBED;
+		nd->flags |= LOOKUP_ROOT_GRABBED;
 	}
 	return 0;
 }
@@ -894,7 +972,7 @@ static int nd_jump_root(struct nameidata *nd)
 		path_get(&nd->path);
 		nd->inode = nd->path.dentry->d_inode;
 	}
-	nd->state |= ND_JUMPED;
+	nd->flags |= LOOKUP_JUMPED;
 	return 0;
 }
 
@@ -922,7 +1000,7 @@ int nd_jump_link(struct path *path)
 	path_put(&nd->path);
 	nd->path = *path;
 	nd->inode = nd->path.dentry->d_inode;
-	nd->state |= ND_JUMPED;
+	nd->flags |= LOOKUP_JUMPED;
 	return 0;
 
 err:
@@ -1344,7 +1422,7 @@ static bool __follow_mount_rcu(struct nameidata *nd, struct path *path,
 			if (mounted) {
 				path->mnt = &mounted->mnt;
 				dentry = path->dentry = mounted->mnt.mnt_root;
-				nd->state |= ND_JUMPED;
+				nd->flags |= LOOKUP_JUMPED;
 				*seqp = read_seqcount_begin(&dentry->d_seq);
 				*inode = dentry->d_inode;
 				/*
@@ -1389,7 +1467,7 @@ static inline int handle_mounts(struct nameidata *nd, struct dentry *dentry,
 		if (unlikely(nd->flags & LOOKUP_NO_XDEV))
 			ret = -EXDEV;
 		else
-			nd->state |= ND_JUMPED;
+			nd->flags |= LOOKUP_JUMPED;
 	}
 	if (unlikely(ret)) {
 		dput(path->dentry);
@@ -2135,7 +2213,7 @@ static int link_path_walk(const char *name, struct nameidata *nd)
 			case 2:
 				if (name[1] == '.') {
 					type = LAST_DOTDOT;
-					nd->state |= ND_JUMPED;
+					nd->flags |= LOOKUP_JUMPED;
 				}
 				break;
 			case 1:
@@ -2143,7 +2221,7 @@ static int link_path_walk(const char *name, struct nameidata *nd)
 		}
 		if (likely(type == LAST_NORM)) {
 			struct dentry *parent = nd->path.dentry;
-			nd->state &= ~ND_JUMPED;
+			nd->flags &= ~LOOKUP_JUMPED;
 			if (unlikely(parent->d_flags & DCACHE_OP_HASH)) {
 				struct qstr this = { { .hash_len = hash_len }, .name = name };
 				err = parent->d_op->d_hash(parent, &this);
@@ -2213,15 +2291,14 @@ static const char *path_init(struct nameidata *nd, unsigned flags)
 	if (flags & LOOKUP_RCU)
 		rcu_read_lock();
 
-	nd->flags = flags;
-	nd->state |= ND_JUMPED;
+	nd->flags = flags | LOOKUP_JUMPED;
 	nd->depth = 0;
 
 	nd->m_seq = __read_seqcount_begin(&mount_lock.seqcount);
 	nd->r_seq = __read_seqcount_begin(&rename_lock.seqcount);
 	smp_rmb();
 
-	if (nd->state & ND_ROOT_PRESET) {
+	if (flags & LOOKUP_ROOT) {
 		struct dentry *root = nd->root.dentry;
 		struct inode *inode = root->d_inode;
 		if (*s && unlikely(!d_can_lookup(root)))
@@ -2298,7 +2375,7 @@ static const char *path_init(struct nameidata *nd, unsigned flags)
 			nd->root_seq = nd->seq;
 		} else {
 			path_get(&nd->root);
-			nd->state |= ND_ROOT_GRABBED;
+			nd->flags |= LOOKUP_ROOT_GRABBED;
 		}
 	}
 	return s;
@@ -2337,7 +2414,7 @@ static int path_lookupat(struct nameidata *nd, unsigned flags, struct path *path
 		;
 	if (!err && unlikely(nd->flags & LOOKUP_MOUNTPOINT)) {
 		err = handle_lookup_down(nd);
-		nd->state &= ~ND_JUMPED; // no d_weak_revalidate(), please...
+		nd->flags &= ~LOOKUP_JUMPED; // no d_weak_revalidate(), please...
 	}
 	if (!err)
 		err = complete_walk(nd);
@@ -2361,11 +2438,11 @@ int filename_lookup(int dfd, struct filename *name, unsigned flags,
 	struct nameidata nd;
 	if (IS_ERR(name))
 		return PTR_ERR(name);
-	set_nameidata(&nd, dfd, name);
 	if (unlikely(root)) {
 		nd.root = *root;
-		nd.state = ND_ROOT_PRESET;
+		flags |= LOOKUP_ROOT;
 	}
+	set_nameidata(&nd, dfd, name);
 	retval = path_lookupat(&nd, flags | LOOKUP_RCU, path);
 	if (unlikely(retval == -ECHILD))
 		retval = path_lookupat(&nd, flags, path);
@@ -3400,15 +3477,18 @@ struct file *do_filp_open(int dfd, struct filename *pathname,
 	return filp;
 }
 
-struct file *do_file_open_root(const struct path *root,
+struct file *do_file_open_root(struct dentry *dentry, struct vfsmount *mnt,
 		const char *name, const struct open_flags *op)
 {
 	struct nameidata nd;
 	struct file *file;
 	struct filename *filename;
-	int flags = op->lookup_flags;
+	int flags = op->lookup_flags | LOOKUP_ROOT;
 
-	if (d_is_symlink(root->dentry) && op->intent & LOOKUP_OPEN)
+	nd.root.mnt = mnt;
+	nd.root.dentry = dentry;
+
+	if (d_is_symlink(dentry) && op->intent & LOOKUP_OPEN)
 		return ERR_PTR(-ELOOP);
 
 	filename = getname_kernel(name);
@@ -3416,8 +3496,6 @@ struct file *do_file_open_root(const struct path *root,
 		return ERR_CAST(filename);
 
 	set_nameidata(&nd, -1, filename);
-	nd.root = *root;
-	nd.state = ND_ROOT_PRESET;
 	file = path_openat(&nd, op, flags | LOOKUP_RCU);
 	if (unlikely(file == ERR_PTR(-ECHILD)))
 		file = path_openat(&nd, op, flags);
@@ -3715,12 +3793,13 @@ int vfs_rmdir(struct inode *dir, struct dentry *dentry)
 	dentry->d_inode->i_flags |= S_DEAD;
 	dont_mount(dentry);
 	detach_mounts(dentry);
+	fsnotify_rmdir(dir, dentry);
 
 out:
 	inode_unlock(dentry->d_inode);
 	dput(dentry);
 	if (!error)
-		d_delete_notify(dir, dentry);
+		d_delete(dentry);
 	return error;
 }
 EXPORT_SYMBOL(vfs_rmdir);
@@ -3818,9 +3897,7 @@ int vfs_unlink(struct inode *dir, struct dentry *dentry, struct inode **delegate
 		return -EPERM;
 
 	inode_lock(target);
-	if (IS_SWAPFILE(target))
-		error = -EPERM;
-	else if (is_local_mountpoint(dentry))
+	if (is_local_mountpoint(dentry))
 		error = -EBUSY;
 	else {
 		error = security_inode_unlink(dir, dentry);
@@ -3832,6 +3909,7 @@ int vfs_unlink(struct inode *dir, struct dentry *dentry, struct inode **delegate
 			if (!error) {
 				dont_mount(dentry);
 				detach_mounts(dentry);
+				fsnotify_unlink(dir, dentry);
 			}
 		}
 	}
@@ -3839,11 +3917,9 @@ out:
 	inode_unlock(target);
 
 	/* We don't d_delete() NFS sillyrenamed files--they still exist. */
-	if (!error && dentry->d_flags & DCACHE_NFSFS_RENAMED) {
-		fsnotify_unlink(dir, dentry);
-	} else if (!error) {
+	if (!error && !(dentry->d_flags & DCACHE_NFSFS_RENAMED)) {
 		fsnotify_link_count(target);
-		d_delete_notify(dir, dentry);
+		d_delete(dentry);
 	}
 
 	return error;
@@ -4283,10 +4359,6 @@ int vfs_rename(struct inode *old_dir, struct dentry *old_dentry,
 		lock_two_nondirectories(source, target);
 	else if (target)
 		inode_lock(target);
-
-	error = -EPERM;
-	if (IS_SWAPFILE(source) || (target && IS_SWAPFILE(target)))
-		goto out;
 
 	error = -EBUSY;
 	if (is_local_mountpoint(old_dentry) || is_local_mountpoint(new_dentry))

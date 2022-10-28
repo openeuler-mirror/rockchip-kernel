@@ -756,12 +756,8 @@ static loff_t ext2_max_size(int bits)
 	res += 1LL << (bits-2);
 	res += 1LL << (2*(bits-2));
 	res += 1LL << (3*(bits-2));
-	/* Compute how many metadata blocks are needed */
-	meta_blocks = 1;
-	meta_blocks += 1 + ppb;
-	meta_blocks += 1 + ppb + ppb * ppb;
 	/* Does block tree limit file size? */
-	if (res + meta_blocks <= upper_limit)
+	if (res < upper_limit)
 		goto check_lfs;
 
 	res = upper_limit;
@@ -1403,6 +1399,7 @@ static int ext2_statfs (struct dentry * dentry, struct kstatfs * buf)
 	struct super_block *sb = dentry->d_sb;
 	struct ext2_sb_info *sbi = EXT2_SB(sb);
 	struct ext2_super_block *es = sbi->s_es;
+	u64 fsid;
 
 	spin_lock(&sbi->s_lock);
 
@@ -1456,7 +1453,9 @@ static int ext2_statfs (struct dentry * dentry, struct kstatfs * buf)
 	buf->f_ffree = ext2_count_free_inodes(sb);
 	es->s_free_inodes_count = cpu_to_le32(buf->f_ffree);
 	buf->f_namelen = EXT2_NAME_LEN;
-	buf->f_fsid = uuid_to_fsid(es->s_uuid);
+	fsid = le64_to_cpup((void *)es->s_uuid) ^
+	       le64_to_cpup((void *)es->s_uuid + sizeof(u64));
+	buf->f_fsid = u64_to_fsid(fsid);
 	spin_unlock(&sbi->s_lock);
 	return 0;
 }

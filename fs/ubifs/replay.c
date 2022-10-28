@@ -299,8 +299,8 @@ static int apply_replay_entry(struct ubifs_info *c, struct replay_entry *r)
  * entries @a and @b by comparing their sequence numer.  Returns %1 if @a has
  * greater sequence number and %-1 otherwise.
  */
-static int replay_entries_cmp(void *priv, const struct list_head *a,
-			      const struct list_head *b)
+static int replay_entries_cmp(void *priv, struct list_head *a,
+			      struct list_head *b)
 {
 	struct ubifs_info *c = priv;
 	struct replay_entry *ra, *rb;
@@ -830,7 +830,7 @@ out:
 
 out_dump:
 	ubifs_err(c, "bad node is at LEB %d:%d", lnum, snod->offs);
-	ubifs_dump_node(c, snod->node, c->leb_size - snod->offs);
+	ubifs_dump_node(c, snod->node);
 	ubifs_scan_destroy(sleb);
 	return -EINVAL;
 }
@@ -1126,7 +1126,7 @@ out:
 out_dump:
 	ubifs_err(c, "log error detected while replaying the log at LEB %d:%d",
 		  lnum, offs + snod->offs);
-	ubifs_dump_node(c, snod->node, c->leb_size - snod->offs);
+	ubifs_dump_node(c, snod->node);
 	ubifs_scan_destroy(sleb);
 	return -EINVAL;
 }

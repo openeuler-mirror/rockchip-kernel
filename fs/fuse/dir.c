@@ -389,6 +389,45 @@ out:
 	return ERR_PTR(err);
 }
 
+/*
+ * Get the canonical path. Since we must translate to a path, this must be done
+ * in the context of the userspace daemon, however, the userspace daemon cannot
+ * look up paths on its own. Instead, we handle the lookup as a special case
+ * inside of the write request.
+ */
+static void fuse_dentry_canonical_path(const struct path *path,
+				       struct path *canonical_path)
+{
+	struct inode *inode = d_inode(path->dentry);
+	//struct fuse_conn *fc = get_fuse_conn(inode);
+	struct fuse_mount *fm = get_fuse_mount_super(path->mnt->mnt_sb);
+	FUSE_ARGS(args);
+	char *path_name;
+	int err;
+
+	path_name = (char *)get_zeroed_page(GFP_KERNEL);
+	if (!path_name)
+		goto default_path;
+
+	args.opcode = FUSE_CANONICAL_PATH;
+	args.nodeid = get_node_id(inode);
+	args.in_numargs = 0;
+	args.out_numargs = 1;
+	args.out_args[0].size = PATH_MAX;
+	args.out_args[0].value = path_name;
+	args.canonical_path = canonical_path;
+	args.out_argvar = 1;
+
+	err = fuse_simple_request(fm, &args);
+	free_page((unsigned long)path_name);
+	if (err > 0)
+		return;
+default_path:
+	canonical_path->dentry = path->dentry;
+	canonical_path->mnt = path->mnt;
+	path_get(canonical_path);
+}
+
 const struct dentry_operations fuse_dentry_operations = {
 	.d_revalidate	= fuse_dentry_revalidate,
 	.d_delete	= fuse_dentry_delete,
@@ -397,6 +436,7 @@ const struct dentry_operations fuse_dentry_operations = {
 	.d_release	= fuse_dentry_release,
 #endif
 	.d_automount	= fuse_dentry_automount,
+	.d_canonical_path = fuse_dentry_canonical_path,
 };
 
 const struct dentry_operations fuse_root_dentry_operations = {
@@ -529,6 +569,7 @@ static int fuse_create_open(struct inode *dir, struct dentry *entry,
 {
 	int err;
 	struct inode *inode;
+	struct fuse_conn *fc = get_fuse_conn(dir);
 	struct fuse_mount *fm = get_fuse_mount(dir);
 	FUSE_ARGS(args);
 	struct fuse_forget_link *forget;
@@ -560,12 +601,6 @@ static int fuse_create_open(struct inode *dir, struct dentry *entry,
 	inarg.flags = flags;
 	inarg.mode = mode;
 	inarg.umask = current_umask();
-
-	if (fm->fc->handle_killpriv_v2 && (flags & O_TRUNC) &&
-	    !(flags & O_EXCL) && !capable(CAP_FSETID)) {
-		inarg.open_flags |= FUSE_OPEN_KILL_SUIDGID;
-	}
-
 	args.opcode = FUSE_CREATE;
 	args.nodeid = get_node_id(dir);
 	args.in_numargs = 2;
@@ -590,6 +625,7 @@ static int fuse_create_open(struct inode *dir, struct dentry *entry,
 	ff->fh = outopen.fh;
 	ff->nodeid = outentry.nodeid;
 	ff->open_flags = outopen.open_flags;
+	fuse_passthrough_setup(fc, ff, &outopen);
 	inode = fuse_iget(dir->i_sb, outentry.nodeid, outentry.generation,
 			  &outentry.attr, entry_attr_timeout(&outentry), 0);
 	if (!inode) {
@@ -797,19 +833,11 @@ static int fuse_symlink(struct inode *dir, struct dentry *entry,
 	return create_new_entry(fm, &args, dir, entry, S_IFLNK);
 }
 
-void fuse_flush_time_update(struct inode *inode)
-{
-	int err = sync_inode_metadata(inode, 1);
-
-	mapping_set_error(inode->i_mapping, err);
-}
-
 void fuse_update_ctime(struct inode *inode)
 {
 	if (!IS_NOCMTIME(inode)) {
 		inode->i_ctime = current_time(inode);
 		mark_inode_dirty_sync(inode);
-		fuse_flush_time_update(inode);
 	}
 }
 
@@ -1138,7 +1166,7 @@ int fuse_reverse_inval_entry(struct fuse_conn *fc, u64 parent_nodeid,
 	if (!parent)
 		return -ENOENT;
 
-	inode_lock_nested(parent, I_MUTEX_PARENT);
+	inode_lock(parent);
 	if (!S_ISDIR(parent->i_mode))
 		goto unlock;
 
@@ -1699,20 +1727,10 @@ int fuse_do_setattr(struct dentry *dentry, struct iattr *attr,
 		inarg.valid |= FATTR_FH;
 		inarg.fh = ff->fh;
 	}
-
-	/* Kill suid/sgid for non-directory chown unconditionally */
-	if (fc->handle_killpriv_v2 && !S_ISDIR(inode->i_mode) &&
-	    attr->ia_valid & (ATTR_UID | ATTR_GID))
-		inarg.valid |= FATTR_KILL_SUIDGID;
-
 	if (attr->ia_valid & ATTR_SIZE) {
 		/* For mandatory locking in truncate */
 		inarg.valid |= FATTR_LOCKOWNER;
 		inarg.lock_owner = fuse_lock_owner_id(fc, current->files);
-
-		/* Kill suid/sgid for truncate only if no CAP_FSETID */
-		if (fc->handle_killpriv_v2 && !capable(CAP_FSETID))
-			inarg.valid |= FATTR_KILL_SUIDGID;
 	}
 	fuse_setattr_fill(fc, &args, inode, &inarg, &outarg);
 	err = fuse_simple_request(fm, &args);
@@ -1803,7 +1821,7 @@ static int fuse_setattr(struct dentry *entry, struct iattr *attr)
 		 *
 		 * This should be done on write(), truncate() and chown().
 		 */
-		if (!fc->handle_killpriv && !fc->handle_killpriv_v2) {
+		if (!fc->handle_killpriv) {
 			/*
 			 * ia_mode calculation may have used stale i_mode.
 			 * Refresh and recalculate.

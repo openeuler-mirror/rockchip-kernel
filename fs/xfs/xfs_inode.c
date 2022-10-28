@@ -802,7 +802,6 @@ xfs_ialloc(
 	xfs_buf_t	**ialloc_context,
 	xfs_inode_t	**ipp)
 {
-	struct inode *dir = pip ? VFS_I(pip) : NULL;
 	struct xfs_mount *mp = tp->t_mountp;
 	xfs_ino_t	ino;
 	xfs_inode_t	*ip;
@@ -848,17 +847,18 @@ xfs_ialloc(
 		return error;
 	ASSERT(ip != NULL);
 	inode = VFS_I(ip);
+	inode->i_mode = mode;
 	set_nlink(inode, nlink);
+	inode->i_uid = current_fsuid();
 	inode->i_rdev = rdev;
 	ip->i_d.di_projid = prid;
 
-	if (dir && !(dir->i_mode & S_ISGID) &&
-			(mp->m_flags & XFS_MOUNT_GRPID)) {
-		inode->i_uid = current_fsuid();
-		inode->i_gid = dir->i_gid;
-		inode->i_mode = mode;
+	if (pip && XFS_INHERIT_GID(pip)) {
+		inode->i_gid = VFS_I(pip)->i_gid;
+		if ((VFS_I(pip)->i_mode & S_ISGID) && S_ISDIR(mode))
+			inode->i_mode |= S_ISGID;
 	} else {
-		inode_init_owner(inode, dir, mode);
+		inode->i_gid = current_fsgid();
 	}
 
 	/*
@@ -907,7 +907,7 @@ xfs_ialloc(
 			xfs_inode_inherit_flags(ip, pip);
 		if (pip && (pip->i_d.di_flags2 & XFS_DIFLAG2_ANY))
 			xfs_inode_inherit_flags2(ip, pip);
-		fallthrough;
+		/* FALLTHROUGH */
 	case S_IFLNK:
 		ip->i_df.if_format = XFS_DINODE_FMT_EXTENTS;
 		ip->i_df.if_flags = XFS_IFEXTENTS;
@@ -1157,19 +1157,25 @@ xfs_create(
 	 * the case we'll drop the one we have and get a more
 	 * appropriate transaction later.
 	 */
-	error = xfs_trans_alloc_icreate(mp, tres, udqp, gdqp, pdqp, resblks,
-			&tp);
+	error = xfs_trans_alloc(mp, tres, resblks, 0, 0, &tp);
 	if (error == -ENOSPC) {
 		/* flush outstanding delalloc blocks and retry */
 		xfs_flush_inodes(mp);
-		error = xfs_trans_alloc_icreate(mp, tres, udqp, gdqp, pdqp,
-				resblks, &tp);
+		error = xfs_trans_alloc(mp, tres, resblks, 0, 0, &tp);
 	}
 	if (error)
-		goto out_release_dquots;
+		goto out_release_inode;
 
 	xfs_ilock(dp, XFS_ILOCK_EXCL | XFS_ILOCK_PARENT);
 	unlock_dp_on_error = true;
+
+	/*
+	 * Reserve disk quota and the inode.
+	 */
+	error = xfs_trans_reserve_quota(tp, mp, udqp, gdqp,
+						pdqp, resblks, 1, 0);
+	if (error)
+		goto out_trans_cancel;
 
 	/*
 	 * A newly created regular or special file just has one directory
@@ -1245,7 +1251,7 @@ xfs_create(
 		xfs_finish_inode_setup(ip);
 		xfs_irele(ip);
 	}
- out_release_dquots:
+
 	xfs_qm_dqrele(udqp);
 	xfs_qm_dqrele(gdqp);
 	xfs_qm_dqrele(pdqp);
@@ -1289,10 +1295,14 @@ xfs_create_tmpfile(
 	resblks = XFS_IALLOC_SPACE_RES(mp);
 	tres = &M_RES(mp)->tr_create_tmpfile;
 
-	error = xfs_trans_alloc_icreate(mp, tres, udqp, gdqp, pdqp, resblks,
-			&tp);
+	error = xfs_trans_alloc(mp, tres, resblks, 0, 0, &tp);
 	if (error)
-		goto out_release_dquots;
+		goto out_release_inode;
+
+	error = xfs_trans_reserve_quota(tp, mp, udqp, gdqp,
+						pdqp, resblks, 1, 0);
+	if (error)
+		goto out_trans_cancel;
 
 	error = xfs_dir_ialloc(&tp, dp, mode, 0, 0, prid, &ip);
 	if (error)
@@ -1335,7 +1345,7 @@ xfs_create_tmpfile(
 		xfs_finish_inode_setup(ip);
 		xfs_irele(ip);
 	}
- out_release_dquots:
+
 	xfs_qm_dqrele(udqp);
 	xfs_qm_dqrele(gdqp);
 	xfs_qm_dqrele(pdqp);
@@ -1782,59 +1792,6 @@ xfs_inactive_ifree(
 }
 
 /*
- * Returns true if we need to update the on-disk metadata before we can free
- * the memory used by this inode.  Updates include freeing post-eof
- * preallocations; freeing COW staging extents; and marking the inode free in
- * the inobt if it is on the unlinked list.
- */
-bool
-xfs_inode_needs_inactive(
-	struct xfs_inode	*ip)
-{
-	struct xfs_mount	*mp = ip->i_mount;
-	struct xfs_ifork	*cow_ifp = XFS_IFORK_PTR(ip, XFS_COW_FORK);
-
-	/*
-	 * If the inode is already free, then there can be nothing
-	 * to clean up here.
-	 */
-	if (VFS_I(ip)->i_mode == 0)
-		return false;
-
-	/* If this is a read-only mount, don't do this (would generate I/O) */
-	if (mp->m_flags & XFS_MOUNT_RDONLY)
-		return false;
-
-	/* If the log isn't running, push inodes straight to reclaim. */
-	if (XFS_FORCED_SHUTDOWN(mp) || (mp->m_flags & XFS_MOUNT_NORECOVERY))
-		return false;
-
-	/* Metadata inodes require explicit resource cleanup. */
-	if (xfs_is_metadata_inode(ip))
-		return false;
-
-	/* Want to clean out the cow blocks if there are any. */
-	if (cow_ifp && cow_ifp->if_bytes > 0)
-		return true;
-
-	/* Unlinked files must be freed. */
-	if (VFS_I(ip)->i_nlink == 0)
-		return true;
-
-	/*
-	 * This file isn't being freed, so check if there are post-eof blocks
-	 * to free.  @force is true because we are evicting an inode from the
-	 * cache.  Post-eof blocks must be freed, lest we end up with broken
-	 * free space accounting.
-	 *
-	 * Note: don't bother with iolock here since lockdep complains about
-	 * acquiring it in reclaim context. We have the only reference to the
-	 * inode at this point anyways.
-	 */
-	return xfs_can_free_eofblocks(ip, true);
-}
-
-/*
  * xfs_inactive
  *
  * This is called when the vnode reference count for the vnode
@@ -1856,7 +1813,7 @@ xfs_inactive(
 	 */
 	if (VFS_I(ip)->i_mode == 0) {
 		ASSERT(ip->i_df.if_broot_bytes == 0);
-		goto out;
+		return;
 	}
 
 	mp = ip->i_mount;
@@ -1864,11 +1821,7 @@ xfs_inactive(
 
 	/* If this is a read-only mount, don't do this (would generate I/O) */
 	if (mp->m_flags & XFS_MOUNT_RDONLY)
-		goto out;
-
-	/* Metadata inodes require explicit resource cleanup. */
-	if (xfs_is_metadata_inode(ip))
-		goto out;
+		return;
 
 	/* Try to clean out the cow blocks if there are any. */
 	if (xfs_inode_has_cow_data(ip))
@@ -1887,7 +1840,7 @@ xfs_inactive(
 		if (xfs_can_free_eofblocks(ip, true))
 			xfs_free_eofblocks(ip);
 
-		goto out;
+		return;
 	}
 
 	if (S_ISREG(VFS_I(ip)->i_mode) &&
@@ -1897,14 +1850,14 @@ xfs_inactive(
 
 	error = xfs_qm_dqattach(ip);
 	if (error)
-		goto out;
+		return;
 
 	if (S_ISLNK(VFS_I(ip)->i_mode))
 		error = xfs_inactive_symlink(ip);
 	else if (truncate)
 		error = xfs_inactive_truncate(ip);
 	if (error)
-		goto out;
+		return;
 
 	/*
 	 * If there are attributes associated with the file then blow them away
@@ -1914,7 +1867,7 @@ xfs_inactive(
 	if (XFS_IFORK_Q(ip)) {
 		error = xfs_attr_inactive(ip);
 		if (error)
-			goto out;
+			return;
 	}
 
 	ASSERT(!ip->i_afp);
@@ -1923,12 +1876,12 @@ xfs_inactive(
 	/*
 	 * Free the inode.
 	 */
-	xfs_inactive_ifree(ip);
+	error = xfs_inactive_ifree(ip);
+	if (error)
+		return;
 
-out:
 	/*
-	 * We're done making metadata updates for this inode, so we can release
-	 * the attached dquots.
+	 * Release the dquots held by inode, if any.
 	 */
 	xfs_qm_dqdetach(ip);
 }
@@ -2801,7 +2754,7 @@ xfs_iunpin(
 	trace_xfs_inode_unpin_nowait(ip, _RET_IP_);
 
 	/* Give the log a push to start the unpinning I/O */
-	xfs_log_force_seq(ip->i_mount, ip->i_itemp->ili_commit_seq, 0, NULL);
+	xfs_log_force_lsn(ip->i_mount, ip->i_itemp->ili_last_lsn, 0, NULL);
 
 }
 
@@ -2931,19 +2884,6 @@ xfs_remove(
 		error = xfs_droplink(tp, ip);
 		if (error)
 			goto out_trans_cancel;
-
-		/*
-		 * Point the unlinked child directory's ".." entry to the root
-		 * directory to eliminate back-references to inodes that may
-		 * get freed before the child directory is closed.  If the fs
-		 * gets shrunk, this can lead to dirent inode validation errors.
-		 */
-		if (dp->i_ino != tp->t_mountp->m_sb.sb_rootino) {
-			error = xfs_dir_replace(tp, ip, &xfs_name_dotdot,
-					tp->t_mountp->m_sb.sb_rootino, 0);
-			if (error)
-				return error;
-		}
 	} else {
 		/*
 		 * When removing a non-directory we need to log the parent
@@ -3212,7 +3152,7 @@ xfs_rename(
 	struct xfs_trans	*tp;
 	struct xfs_inode	*wip = NULL;		/* whiteout inode */
 	struct xfs_inode	*inodes[__XFS_SORT_INODES];
-	int			i;
+	struct xfs_buf		*agibp;
 	int			num_inodes = __XFS_SORT_INODES;
 	bool			new_parent = (src_dp != target_dp);
 	bool			src_is_directory = S_ISDIR(VFS_I(src_ip)->i_mode);
@@ -3326,30 +3266,6 @@ xfs_rename(
 	}
 
 	/*
-	 * Lock the AGI buffers we need to handle bumping the nlink of the
-	 * whiteout inode off the unlinked list and to handle dropping the
-	 * nlink of the target inode.  Per locking order rules, do this in
-	 * increasing AG order and before directory block allocation tries to
-	 * grab AGFs because we grab AGIs before AGFs.
-	 *
-	 * The (vfs) caller must ensure that if src is a directory then
-	 * target_ip is either null or an empty directory.
-	 */
-	for (i = 0; i < num_inodes && inodes[i] != NULL; i++) {
-		if (inodes[i] == wip ||
-		    (inodes[i] == target_ip &&
-		     (VFS_I(target_ip)->i_nlink == 1 || src_is_directory))) {
-			struct xfs_buf	*bp;
-			xfs_agnumber_t	agno;
-
-			agno = XFS_INO_TO_AGNO(mp, inodes[i]->i_ino);
-			error = xfs_read_agi(mp, tp, agno, &bp);
-			if (error)
-				goto out_trans_cancel;
-		}
-	}
-
-	/*
 	 * Directory entry creation below may acquire the AGF. Remove
 	 * the whiteout from the unlinked list first to preserve correct
 	 * AGI/AGF locking order. This dirties the transaction so failures
@@ -3401,6 +3317,22 @@ xfs_rename(
 		 * In case there is already an entry with the same
 		 * name at the destination directory, remove it first.
 		 */
+
+		/*
+		 * Check whether the replace operation will need to allocate
+		 * blocks.  This happens when the shortform directory lacks
+		 * space and we have to convert it to a block format directory.
+		 * When more blocks are necessary, we must lock the AGI first
+		 * to preserve locking order (AGI -> AGF).
+		 */
+		if (xfs_dir2_sf_replace_needblock(target_dp, src_ip->i_ino)) {
+			error = xfs_read_agi(mp, tp,
+					XFS_INO_TO_AGNO(mp, target_ip->i_ino),
+					&agibp);
+			if (error)
+				goto out_trans_cancel;
+		}
+
 		error = xfs_dir_replace(tp, target_dp, target_name,
 					src_ip->i_ino, spaceres);
 		if (error)
@@ -3777,16 +3709,16 @@ int
 xfs_log_force_inode(
 	struct xfs_inode	*ip)
 {
-	xfs_csn_t		seq = 0;
+	xfs_lsn_t		lsn = 0;
 
 	xfs_ilock(ip, XFS_ILOCK_SHARED);
 	if (xfs_ipincount(ip))
-		seq = ip->i_itemp->ili_commit_seq;
+		lsn = ip->i_itemp->ili_last_lsn;
 	xfs_iunlock(ip, XFS_ILOCK_SHARED);
 
-	if (!seq)
+	if (!lsn)
 		return 0;
-	return xfs_log_force_seq(ip->i_mount, seq, XFS_LOG_SYNC, NULL);
+	return xfs_log_force_lsn(ip->i_mount, lsn, XFS_LOG_SYNC, NULL);
 }
 
 /*

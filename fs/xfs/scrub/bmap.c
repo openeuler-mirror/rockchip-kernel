@@ -263,7 +263,7 @@ xchk_bmap_iextent_xref(
 	error = xchk_ag_init(info->sc, agno, &info->sc->sa);
 	if (!xchk_fblock_process_error(info->sc, info->whichfork,
 			irec->br_startoff, &error))
-		goto out_free;
+		return;
 
 	xchk_xref_is_used_space(info->sc, agbno, len);
 	xchk_xref_is_not_inode_chunk(info->sc, agbno, len);
@@ -272,7 +272,7 @@ xchk_bmap_iextent_xref(
 	case XFS_DATA_FORK:
 		if (xfs_is_reflink_inode(info->sc->ip))
 			break;
-		fallthrough;
+		/* fall through */
 	case XFS_ATTR_FORK:
 		xchk_xref_is_not_shared(info->sc, agbno,
 				irec->br_blockcount);
@@ -283,7 +283,6 @@ xchk_bmap_iextent_xref(
 		break;
 	}
 
-out_free:
 	xchk_ag_free(info->sc, &info->sc->sa);
 }
 

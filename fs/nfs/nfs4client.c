@@ -1155,7 +1155,7 @@ struct nfs_server *nfs4_create_server(struct fs_context *fc)
 	if (!server)
 		return ERR_PTR(-ENOMEM);
 
-	server->cred = get_cred(fc->cred);
+	server->cred = get_cred(current_cred());
 
 	auth_probe = ctx->auth_info.flavor_len < 1;
 
@@ -1330,11 +1330,8 @@ int nfs4_update_server(struct nfs_server *server, const char *hostname,
 	}
 	nfs_put_client(clp);
 
-	if (server->nfs_client->cl_hostname == NULL) {
+	if (server->nfs_client->cl_hostname == NULL)
 		server->nfs_client->cl_hostname = kstrdup(hostname, GFP_KERNEL);
-		if (server->nfs_client->cl_hostname == NULL)
-			return -ENOMEM;
-	}
 	nfs_server_insert_lists(server);
 
 	return nfs_probe_destination(server);

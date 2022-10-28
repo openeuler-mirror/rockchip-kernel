@@ -41,7 +41,6 @@
 #include <linux/fs.h>
 #include <linux/path.h>
 #include <linux/timekeeping.h>
-#include <linux/elf.h>
 
 #include <linux/uaccess.h>
 #include <asm/mmu_context.h>
@@ -756,8 +755,8 @@ void do_coredump(const kernel_siginfo_t *siginfo)
 			task_lock(&init_task);
 			get_fs_root(init_task.fs, &root);
 			task_unlock(&init_task);
-			cprm.file = file_open_root(&root, cn.corename,
-						   open_flags, 0600);
+			cprm.file = file_open_root(root.dentry, root.mnt,
+				cn.corename, open_flags, 0600);
 			path_put(&root);
 		} else {
 			cprm.file = filp_open(cn.corename, open_flags, 0600);
@@ -901,7 +900,7 @@ int dump_user_range(struct coredump_params *cprm, unsigned long start,
 
 			stop = !dump_emit(cprm, kaddr, PAGE_SIZE);
 			kunmap(page);
-			put_page(page);
+			put_user_page(page);
 		} else {
 			stop = !dump_skip(cprm, PAGE_SIZE);
 		}
@@ -970,8 +969,6 @@ static bool always_dump_vma(struct vm_area_struct *vma)
 	return false;
 }
 
-#define DUMP_SIZE_MAYBE_ELFHDR_PLACEHOLDER 1
-
 /*
  * Decide how much of @vma's contents should be included in a core dump.
  */
@@ -1031,20 +1028,9 @@ static unsigned long vma_dump_size(struct vm_area_struct *vma,
 	 * dump the first page to aid in determining what was mapped here.
 	 */
 	if (FILTER(ELF_HEADERS) &&
-	    vma->vm_pgoff == 0 && (vma->vm_flags & VM_READ)) {
-		if ((READ_ONCE(file_inode(vma->vm_file)->i_mode) & 0111) != 0)
-			return PAGE_SIZE;
-
-		/*
-		 * ELF libraries aren't always executable.
-		 * We'll want to check whether the mapping starts with the ELF
-		 * magic, but not now - we're holding the mmap lock,
-		 * so copy_from_user() doesn't work here.
-		 * Use a placeholder instead, and fix it up later in
-		 * dump_vma_snapshot().
-		 */
-		return DUMP_SIZE_MAYBE_ELFHDR_PLACEHOLDER;
-	}
+	    vma->vm_pgoff == 0 && (vma->vm_flags & VM_READ) &&
+	    (READ_ONCE(file_inode(vma->vm_file)->i_mode) & 0111) != 0)
+		return PAGE_SIZE;
 
 #undef	FILTER
 
@@ -1119,31 +1105,14 @@ int dump_vma_snapshot(struct coredump_params *cprm, int *vma_count,
 		m->end = vma->vm_end;
 		m->flags = vma->vm_flags;
 		m->dump_size = vma_dump_size(vma, cprm->mm_flags);
+
+		vma_data_size += m->dump_size;
 	}
 
 	mmap_write_unlock(mm);
 
-	if (WARN_ON(i != *vma_count)) {
-		kvfree(*vma_meta);
+	if (WARN_ON(i != *vma_count))
 		return -EFAULT;
-	}
-
-	for (i = 0; i < *vma_count; i++) {
-		struct core_vma_metadata *m = (*vma_meta) + i;
-
-		if (m->dump_size == DUMP_SIZE_MAYBE_ELFHDR_PLACEHOLDER) {
-			char elfmag[SELFMAG];
-
-			if (copy_from_user(elfmag, (void __user *)m->start, SELFMAG) ||
-					memcmp(elfmag, ELFMAG, SELFMAG) != 0) {
-				m->dump_size = 0;
-			} else {
-				m->dump_size = PAGE_SIZE;
-			}
-		}
-
-		vma_data_size += m->dump_size;
-	}
 
 	*vma_data_size_ptr = vma_data_size;
 	return 0;

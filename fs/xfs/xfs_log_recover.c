@@ -78,6 +78,8 @@ xlog_alloc_buffer(
 	struct xlog	*log,
 	int		nbblks)
 {
+	int align_mask = xfs_buftarg_dma_alignment(log->l_targ);
+
 	/*
 	 * Pass log block 0 since we don't have an addr yet, buffer will be
 	 * verified on read.
@@ -105,7 +107,7 @@ xlog_alloc_buffer(
 	if (nbblks > 1 && log->l_sectBBsize > 1)
 		nbblks += log->l_sectBBsize;
 	nbblks = round_up(nbblks, log->l_sectBBsize);
-	return kvzalloc(BBTOB(nbblks), GFP_KERNEL | __GFP_RETRY_MAYFAIL);
+	return kmem_alloc_io(BBTOB(nbblks), align_mask, KM_MAYFAIL | KM_ZERO);
 }
 
 /*
@@ -143,7 +145,7 @@ xlog_do_io(
 
 	error = xfs_rw_bdev(log->l_targ->bt_bdev, log->l_logBBstart + blk_no,
 			BBTOB(nbblks), data, op);
-	if (error && !xlog_is_shutdown(log)) {
+	if (error && !XFS_FORCED_SHUTDOWN(log->l_mp)) {
 		xfs_alert(log->l_mp,
 			  "log recovery %s I/O error at daddr 0x%llx len %d error %d",
 			  op == REQ_OP_WRITE ? "write" : "read",
@@ -2059,9 +2061,7 @@ xlog_recover_add_to_cont_trans(
 	old_ptr = item->ri_buf[item->ri_cnt-1].i_addr;
 	old_len = item->ri_buf[item->ri_cnt-1].i_len;
 
-	ptr = kvrealloc(old_ptr, old_len, len + old_len, GFP_KERNEL);
-	if (!ptr)
-		return -ENOMEM;
+	ptr = krealloc(old_ptr, len + old_len, GFP_KERNEL | __GFP_NOFAIL);
 	memcpy(&ptr[old_len], dp, len);
 	item->ri_buf[item->ri_cnt-1].i_len += len;
 	item->ri_buf[item->ri_cnt-1].i_addr = ptr;
@@ -2457,10 +2457,8 @@ xlog_finish_defer_ops(
 
 		error = xfs_trans_alloc(mp, &resv, dfc->dfc_blkres,
 				dfc->dfc_rtxres, XFS_TRANS_RESERVE, &tp);
-		if (error) {
-			xfs_force_shutdown(mp, SHUTDOWN_LOG_IO_ERROR);
+		if (error)
 			return error;
-		}
 
 		/*
 		 * Transfer to this new transaction all the dfops we captured
@@ -2791,13 +2789,6 @@ xlog_recover_process_iunlinks(
 		}
 		xfs_buf_rele(agibp);
 	}
-
-	/*
-	 * Flush the pending unlinked inodes to ensure that the inactivations
-	 * are fully completed on disk and the incore inodes can be reclaimed
-	 * before we signal that recovery is complete.
-	 */
-	xfs_inodegc_flush(mp);
 }
 
 STATIC void
@@ -3292,7 +3283,10 @@ xlog_do_recover(
 	if (error)
 		return error;
 
-	if (xlog_is_shutdown(log))
+	/*
+	 * If IO errors happened during recovery, bail out.
+	 */
+	if (XFS_FORCED_SHUTDOWN(mp))
 		return -EIO;
 
 	/*
@@ -3314,7 +3308,7 @@ xlog_do_recover(
 	xfs_buf_hold(bp);
 	error = _xfs_buf_read(bp, XBF_READ);
 	if (error) {
-		if (!xlog_is_shutdown(log)) {
+		if (!XFS_FORCED_SHUTDOWN(mp)) {
 			xfs_buf_ioerror_alert(bp, __this_address);
 			ASSERT(0);
 		}
@@ -3338,7 +3332,7 @@ xlog_do_recover(
 	xlog_recover_check_summary(log);
 
 	/* Normal transactions can now occur */
-	clear_bit(XLOG_ACTIVE_RECOVERY, &log->l_opstate);
+	log->l_flags &= ~XLOG_ACTIVE_RECOVERY;
 	return 0;
 }
 
@@ -3422,49 +3416,67 @@ xlog_recover(
 						     : "internal");
 
 		error = xlog_do_recover(log, head_blk, tail_blk);
-		set_bit(XLOG_RECOVERY_NEEDED, &log->l_opstate);
+		log->l_flags |= XLOG_RECOVERY_NEEDED;
 	}
 	return error;
 }
 
 /*
- * In the first part of recovery we replay inodes and buffers and build up the
- * list of intents which need to be processed. Here we process the intents and
- * clean up the on disk unlinked inode lists. This is separated from the first
- * part of recovery so that the root and real-time bitmap inodes can be read in
- * from disk in between the two stages.  This is necessary so that we can free
- * space in the real-time portion of the file system.
+ * In the first part of recovery we replay inodes and buffers and build
+ * up the list of extent free items which need to be processed.  Here
+ * we process the extent free items and clean up the on disk unlinked
+ * inode lists.  This is separated from the first part of recovery so
+ * that the root and real-time bitmap inodes can be read in from disk in
+ * between the two stages.  This is necessary so that we can free space
+ * in the real-time portion of the file system.
  */
 int
 xlog_recover_finish(
 	struct xlog	*log)
 {
-	int	error;
-
-	error = xlog_recover_process_intents(log);
-	if (error) {
-		/*
-		 * Cancel all the unprocessed intent items now so that we don't
-		 * leave them pinned in the AIL.  This can cause the AIL to
-		 * livelock on the pinned item if anyone tries to push the AIL
-		 * (inode reclaim does this) before we get around to
-		 * xfs_log_mount_cancel.
-		 */
-		xlog_recover_cancel_intents(log);
-		xfs_alert(log->l_mp, "Failed to recover intents");
-		xfs_force_shutdown(log->l_mp, SHUTDOWN_LOG_IO_ERROR);
-		return error;
-	}
-
 	/*
-	 * Sync the log to get all the intents out of the AIL.  This isn't
-	 * absolutely necessary, but it helps in case the unlink transactions
-	 * would have problems pushing the intents out of the way.
+	 * Now we're ready to do the transactions needed for the
+	 * rest of recovery.  Start with completing all the extent
+	 * free intent records and then process the unlinked inode
+	 * lists.  At this point, we essentially run in normal mode
+	 * except that we're still performing recovery actions
+	 * rather than accepting new requests.
 	 */
-	xfs_log_force(log->l_mp, XFS_LOG_SYNC);
+	if (log->l_flags & XLOG_RECOVERY_NEEDED) {
+		int	error;
+		error = xlog_recover_process_intents(log);
+		if (error) {
+			/*
+			 * Cancel all the unprocessed intent items now so that
+			 * we don't leave them pinned in the AIL.  This can
+			 * cause the AIL to livelock on the pinned item if
+			 * anyone tries to push the AIL (inode reclaim does
+			 * this) before we get around to xfs_log_mount_cancel.
+			 */
+			xlog_recover_cancel_intents(log);
+			xfs_alert(log->l_mp, "Failed to recover intents");
+			return error;
+		}
 
-	xlog_recover_process_iunlinks(log);
-	xlog_recover_check_summary(log);
+		/*
+		 * Sync the log to get all the intents out of the AIL.
+		 * This isn't absolutely necessary, but it helps in
+		 * case the unlink transactions would have problems
+		 * pushing the intents out of the way.
+		 */
+		xfs_log_force(log->l_mp, XFS_LOG_SYNC);
+
+		xlog_recover_process_iunlinks(log);
+
+		xlog_recover_check_summary(log);
+
+		xfs_notice(log->l_mp, "Ending recovery (logdev: %s)",
+				log->l_mp->m_logname ? log->l_mp->m_logname
+						     : "internal");
+		log->l_flags &= ~XLOG_RECOVERY_NEEDED;
+	} else {
+		xfs_info(log->l_mp, "Ending clean mount");
+	}
 	return 0;
 }
 
@@ -3472,7 +3484,7 @@ void
 xlog_recover_cancel(
 	struct xlog	*log)
 {
-	if (xlog_recovery_needed(log))
+	if (log->l_flags & XLOG_RECOVERY_NEEDED)
 		xlog_recover_cancel_intents(log);
 }
 

@@ -35,7 +35,6 @@
 #include "xfs_refcount_item.h"
 #include "xfs_bmap_item.h"
 #include "xfs_reflink.h"
-#include "xfs_pwork.h"
 
 #include <linux/magic.h>
 #include <linux/fs_context.h>
@@ -46,28 +45,6 @@ static const struct super_operations xfs_super_operations;
 static struct kset *xfs_kset;		/* top-level xfs sysfs dir */
 #ifdef DEBUG
 static struct xfs_kobj xfs_dbg_kobj;	/* global debug sysfs attrs */
-#endif
-
-#ifdef CONFIG_HOTPLUG_CPU
-static LIST_HEAD(xfs_mount_list);
-static DEFINE_SPINLOCK(xfs_mount_list_lock);
-
-static inline void xfs_mount_list_add(struct xfs_mount *mp)
-{
-	spin_lock(&xfs_mount_list_lock);
-	list_add(&mp->m_mount_list, &xfs_mount_list);
-	spin_unlock(&xfs_mount_list_lock);
-}
-
-static inline void xfs_mount_list_del(struct xfs_mount *mp)
-{
-	spin_lock(&xfs_mount_list_lock);
-	list_del(&mp->m_mount_list);
-	spin_unlock(&xfs_mount_list_lock);
-}
-#else /* !CONFIG_HOTPLUG_CPU */
-static inline void xfs_mount_list_add(struct xfs_mount *mp) {}
-static inline void xfs_mount_list_del(struct xfs_mount *mp) {}
 #endif
 
 enum xfs_dax_mode {
@@ -222,20 +199,23 @@ xfs_fs_show_options(
 		seq_printf(m, ",swidth=%d",
 				(int)XFS_FSB_TO_BB(mp, mp->m_swidth));
 
-	if (mp->m_qflags & XFS_UQUOTA_ENFD)
+	if (mp->m_qflags & (XFS_UQUOTA_ACCT|XFS_UQUOTA_ENFD))
 		seq_puts(m, ",usrquota");
 	else if (mp->m_qflags & XFS_UQUOTA_ACCT)
 		seq_puts(m, ",uqnoenforce");
 
-	if (mp->m_qflags & XFS_PQUOTA_ENFD)
-		seq_puts(m, ",prjquota");
-	else if (mp->m_qflags & XFS_PQUOTA_ACCT)
-		seq_puts(m, ",pqnoenforce");
-
-	if (mp->m_qflags & XFS_GQUOTA_ENFD)
-		seq_puts(m, ",grpquota");
-	else if (mp->m_qflags & XFS_GQUOTA_ACCT)
-		seq_puts(m, ",gqnoenforce");
+	if (mp->m_qflags & XFS_PQUOTA_ACCT) {
+		if (mp->m_qflags & XFS_PQUOTA_ENFD)
+			seq_puts(m, ",prjquota");
+		else
+			seq_puts(m, ",pqnoenforce");
+	}
+	if (mp->m_qflags & XFS_GQUOTA_ACCT) {
+		if (mp->m_qflags & XFS_GQUOTA_ENFD)
+			seq_puts(m, ",grpquota");
+		else
+			seq_puts(m, ",gqnoenforce");
+	}
 
 	if (!(mp->m_qflags & XFS_ALL_QUOTA_ACCT))
 		seq_puts(m, ",noquota");
@@ -513,48 +493,44 @@ xfs_init_mount_workqueues(
 	struct xfs_mount	*mp)
 {
 	mp->m_buf_workqueue = alloc_workqueue("xfs-buf/%s",
-			XFS_WQFLAGS(WQ_FREEZABLE | WQ_MEM_RECLAIM),
-			1, mp->m_super->s_id);
+			WQ_MEM_RECLAIM|WQ_FREEZABLE, 1, mp->m_super->s_id);
 	if (!mp->m_buf_workqueue)
 		goto out;
 
 	mp->m_unwritten_workqueue = alloc_workqueue("xfs-conv/%s",
-			XFS_WQFLAGS(WQ_FREEZABLE | WQ_MEM_RECLAIM),
-			0, mp->m_super->s_id);
+			WQ_MEM_RECLAIM|WQ_FREEZABLE, 0, mp->m_super->s_id);
 	if (!mp->m_unwritten_workqueue)
 		goto out_destroy_buf;
 
-	mp->m_reclaim_workqueue = alloc_workqueue("xfs-reclaim/%s",
-			XFS_WQFLAGS(WQ_FREEZABLE | WQ_MEM_RECLAIM),
+	mp->m_cil_workqueue = alloc_workqueue("xfs-cil/%s",
+			WQ_MEM_RECLAIM | WQ_FREEZABLE | WQ_UNBOUND,
 			0, mp->m_super->s_id);
-	if (!mp->m_reclaim_workqueue)
+	if (!mp->m_cil_workqueue)
 		goto out_destroy_unwritten;
 
-	mp->m_blockgc_wq = alloc_workqueue("xfs-blockgc/%s",
-			XFS_WQFLAGS(WQ_UNBOUND | WQ_FREEZABLE | WQ_MEM_RECLAIM),
-			0, mp->m_super->s_id);
-	if (!mp->m_blockgc_wq)
+	mp->m_reclaim_workqueue = alloc_workqueue("xfs-reclaim/%s",
+			WQ_MEM_RECLAIM|WQ_FREEZABLE, 0, mp->m_super->s_id);
+	if (!mp->m_reclaim_workqueue)
+		goto out_destroy_cil;
+
+	mp->m_eofblocks_workqueue = alloc_workqueue("xfs-eofblocks/%s",
+			WQ_MEM_RECLAIM|WQ_FREEZABLE, 0, mp->m_super->s_id);
+	if (!mp->m_eofblocks_workqueue)
 		goto out_destroy_reclaim;
 
-	mp->m_inodegc_wq = alloc_workqueue("xfs-inodegc/%s",
-			XFS_WQFLAGS(WQ_FREEZABLE | WQ_MEM_RECLAIM),
-			1, mp->m_super->s_id);
-	if (!mp->m_inodegc_wq)
-		goto out_destroy_blockgc;
-
-	mp->m_sync_workqueue = alloc_workqueue("xfs-sync/%s",
-			XFS_WQFLAGS(WQ_FREEZABLE), 0, mp->m_super->s_id);
+	mp->m_sync_workqueue = alloc_workqueue("xfs-sync/%s", WQ_FREEZABLE, 0,
+					       mp->m_super->s_id);
 	if (!mp->m_sync_workqueue)
-		goto out_destroy_inodegc;
+		goto out_destroy_eofb;
 
 	return 0;
 
-out_destroy_inodegc:
-	destroy_workqueue(mp->m_inodegc_wq);
-out_destroy_blockgc:
-	destroy_workqueue(mp->m_blockgc_wq);
+out_destroy_eofb:
+	destroy_workqueue(mp->m_eofblocks_workqueue);
 out_destroy_reclaim:
 	destroy_workqueue(mp->m_reclaim_workqueue);
+out_destroy_cil:
+	destroy_workqueue(mp->m_cil_workqueue);
 out_destroy_unwritten:
 	destroy_workqueue(mp->m_unwritten_workqueue);
 out_destroy_buf:
@@ -568,9 +544,9 @@ xfs_destroy_mount_workqueues(
 	struct xfs_mount	*mp)
 {
 	destroy_workqueue(mp->m_sync_workqueue);
-	destroy_workqueue(mp->m_blockgc_wq);
-	destroy_workqueue(mp->m_inodegc_wq);
+	destroy_workqueue(mp->m_eofblocks_workqueue);
 	destroy_workqueue(mp->m_reclaim_workqueue);
+	destroy_workqueue(mp->m_cil_workqueue);
 	destroy_workqueue(mp->m_unwritten_workqueue);
 	destroy_workqueue(mp->m_buf_workqueue);
 }
@@ -619,6 +595,32 @@ xfs_fs_alloc_inode(
 	return NULL;
 }
 
+#ifdef DEBUG
+static void
+xfs_check_delalloc(
+	struct xfs_inode	*ip,
+	int			whichfork)
+{
+	struct xfs_ifork	*ifp = XFS_IFORK_PTR(ip, whichfork);
+	struct xfs_bmbt_irec	got;
+	struct xfs_iext_cursor	icur;
+
+	if (!ifp || !xfs_iext_lookup_extent(ip, ifp, 0, &icur, &got))
+		return;
+	do {
+		if (isnullstartblock(got.br_startblock)) {
+			xfs_warn(ip->i_mount,
+	"ino %llx %s fork has delalloc extent at [0x%llx:0x%llx]",
+				ip->i_ino,
+				whichfork == XFS_DATA_FORK ? "data" : "cow",
+				got.br_startoff, got.br_blockcount);
+		}
+	} while (xfs_iext_next_extent(ifp, &icur, &got));
+}
+#else
+#define xfs_check_delalloc(ip, whichfork)	do { } while (0)
+#endif
+
 /*
  * Now that the generic code is guaranteed not to be accessing
  * the linux inode, we can inactivate and reclaim the inode.
@@ -634,7 +636,31 @@ xfs_fs_destroy_inode(
 	ASSERT(!rwsem_is_locked(&inode->i_rwsem));
 	XFS_STATS_INC(ip->i_mount, vn_rele);
 	XFS_STATS_INC(ip->i_mount, vn_remove);
-	xfs_inode_mark_reclaimable(ip);
+
+	xfs_inactive(ip);
+
+	if (!XFS_FORCED_SHUTDOWN(ip->i_mount) && ip->i_delayed_blks) {
+		xfs_check_delalloc(ip, XFS_DATA_FORK);
+		xfs_check_delalloc(ip, XFS_COW_FORK);
+		ASSERT(0);
+	}
+
+	XFS_STATS_INC(ip->i_mount, vn_reclaim);
+
+	/*
+	 * We should never get here with one of the reclaim flags already set.
+	 */
+	ASSERT_ALWAYS(!xfs_iflags_test(ip, XFS_IRECLAIMABLE));
+	ASSERT_ALWAYS(!xfs_iflags_test(ip, XFS_IRECLAIM));
+
+	/*
+	 * We always use background reclaim here because even if the inode is
+	 * clean, it still may be under IO and hence we have wait for IO
+	 * completion to occur before we can reclaim the inode. The background
+	 * reclaim path handles this more efficiently than we can here, so
+	 * simply let background reclaim tear down all inodes.
+	 */
+	xfs_inode_set_reclaim_tag(ip);
 }
 
 static void
@@ -707,7 +733,7 @@ xfs_fs_drop_inode(
 	 * that.  See the comment for this inode flag.
 	 */
 	if (ip->i_flags & XFS_IRECOVERY) {
-		ASSERT(xlog_recovery_needed(ip->i_mount->m_log));
+		ASSERT(ip->i_mount->m_log->l_flags & XLOG_RECOVERY_NEEDED);
 		return 0;
 	}
 
@@ -730,8 +756,6 @@ xfs_fs_sync_fs(
 {
 	struct xfs_mount	*mp = XFS_M(sb);
 
-	trace_xfs_fs_sync_fs(mp, __return_address);
-
 	/*
 	 * Doing anything during the async pass would be counterproductive.
 	 */
@@ -746,25 +770,6 @@ xfs_fs_sync_fs(
 		 * active) instead of later (when it might not be).
 		 */
 		flush_delayed_work(&mp->m_log->l_work);
-	}
-
-	/*
-	 * If we are called with page faults frozen out, it means we are about
-	 * to freeze the transaction subsystem. Take the opportunity to shut
-	 * down inodegc because once SB_FREEZE_FS is set it's too late to
-	 * prevent inactivation races with freeze. The fs doesn't get called
-	 * again by the freezing process until after SB_FREEZE_FS has been set,
-	 * so it's now or never.  Same logic applies to speculative allocation
-	 * garbage collection.
-	 *
-	 * We don't care if this is a normal syncfs call that does this or
-	 * freeze that does this - we can run this multiple times without issue
-	 * and we won't race with a restart because a restart can only occur
-	 * when the state is either SB_FREEZE_FS or SB_FREEZE_COMPLETE.
-	 */
-	if (sb->s_writers.frozen == SB_FREEZE_PAGEFAULT) {
-		xfs_inodegc_stop(mp);
-		xfs_blockgc_stop(mp);
 	}
 
 	return 0;
@@ -784,9 +789,6 @@ xfs_fs_statfs(
 	uint64_t		fdblocks;
 	xfs_extlen_t		lsize;
 	int64_t			ffree;
-
-	/* Wait for whatever inactivations are in progress. */
-	xfs_inodegc_flush(mp);
 
 	statp->f_type = XFS_SUPER_MAGIC;
 	statp->f_namelen = MAXNAMELEN - 1;
@@ -916,23 +918,11 @@ xfs_fs_freeze(
 	 * set a GFP_NOFS context here to avoid recursion deadlocks.
 	 */
 	flags = memalloc_nofs_save();
+	xfs_stop_block_reaping(mp);
 	xfs_save_resvblks(mp);
 	xfs_quiesce_attr(mp);
 	ret = xfs_sync_sb(mp, true);
 	memalloc_nofs_restore(flags);
-
-	/*
-	 * For read-write filesystems, we need to restart the inodegc on error
-	 * because we stopped it at SB_FREEZE_PAGEFAULT level and a thaw is not
-	 * going to be run to restart it now.  We are at SB_FREEZE_FS level
-	 * here, so we can restart safely without racing with a stop in
-	 * xfs_fs_sync_fs().
-	 */
-	if (ret && !(mp->m_flags & XFS_MOUNT_RDONLY)) {
-		xfs_blockgc_start(mp);
-		xfs_inodegc_start(mp);
-	}
-
 	return ret;
 }
 
@@ -944,18 +934,7 @@ xfs_fs_unfreeze(
 
 	xfs_restore_resvblks(mp);
 	xfs_log_work_queue(mp);
-
-	/*
-	 * Don't reactivate the inodegc worker on a readonly filesystem because
-	 * inodes are sent directly to reclaim.  Don't reactivate the blockgc
-	 * worker because there are no speculative preallocations on a readonly
-	 * filesystem.
-	 */
-	if (!(mp->m_flags & XFS_MOUNT_RDONLY)) {
-		xfs_blockgc_start(mp);
-		xfs_inodegc_start(mp);
-	}
-
+	xfs_start_block_reaping(mp);
 	return 0;
 }
 
@@ -1016,8 +995,8 @@ xfs_finish_flags(
 		return -EROFS;
 	}
 
-	if ((mp->m_qflags & XFS_GQUOTA_ACCT) &&
-	    (mp->m_qflags & XFS_PQUOTA_ACCT) &&
+	if ((mp->m_qflags & (XFS_GQUOTA_ACCT | XFS_GQUOTA_ACTIVE)) &&
+	    (mp->m_qflags & (XFS_PQUOTA_ACCT | XFS_PQUOTA_ACTIVE)) &&
 	    !xfs_sb_version_has_pquotino(&mp->m_sb)) {
 		xfs_warn(mp,
 		  "Super block does not support project and group quota together");
@@ -1081,35 +1060,6 @@ xfs_destroy_percpu_counters(
 	percpu_counter_destroy(&mp->m_delalloc_blks);
 }
 
-static int
-xfs_inodegc_init_percpu(
-	struct xfs_mount	*mp)
-{
-	struct xfs_inodegc	*gc;
-	int			cpu;
-
-	mp->m_inodegc = alloc_percpu(struct xfs_inodegc);
-	if (!mp->m_inodegc)
-		return -ENOMEM;
-
-	for_each_possible_cpu(cpu) {
-		gc = per_cpu_ptr(mp->m_inodegc, cpu);
-		init_llist_head(&gc->list);
-		gc->items = 0;
-		INIT_WORK(&gc->work, xfs_inodegc_worker);
-	}
-	return 0;
-}
-
-static void
-xfs_inodegc_free_percpu(
-	struct xfs_mount	*mp)
-{
-	if (!mp->m_inodegc)
-		return;
-	free_percpu(mp->m_inodegc);
-}
-
 static void
 xfs_fs_put_super(
 	struct super_block	*sb)
@@ -1126,8 +1076,6 @@ xfs_fs_put_super(
 
 	xfs_freesb(mp);
 	free_percpu(mp->m_stats.xs_stats);
-	xfs_mount_list_del(mp);
-	xfs_inodegc_free_percpu(mp);
 	xfs_destroy_percpu_counters(mp);
 	xfs_destroy_mount_workqueues(mp);
 	xfs_close_devices(mp);
@@ -1205,22 +1153,6 @@ suffix_kstrtoint(
 	return ret;
 }
 
-static inline void
-xfs_fs_warn_deprecated(
-	struct fs_context	*fc,
-	struct fs_parameter	*param,
-	uint64_t		flag,
-	bool			value)
-{
-	/* Don't print the warning if reconfiguring and current mount point
-	 * already had the flag set
-	 */
-	if ((fc->purpose & FS_CONTEXT_FOR_RECONFIGURE) &&
-			!!(XFS_M(fc->root->d_sb)->m_flags & flag) == value)
-		return;
-	xfs_warn(fc->s_fs_info, "%s mount option is deprecated.", param->key);
-}
-
 /*
  * Set mount state from a mount option.
  *
@@ -1231,7 +1163,7 @@ xfs_fc_parse_param(
 	struct fs_context	*fc,
 	struct fs_parameter	*param)
 {
-	struct xfs_mount	*parsing_mp = fc->s_fs_info;
+	struct xfs_mount	*mp = fc->s_fs_info;
 	struct fs_parse_result	result;
 	int			size = 0;
 	int			opt;
@@ -1242,138 +1174,142 @@ xfs_fc_parse_param(
 
 	switch (opt) {
 	case Opt_logbufs:
-		parsing_mp->m_logbufs = result.uint_32;
+		mp->m_logbufs = result.uint_32;
 		return 0;
 	case Opt_logbsize:
-		if (suffix_kstrtoint(param->string, 10, &parsing_mp->m_logbsize))
+		if (suffix_kstrtoint(param->string, 10, &mp->m_logbsize))
 			return -EINVAL;
 		return 0;
 	case Opt_logdev:
-		kfree(parsing_mp->m_logname);
-		parsing_mp->m_logname = kstrdup(param->string, GFP_KERNEL);
-		if (!parsing_mp->m_logname)
+		kfree(mp->m_logname);
+		mp->m_logname = kstrdup(param->string, GFP_KERNEL);
+		if (!mp->m_logname)
 			return -ENOMEM;
 		return 0;
 	case Opt_rtdev:
-		kfree(parsing_mp->m_rtname);
-		parsing_mp->m_rtname = kstrdup(param->string, GFP_KERNEL);
-		if (!parsing_mp->m_rtname)
+		kfree(mp->m_rtname);
+		mp->m_rtname = kstrdup(param->string, GFP_KERNEL);
+		if (!mp->m_rtname)
 			return -ENOMEM;
 		return 0;
 	case Opt_allocsize:
 		if (suffix_kstrtoint(param->string, 10, &size))
 			return -EINVAL;
-		parsing_mp->m_allocsize_log = ffs(size) - 1;
-		parsing_mp->m_flags |= XFS_MOUNT_ALLOCSIZE;
+		mp->m_allocsize_log = ffs(size) - 1;
+		mp->m_flags |= XFS_MOUNT_ALLOCSIZE;
 		return 0;
 	case Opt_grpid:
 	case Opt_bsdgroups:
-		parsing_mp->m_flags |= XFS_MOUNT_GRPID;
+		mp->m_flags |= XFS_MOUNT_GRPID;
 		return 0;
 	case Opt_nogrpid:
 	case Opt_sysvgroups:
-		parsing_mp->m_flags &= ~XFS_MOUNT_GRPID;
+		mp->m_flags &= ~XFS_MOUNT_GRPID;
 		return 0;
 	case Opt_wsync:
-		parsing_mp->m_flags |= XFS_MOUNT_WSYNC;
+		mp->m_flags |= XFS_MOUNT_WSYNC;
 		return 0;
 	case Opt_norecovery:
-		parsing_mp->m_flags |= XFS_MOUNT_NORECOVERY;
+		mp->m_flags |= XFS_MOUNT_NORECOVERY;
 		return 0;
 	case Opt_noalign:
-		parsing_mp->m_flags |= XFS_MOUNT_NOALIGN;
+		mp->m_flags |= XFS_MOUNT_NOALIGN;
 		return 0;
 	case Opt_swalloc:
-		parsing_mp->m_flags |= XFS_MOUNT_SWALLOC;
+		mp->m_flags |= XFS_MOUNT_SWALLOC;
 		return 0;
 	case Opt_sunit:
-		parsing_mp->m_dalign = result.uint_32;
+		mp->m_dalign = result.uint_32;
 		return 0;
 	case Opt_swidth:
-		parsing_mp->m_swidth = result.uint_32;
+		mp->m_swidth = result.uint_32;
 		return 0;
 	case Opt_inode32:
-		parsing_mp->m_flags |= XFS_MOUNT_SMALL_INUMS;
+		mp->m_flags |= XFS_MOUNT_SMALL_INUMS;
 		return 0;
 	case Opt_inode64:
-		parsing_mp->m_flags &= ~XFS_MOUNT_SMALL_INUMS;
+		mp->m_flags &= ~XFS_MOUNT_SMALL_INUMS;
 		return 0;
 	case Opt_nouuid:
-		parsing_mp->m_flags |= XFS_MOUNT_NOUUID;
+		mp->m_flags |= XFS_MOUNT_NOUUID;
 		return 0;
 	case Opt_largeio:
-		parsing_mp->m_flags |= XFS_MOUNT_LARGEIO;
+		mp->m_flags |= XFS_MOUNT_LARGEIO;
 		return 0;
 	case Opt_nolargeio:
-		parsing_mp->m_flags &= ~XFS_MOUNT_LARGEIO;
+		mp->m_flags &= ~XFS_MOUNT_LARGEIO;
 		return 0;
 	case Opt_filestreams:
-		parsing_mp->m_flags |= XFS_MOUNT_FILESTREAMS;
+		mp->m_flags |= XFS_MOUNT_FILESTREAMS;
 		return 0;
 	case Opt_noquota:
-		parsing_mp->m_qflags &= ~XFS_ALL_QUOTA_ACCT;
-		parsing_mp->m_qflags &= ~XFS_ALL_QUOTA_ENFD;
+		mp->m_qflags &= ~XFS_ALL_QUOTA_ACCT;
+		mp->m_qflags &= ~XFS_ALL_QUOTA_ENFD;
+		mp->m_qflags &= ~XFS_ALL_QUOTA_ACTIVE;
 		return 0;
 	case Opt_quota:
 	case Opt_uquota:
 	case Opt_usrquota:
-		parsing_mp->m_qflags |= (XFS_UQUOTA_ACCT | XFS_UQUOTA_ENFD);
+		mp->m_qflags |= (XFS_UQUOTA_ACCT | XFS_UQUOTA_ACTIVE |
+				 XFS_UQUOTA_ENFD);
 		return 0;
 	case Opt_qnoenforce:
 	case Opt_uqnoenforce:
-		parsing_mp->m_qflags |= XFS_UQUOTA_ACCT;
-		parsing_mp->m_qflags &= ~XFS_UQUOTA_ENFD;
+		mp->m_qflags |= (XFS_UQUOTA_ACCT | XFS_UQUOTA_ACTIVE);
+		mp->m_qflags &= ~XFS_UQUOTA_ENFD;
 		return 0;
 	case Opt_pquota:
 	case Opt_prjquota:
-		parsing_mp->m_qflags |= (XFS_PQUOTA_ACCT | XFS_PQUOTA_ENFD);
+		mp->m_qflags |= (XFS_PQUOTA_ACCT | XFS_PQUOTA_ACTIVE |
+				 XFS_PQUOTA_ENFD);
 		return 0;
 	case Opt_pqnoenforce:
-		parsing_mp->m_qflags |= XFS_PQUOTA_ACCT;
-		parsing_mp->m_qflags &= ~XFS_PQUOTA_ENFD;
+		mp->m_qflags |= (XFS_PQUOTA_ACCT | XFS_PQUOTA_ACTIVE);
+		mp->m_qflags &= ~XFS_PQUOTA_ENFD;
 		return 0;
 	case Opt_gquota:
 	case Opt_grpquota:
-		parsing_mp->m_qflags |= (XFS_GQUOTA_ACCT | XFS_GQUOTA_ENFD);
+		mp->m_qflags |= (XFS_GQUOTA_ACCT | XFS_GQUOTA_ACTIVE |
+				 XFS_GQUOTA_ENFD);
 		return 0;
 	case Opt_gqnoenforce:
-		parsing_mp->m_qflags |= XFS_GQUOTA_ACCT;
-		parsing_mp->m_qflags &= ~XFS_GQUOTA_ENFD;
+		mp->m_qflags |= (XFS_GQUOTA_ACCT | XFS_GQUOTA_ACTIVE);
+		mp->m_qflags &= ~XFS_GQUOTA_ENFD;
 		return 0;
 	case Opt_discard:
-		parsing_mp->m_flags |= XFS_MOUNT_DISCARD;
+		mp->m_flags |= XFS_MOUNT_DISCARD;
 		return 0;
 	case Opt_nodiscard:
-		parsing_mp->m_flags &= ~XFS_MOUNT_DISCARD;
+		mp->m_flags &= ~XFS_MOUNT_DISCARD;
 		return 0;
 #ifdef CONFIG_FS_DAX
 	case Opt_dax:
-		xfs_mount_set_dax_mode(parsing_mp, XFS_DAX_ALWAYS);
+		xfs_mount_set_dax_mode(mp, XFS_DAX_ALWAYS);
 		return 0;
 	case Opt_dax_enum:
-		xfs_mount_set_dax_mode(parsing_mp, result.uint_32);
+		xfs_mount_set_dax_mode(mp, result.uint_32);
 		return 0;
 #endif
 	/* Following mount options will be removed in September 2025 */
 	case Opt_ikeep:
-		xfs_fs_warn_deprecated(fc, param, XFS_MOUNT_IKEEP, true);
-		parsing_mp->m_flags |= XFS_MOUNT_IKEEP;
+		xfs_warn(mp, "%s mount option is deprecated.", param->key);
+		mp->m_flags |= XFS_MOUNT_IKEEP;
 		return 0;
 	case Opt_noikeep:
-		xfs_fs_warn_deprecated(fc, param, XFS_MOUNT_IKEEP, false);
-		parsing_mp->m_flags &= ~XFS_MOUNT_IKEEP;
+		xfs_warn(mp, "%s mount option is deprecated.", param->key);
+		mp->m_flags &= ~XFS_MOUNT_IKEEP;
 		return 0;
 	case Opt_attr2:
-		xfs_fs_warn_deprecated(fc, param, XFS_MOUNT_ATTR2, true);
-		parsing_mp->m_flags |= XFS_MOUNT_ATTR2;
+		xfs_warn(mp, "%s mount option is deprecated.", param->key);
+		mp->m_flags |= XFS_MOUNT_ATTR2;
 		return 0;
 	case Opt_noattr2:
-		xfs_fs_warn_deprecated(fc, param, XFS_MOUNT_NOATTR2, true);
-		parsing_mp->m_flags &= ~XFS_MOUNT_ATTR2;
-		parsing_mp->m_flags |= XFS_MOUNT_NOATTR2;
+		xfs_warn(mp, "%s mount option is deprecated.", param->key);
+		mp->m_flags &= ~XFS_MOUNT_ATTR2;
+		mp->m_flags |= XFS_MOUNT_NOATTR2;
 		return 0;
 	default:
-		xfs_warn(parsing_mp, "unknown mount option [%s].", param->key);
+		xfs_warn(mp, "unknown mount option [%s].", param->key);
 		return -EINVAL;
 	}
 
@@ -1499,22 +1435,11 @@ xfs_fc_fill_super(
 	if (error)
 		goto out_destroy_workqueues;
 
-	error = xfs_inodegc_init_percpu(mp);
-	if (error)
-		goto out_destroy_counters;
-
-	/*
-	 * All percpu data structures requiring cleanup when a cpu goes offline
-	 * must be allocated before adding this @mp to the cpu-dead handler's
-	 * mount list.
-	 */
-	xfs_mount_list_add(mp);
-
 	/* Allocate stats memory before we do operations that might use it */
 	mp->m_stats.xs_stats = alloc_percpu(struct xfsstats);
 	if (!mp->m_stats.xs_stats) {
 		error = -ENOMEM;
-		goto out_destroy_inodegc;
+		goto out_destroy_counters;
 	}
 
 	error = xfs_readsb(mp, flags);
@@ -1678,9 +1603,6 @@ xfs_fc_fill_super(
 	xfs_freesb(mp);
  out_free_stats:
 	free_percpu(mp->m_stats.xs_stats);
- out_destroy_inodegc:
-	xfs_mount_list_del(mp);
-	xfs_inodegc_free_percpu(mp);
  out_destroy_counters:
 	xfs_destroy_percpu_counters(mp);
  out_destroy_workqueues:
@@ -1757,15 +1679,12 @@ xfs_remount_rw(
 		xfs_force_shutdown(mp, SHUTDOWN_CORRUPT_INCORE);
 		return error;
 	}
-	xfs_blockgc_start(mp);
+	xfs_start_block_reaping(mp);
 
 	/* Create the per-AG metadata reservation pool .*/
 	error = xfs_fs_reserve_ag_blocks(mp);
 	if (error && error != -ENOSPC)
 		return error;
-
-	/* Re-enable the background inode inactivation worker. */
-	xfs_inodegc_start(mp);
 
 	return 0;
 }
@@ -1780,23 +1699,14 @@ xfs_remount_ro(
 	 * Cancel background eofb scanning so it cannot race with the final
 	 * log force+buftarg wait and deadlock the remount.
 	 */
-	xfs_blockgc_stop(mp);
+	xfs_stop_block_reaping(mp);
 
 	/* Get rid of any leftover CoW reservations... */
-	error = xfs_blockgc_free_space(mp, NULL);
+	error = xfs_icache_free_cowblocks(mp, NULL);
 	if (error) {
 		xfs_force_shutdown(mp, SHUTDOWN_CORRUPT_INCORE);
 		return error;
 	}
-
-	/*
-	 * Stop the inodegc background worker.  xfs_fs_reconfigure already
-	 * flushed all pending inodegc work when it sync'd the filesystem.
-	 * The VFS holds s_umount, so we know that inodes cannot enter
-	 * xfs_fs_destroy_inode during a remount operation.  In readonly mode
-	 * we send inodes straight to reclaim, so no inodes will be queued.
-	 */
-	xfs_inodegc_stop(mp);
 
 	/* Free the per-AG metadata reservation pool. */
 	error = xfs_fs_unreserve_ag_blocks(mp);
@@ -1921,6 +1831,8 @@ static int xfs_init_fs_context(
 	mutex_init(&mp->m_growlock);
 	INIT_WORK(&mp->m_flush_inodes_work, xfs_flush_inodes_worker);
 	INIT_DELAYED_WORK(&mp->m_reclaim_work, xfs_reclaim_worker);
+	INIT_DELAYED_WORK(&mp->m_eofblocks_work, xfs_eofblocks_worker);
+	INIT_DELAYED_WORK(&mp->m_cowblocks_work, xfs_cowblocks_worker);
 	mp->m_kobj.kobject.kset = xfs_kset;
 	/*
 	 * We don't create the finobt per-ag space reservation until after log
@@ -2166,12 +2078,11 @@ xfs_init_workqueues(void)
 	 * max_active value for this workqueue.
 	 */
 	xfs_alloc_wq = alloc_workqueue("xfsalloc",
-			XFS_WQFLAGS(WQ_MEM_RECLAIM | WQ_FREEZABLE), 0);
+			WQ_MEM_RECLAIM|WQ_FREEZABLE, 0);
 	if (!xfs_alloc_wq)
 		return -ENOMEM;
 
-	xfs_discard_wq = alloc_workqueue("xfsdiscard", XFS_WQFLAGS(WQ_UNBOUND),
-			0);
+	xfs_discard_wq = alloc_workqueue("xfsdiscard", WQ_UNBOUND, 0);
 	if (!xfs_discard_wq)
 		goto out_free_alloc_wq;
 
@@ -2188,48 +2099,6 @@ xfs_destroy_workqueues(void)
 	destroy_workqueue(xfs_alloc_wq);
 }
 
-#ifdef CONFIG_HOTPLUG_CPU
-static int
-xfs_cpu_dead(
-	unsigned int		cpu)
-{
-	struct xfs_mount	*mp, *n;
-
-	spin_lock(&xfs_mount_list_lock);
-	list_for_each_entry_safe(mp, n, &xfs_mount_list, m_mount_list) {
-		spin_unlock(&xfs_mount_list_lock);
-		xfs_inodegc_cpu_dead(mp, cpu);
-		spin_lock(&xfs_mount_list_lock);
-	}
-	spin_unlock(&xfs_mount_list_lock);
-	return 0;
-}
-
-static int __init
-xfs_cpu_hotplug_init(void)
-{
-	int	error;
-
-	error = cpuhp_setup_state_nocalls(CPUHP_XFS_DEAD, "xfs:dead", NULL,
-			xfs_cpu_dead);
-	if (error < 0)
-		xfs_alert(NULL,
-"Failed to initialise CPU hotplug, error %d. XFS is non-functional.",
-			error);
-	return error;
-}
-
-static void
-xfs_cpu_hotplug_destroy(void)
-{
-	cpuhp_remove_state_nocalls(CPUHP_XFS_DEAD);
-}
-
-#else /* !CONFIG_HOTPLUG_CPU */
-static inline int xfs_cpu_hotplug_init(void) { return 0; }
-static inline void xfs_cpu_hotplug_destroy(void) {}
-#endif
-
 STATIC int __init
 init_xfs_fs(void)
 {
@@ -2242,13 +2111,9 @@ init_xfs_fs(void)
 
 	xfs_dir_startup();
 
-	error = xfs_cpu_hotplug_init();
-	if (error)
-		goto out;
-
 	error = xfs_init_zones();
 	if (error)
-		goto out_destroy_hp;
+		goto out;
 
 	error = xfs_init_workqueues();
 	if (error)
@@ -2329,8 +2194,6 @@ init_xfs_fs(void)
 	xfs_destroy_workqueues();
  out_destroy_zones:
 	xfs_destroy_zones();
- out_destroy_hp:
-	xfs_cpu_hotplug_destroy();
  out:
 	return error;
 }
@@ -2353,7 +2216,6 @@ exit_xfs_fs(void)
 	xfs_destroy_workqueues();
 	xfs_destroy_zones();
 	xfs_uuid_table_free();
-	xfs_cpu_hotplug_destroy();
 }
 
 module_init(init_xfs_fs);
