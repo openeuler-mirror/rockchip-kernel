@@ -21,7 +21,7 @@
 #include <linux/stddef.h>
 #include <linux/types.h>
 
-#ifdef CONFIG_AARCH32_EL0
+#ifdef CONFIG_COMPAT
 /* Masks for extracting the FPSR and FPCR from the FPSCR */
 #define VFP_FPSCR_STAT_MASK	0xf800009f
 #define VFP_FPSCR_CTRL_MASK	0x07f79f00
@@ -129,6 +129,15 @@ static inline void sve_user_enable(void)
 {
 	sysreg_clear_set(cpacr_el1, 0, CPACR_EL1_ZEN_EL0EN);
 }
+
+#define sve_cond_update_zcr_vq(val, reg)		\
+	do {						\
+		u64 __zcr = read_sysreg_s((reg));	\
+		u64 __new = __zcr & ~ZCR_ELx_LEN_MASK;	\
+		__new |= (val) & ZCR_ELx_LEN_MASK;	\
+		if (__zcr != __new)			\
+			write_sysreg_s(__new, (reg));	\
+	} while (0)
 
 /*
  * Probing and setup functions.

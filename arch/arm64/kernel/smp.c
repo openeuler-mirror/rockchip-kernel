@@ -32,11 +32,7 @@
 #include <linux/irq_work.h>
 #include <linux/kernel_stat.h>
 #include <linux/kexec.h>
-#include <linux/console.h>
-
 #include <linux/kvm_host.h>
-#include <linux/perf/arm_pmu.h>
-#include <linux/crash_dump.h>
 
 #include <asm/alternative.h>
 #include <asm/atomic.h>
@@ -47,7 +43,6 @@
 #include <asm/daifflags.h>
 #include <asm/kvm_mmu.h>
 #include <asm/mmu_context.h>
-#include <asm/nmi.h>
 #include <asm/numa.h>
 #include <asm/processor.h>
 #include <asm/smp_plat.h>
@@ -55,13 +50,17 @@
 #include <asm/tlbflush.h>
 #include <asm/ptrace.h>
 #include <asm/virt.h>
-#include <asm/cpu_park.h>
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/ipi.h>
+#undef CREATE_TRACE_POINTS
+#include <trace/hooks/debug.h>
 
 DEFINE_PER_CPU_READ_MOSTLY(int, cpu_number);
 EXPORT_PER_CPU_SYMBOL(cpu_number);
+EXPORT_TRACEPOINT_SYMBOL_GPL(ipi_raise);
+EXPORT_TRACEPOINT_SYMBOL_GPL(ipi_entry);
+EXPORT_TRACEPOINT_SYMBOL_GPL(ipi_exit);
 
 /*
  * as from 2.5, kernels no longer have an init_tasks structure
@@ -108,8 +107,6 @@ static int boot_secondary(unsigned int cpu, struct task_struct *idle)
 {
 	const struct cpu_operations *ops = get_cpu_ops(cpu);
 
-	if (write_park_exit(cpu) == 0)
-		return 0;
 	if (ops->cpu_boot)
 		return ops->cpu_boot(cpu);
 
@@ -145,8 +142,6 @@ int __cpu_up(unsigned int cpu, struct task_struct *idle)
 	 */
 	wait_for_completion_timeout(&cpu_running,
 				    msecs_to_jiffies(5000));
-	uninstall_cpu_park(cpu);
-
 	if (cpu_online(cpu))
 		return 0;
 
@@ -360,7 +355,7 @@ void __cpu_die(unsigned int cpu)
 		pr_crit("CPU%u: cpu didn't die\n", cpu);
 		return;
 	}
-	pr_notice("CPU%u: shutdown\n", cpu);
+	pr_debug("CPU%u: shutdown\n", cpu);
 
 	/*
 	 * Now that the dying CPU is beyond the point of no return w.r.t.
@@ -443,8 +438,10 @@ static void __init hyp_mode_check(void)
 			   "CPU: CPUs started in inconsistent modes");
 	else
 		pr_info("CPU: All CPU(s) started at EL1\n");
-	if (IS_ENABLED(CONFIG_KVM))
+	if (IS_ENABLED(CONFIG_KVM) && !is_kernel_in_hyp_mode()) {
 		kvm_compute_layout();
+		kvm_apply_hyp_relocations();
+	}
 }
 
 void __init smp_cpus_done(unsigned int max_cpus)
@@ -471,6 +468,8 @@ void __init smp_prepare_boot_cpu(void)
 	/* Conditionally switch to GIC PMR for interrupt masking */
 	if (system_uses_irq_prio_masking())
 		init_gic_priority_masking();
+
+	kasan_init_hw_tags();
 }
 
 static u64 __init of_get_cpu_mpidr(struct device_node *dn)
@@ -540,34 +539,6 @@ static bool bootcpu_valid __initdata;
 static unsigned int cpu_count = 1;
 
 #ifdef CONFIG_ACPI
-
-#ifdef CONFIG_ARCH_PHYTIUM
-/*
- * On phytium S2500 multi-socket server, for example 2-socket(2P), there are
- * socekt0 and socket1 on the server:
- * If storage device(like SAS controller and disks to save vmcore into) is
- * installed on socket1 and second kernel brings up 2 CPUs both on socket0 with
- * nr_cpus=2, then vmcore will fail to be saved into the disk as interrupts like
- * SPI and LPI(except SGI) can't communicate across cpu sockets in this server
- * platform.
- * To avoid this issue, Bypass other non-cpu0 to ensure that each cpu0 on each
- * socket can boot up and handle interrupt when booting the second kernel.
- */
-static bool __init is_phytium_kdump_cpu_need_bypass(u64 hwid)
-{
-	if ((read_cpuid_id() & MIDR_CPU_MODEL_MASK) != MIDR_FT_2500)
-		return false;
-
-	/*
-	 * Bypass other non-cpu0 to ensure second kernel can bring up each cpu0
-	 * on each socket
-	 */
-	if (is_kdump_kernel() && (hwid & 0xffff) != (cpu_logical_map(0) & 0xffff))
-		return true;
-	return false;
-}
-#endif
-
 static struct acpi_madt_generic_interrupt cpu_madt_gicc[NR_CPUS];
 
 struct acpi_madt_generic_interrupt *acpi_cpu_get_madt_gicc(int cpu)
@@ -586,13 +557,15 @@ acpi_map_gic_cpu_interface(struct acpi_madt_generic_interrupt *processor)
 {
 	u64 hwid = processor->arm_mpidr;
 
+	if (!(processor->flags & ACPI_MADT_ENABLED)) {
+		pr_debug("skipping disabled CPU entry with 0x%llx MPIDR\n", hwid);
+		return;
+	}
+
 	if (hwid & ~MPIDR_HWID_BITMASK || hwid == INVALID_HWID) {
 		pr_err("skipping CPU entry with invalid MPIDR 0x%llx\n", hwid);
 		return;
 	}
-
-	if (!(processor->flags & ACPI_MADT_ENABLED))
-		pr_debug("disabled CPU entry with 0x%llx MPIDR\n", hwid);
 
 	if (is_mpidr_duplicate(cpu_count, hwid)) {
 		pr_err("duplicate CPU MPIDR 0x%llx in MADT\n", hwid);
@@ -613,11 +586,6 @@ acpi_map_gic_cpu_interface(struct acpi_madt_generic_interrupt *processor)
 
 	if (cpu_count >= NR_CPUS)
 		return;
-
-#ifdef CONFIG_ARCH_PHYTIUM
-	if (is_phytium_kdump_cpu_need_bypass(hwid))
-		return;
-#endif
 
 	/* map the logical cpu id to cpu MPIDR */
 	set_cpu_logical_map(cpu_count, hwid);
@@ -821,17 +789,7 @@ void __init smp_prepare_cpus(unsigned int max_cpus)
 		if (err)
 			continue;
 
-#ifdef CONFIG_ACPI
-		if (!acpi_disabled) {
-			if ((cpu_madt_gicc[cpu].flags & ACPI_MADT_ENABLED))
-				set_cpu_present(cpu, true);
-		} else {
-			set_cpu_present(cpu, true);
-		}
-#else
 		set_cpu_present(cpu, true);
-#endif
-
 		numa_store_cpu_info(cpu);
 	}
 }
@@ -898,9 +856,6 @@ static void local_cpu_stop(void)
 
 	local_daif_mask();
 	sdei_mask_local_cpu();
-
-	cpu_park_stop();
-
 	cpu_park_loop();
 }
 
@@ -956,6 +911,7 @@ static void do_handle_IPI(int ipinr)
 		break;
 
 	case IPI_CPU_STOP:
+		trace_android_vh_ipi_stop_rcuidle(get_irq_regs());
 		local_cpu_stop();
 		break;
 
@@ -1017,8 +973,6 @@ static void ipi_setup(int cpu)
 
 	for (i = 0; i < nr_ipi; i++)
 		enable_percpu_irq(ipi_irq_base + i, 0);
-
-	dynamic_ipi_setup(cpu);
 }
 
 #ifdef CONFIG_HOTPLUG_CPU
@@ -1031,8 +985,6 @@ static void ipi_teardown(int cpu)
 
 	for (i = 0; i < nr_ipi; i++)
 		disable_percpu_irq(ipi_irq_base + i);
-
-	dynamic_ipi_teardown(cpu);
 }
 #endif
 
@@ -1052,10 +1004,11 @@ void __init set_smp_ipi_range(int ipi_base, int n)
 
 		ipi_desc[i] = irq_to_desc(ipi_base + i);
 		irq_set_status_flags(ipi_base + i, IRQ_HIDDEN);
-	}
 
-	if (n > nr_ipi)
-		set_smp_dynamic_ipi(ipi_base + nr_ipi);
+		/* The recheduling IPI is special... */
+		if (i == IPI_RESCHEDULE)
+			__irq_modify_status(ipi_base + i, 0, IRQ_RAW, ~0);
+	}
 
 	ipi_irq_base = ipi_base;
 
@@ -1111,11 +1064,6 @@ void smp_send_stop(void)
 			cpumask_pr_args(cpu_online_mask));
 
 	sdei_mask_local_cpu();
-}
-
-void smp_cross_send_stop(cpumask_t *mask)
-{
-	smp_cross_call(mask, IPI_CPU_STOP);
 }
 
 #ifdef CONFIG_KEXEC_CORE
@@ -1196,111 +1144,14 @@ bool cpus_are_stuck_in_kernel(void)
 	return !!cpus_stuck_in_kernel || smp_spin_tables;
 }
 
-#ifdef CONFIG_HARDLOCKUP_DETECTOR_PERF
-s64 hardlockup_enable;
-static DEFINE_PER_CPU(u64, cpu_freq_probed);
-
-static int __init hardlockup_enable_setup(char *str)
+int nr_ipi_get(void)
 {
-	if (!strcasecmp(str, "on") || !strcasecmp(str, "1"))
-		hardlockup_enable = 1;
-	else if (!strcasecmp(str, "off") || !strcasecmp(str, "0"))
-		hardlockup_enable = 0;
-
-	return 1;
+	return nr_ipi;
 }
-__setup("hardlockup_enable=", hardlockup_enable_setup);
+EXPORT_SYMBOL_GPL(nr_ipi_get);
 
-static u64 arch_pmu_get_cycles(struct perf_event *event)
+struct irq_desc **ipi_desc_get(void)
 {
-	struct arm_pmu *armpmu = to_arm_pmu(event->pmu);
-
-	return armpmu->read_counter(event);
+	return ipi_desc;
 }
-
-static u64 arch_probe_cpu_freq(void)
-{
-	volatile int i;
-	u32 loop = 50000000;
-	u64 cycles_a, cycles_b;
-	u64 timer_a, timer_b;
-	u32 timer_hz = arch_timer_get_cntfrq();
-	struct perf_event *evt;
-	struct perf_event_attr timer_attr = {
-		.type		= PERF_TYPE_HARDWARE,
-		.config		= PERF_COUNT_HW_CPU_CYCLES,
-		.size		= sizeof(struct perf_event_attr),
-		.pinned		= 1,
-		.disabled	= 0,
-		.sample_period = 0xffffffffUL,
-	};
-
-	/* make sure the cycle counter is enabled */
-	evt = perf_event_create_kernel_counter(&timer_attr, smp_processor_id(),
-							NULL, NULL, NULL);
-	if (IS_ERR(evt))
-		return 0;
-
-	do {
-		timer_b = timer_a;
-
-		/* avoid dead loop here */
-		if (loop)
-			loop >>= 1;
-		else
-			break;
-
-		timer_a = arch_timer_read_counter();
-		cycles_a = arch_pmu_get_cycles(evt);
-
-		for (i = 0; i < loop; i++)
-			;
-
-		timer_b = arch_timer_read_counter();
-		cycles_b = arch_pmu_get_cycles(evt);
-	} while (cycles_b <= cycles_a);
-
-	perf_event_release_kernel(evt);
-	if (unlikely(timer_b == timer_a))
-		return 0;
-
-	return timer_hz * (cycles_b - cycles_a) / (timer_b - timer_a);
-}
-
-static u64 arch_get_cpu_freq(void)
-{
-	u64 cpu_freq;
-	unsigned int cpu = smp_processor_id();
-
-	cpu_freq = per_cpu(cpu_freq_probed, cpu);
-
-	if (!cpu_freq) {
-		cpu_freq = arch_probe_cpu_freq();
-		pr_info("NMI watchdog: CPU%u freq probed as %llu HZ.\n",
-				smp_processor_id(), cpu_freq);
-		if (!cpu_freq)
-			cpu_freq = -1;
-		per_cpu(cpu_freq_probed, cpu) = cpu_freq;
-	}
-
-	if (-1 == cpu_freq)
-		cpu_freq = 0;
-
-	return cpu_freq;
-}
-
-u64 hw_nmi_get_sample_period(int watchdog_thresh)
-{
-	u64 cpu_freq;
-
-	if (!gic_supports_nmi())
-		return 0;
-
-	if (hardlockup_enable != 0) {
-		cpu_freq = arch_get_cpu_freq();
-		return cpu_freq * watchdog_thresh;
-	}
-
-	return 0;
-}
-#endif
+EXPORT_SYMBOL_GPL(ipi_desc_get);

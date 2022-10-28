@@ -14,15 +14,15 @@
 #include <asm/thread_info.h>
 #include <asm/unistd.h>
 
-long a32_arm_syscall(struct pt_regs *regs, int scno);
+long compat_arm_syscall(struct pt_regs *regs, int scno);
 long sys_ni_syscall(void);
 
 static long do_ni_syscall(struct pt_regs *regs, int scno)
 {
-#ifdef CONFIG_AARCH32_EL0
+#ifdef CONFIG_COMPAT
 	long ret;
-	if (is_a32_compat_task()) {
-		ret = a32_arm_syscall(regs, scno);
+	if (is_compat_task()) {
+		ret = compat_arm_syscall(regs, scno);
 		if (ret != -ENOSYS)
 			return ret;
 	}
@@ -119,7 +119,7 @@ static void el0_svc_common(struct pt_regs *regs, int scno, int sc_nr,
 	cortex_a76_erratum_1463225_svc_handler();
 	local_daif_restore(DAIF_PROCCTX);
 
-	if (system_supports_mte() && (flags & _TIF_MTE_ASYNC_FAULT)) {
+	if (flags & _TIF_MTE_ASYNC_FAULT) {
 		/*
 		 * Process the asynchronous tag check fault before the actual
 		 * syscall. do_notify_resume() will send a signal to userspace
@@ -188,39 +188,16 @@ static inline void sve_user_discard(void)
 	sve_user_disable();
 }
 
-#ifdef CONFIG_ARM64_ILP32
-static inline void delouse_pt_regs(struct pt_regs *regs)
-{
-	regs->regs[0] &= UINT_MAX;
-	regs->regs[1] &= UINT_MAX;
-	regs->regs[2] &= UINT_MAX;
-	regs->regs[3] &= UINT_MAX;
-	regs->regs[4] &= UINT_MAX;
-	regs->regs[5] &= UINT_MAX;
-	regs->regs[6] &= UINT_MAX;
-	regs->regs[7] &= UINT_MAX;
-}
-#endif
-
 void do_el0_svc(struct pt_regs *regs)
 {
-	const syscall_fn_t *t = sys_call_table;
-
-#ifdef CONFIG_ARM64_ILP32
-	if (is_ilp32_compat_task()) {
-		t = ilp32_sys_call_table;
-		delouse_pt_regs(regs);
-	}
-#endif
-
 	sve_user_discard();
-	el0_svc_common(regs, regs->regs[8], __NR_syscalls, t);
+	el0_svc_common(regs, regs->regs[8], __NR_syscalls, sys_call_table);
 }
 
-#ifdef CONFIG_AARCH32_EL0
+#ifdef CONFIG_COMPAT
 void do_el0_svc_compat(struct pt_regs *regs)
 {
 	el0_svc_common(regs, regs->regs[7], __NR_compat_syscalls,
-		       a32_sys_call_table);
+		       compat_sys_call_table);
 }
 #endif

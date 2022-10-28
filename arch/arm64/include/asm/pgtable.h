@@ -69,15 +69,9 @@ extern unsigned long empty_zero_page[PAGE_SIZE / sizeof(unsigned long)];
  * page table entry, taking care of 52-bit addresses.
  */
 #ifdef CONFIG_ARM64_PA_BITS_52
-static inline phys_addr_t __pte_to_phys(pte_t pte)
-{
-	return (pte_val(pte) & PTE_ADDR_LOW) |
-		((pte_val(pte) & PTE_ADDR_HIGH) << 36);
-}
-static inline pteval_t __phys_to_pte_val(phys_addr_t phys)
-{
-	return (phys | (phys >> 36)) & PTE_ADDR_MASK;
-}
+#define __pte_to_phys(pte)	\
+	((pte_val(pte) & PTE_ADDR_LOW) | ((pte_val(pte) & PTE_ADDR_HIGH) << 36))
+#define __phys_to_pte_val(phys)	(((phys) | ((phys) >> 36)) & PTE_ADDR_MASK)
 #else
 #define __pte_to_phys(pte)	(pte_val(pte) & PTE_ADDR_MASK)
 #define __phys_to_pte_val(phys)	(phys)
@@ -119,12 +113,11 @@ static inline pteval_t __phys_to_pte_val(phys_addr_t phys)
 #define pte_dirty(pte)		(pte_sw_dirty(pte) || pte_hw_dirty(pte))
 
 #define pte_valid(pte)		(!!(pte_val(pte) & PTE_VALID))
-/*
- * Execute-only user mappings do not have the PTE_USER bit set. All valid
- * kernel mappings have the PTE_UXN bit set.
- */
 #define pte_valid_not_user(pte) \
-	((pte_val(pte) & (PTE_VALID | PTE_USER | PTE_UXN)) == (PTE_VALID | PTE_UXN))
+	((pte_val(pte) & (PTE_VALID | PTE_USER)) == PTE_VALID)
+#define pte_valid_user(pte) \
+	((pte_val(pte) & (PTE_VALID | PTE_USER)) == (PTE_VALID | PTE_USER))
+
 /*
  * Could the pte be present in the TLB? We must check mm_tlb_flush_pending
  * so that we don't erroneously return false for pages that have been
@@ -137,14 +130,12 @@ static inline pteval_t __phys_to_pte_val(phys_addr_t phys)
 	(mm_tlb_flush_pending(mm) ? pte_present(pte) : pte_valid(pte))
 
 /*
- * p??_access_permitted() is true for valid user mappings (PTE_USER
- * bit set, subject to the write permission check). For execute-only
- * mappings, like PROT_EXEC with EPAN (both PTE_USER and PTE_UXN bits
- * not set) must return false. PROT_NONE mappings do not have the
- * PTE_VALID bit set.
+ * p??_access_permitted() is true for valid user mappings (subject to the
+ * write permission check). PROT_NONE mappings do not have the PTE_VALID bit
+ * set.
  */
 #define pte_access_permitted(pte, write) \
-	(((pte_val(pte) & (PTE_VALID | PTE_USER)) == (PTE_VALID | PTE_USER)) && (!(write) || pte_write(pte)))
+	(pte_valid_user(pte) && (!(write) || pte_write(pte)))
 #define pmd_access_permitted(pmd, write) \
 	(pte_access_permitted(pmd_pte(pmd), (write)))
 #define pud_access_permitted(pud, write) \
@@ -509,6 +500,15 @@ static inline pmd_t pmd_mkdevmap(pmd_t pmd)
 	__pgprot_modify(prot, PTE_ATTRINDX_MASK, \
 			PTE_ATTRINDX(MT_NORMAL_NC) | PTE_PXN | PTE_UXN)
 
+/*
+ * Mark the prot value as outer cacheable and inner non-cacheable. Non-coherent
+ * devices on a system with support for a system or last level cache use these
+ * attributes to cache allocations in the system cache.
+ */
+#define pgprot_syscached(prot) \
+	__pgprot_modify(prot, PTE_ATTRINDX_MASK, \
+			PTE_ATTRINDX(MT_NORMAL_iNC_oWB) | PTE_PXN | PTE_UXN)
+
 #define __HAVE_PHYS_MEM_ACCESS_PROT
 struct file;
 extern pgprot_t phys_mem_access_prot(struct file *file, unsigned long pfn,
@@ -516,12 +516,13 @@ extern pgprot_t phys_mem_access_prot(struct file *file, unsigned long pfn,
 
 #define pmd_none(pmd)		(!pmd_val(pmd))
 
+#define pmd_bad(pmd)		(!(pmd_val(pmd) & PMD_TABLE_BIT))
+
 #define pmd_table(pmd)		((pmd_val(pmd) & PMD_TYPE_MASK) == \
 				 PMD_TYPE_TABLE)
 #define pmd_sect(pmd)		((pmd_val(pmd) & PMD_TYPE_MASK) == \
 				 PMD_TYPE_SECT)
-#define pmd_leaf(pmd)		(pmd_present(pmd) && !pmd_table(pmd))
-#define pmd_bad(pmd)		(!pmd_table(pmd))
+#define pmd_leaf(pmd)		pmd_sect(pmd)
 
 #if defined(CONFIG_ARM64_64K_PAGES) || CONFIG_PGTABLE_LEVELS < 3
 static inline bool pud_sect(pud_t pud) { return false; }
@@ -542,6 +543,13 @@ extern pgd_t tramp_pg_dir[PTRS_PER_PGD];
 extern pgd_t reserved_pg_dir[PTRS_PER_PGD];
 
 extern void set_swapper_pgd(pgd_t *pgdp, pgd_t pgd);
+
+#ifdef CONFIG_MEMORY_HOTPLUG
+extern int populate_range_driver_managed(u64 start, u64 size,
+		const char *resource_name);
+extern int depopulate_range_driver_managed(u64 start, u64 size,
+		const char *resource_name);
+#endif
 
 static inline bool in_swapper_pgdir(void *addr)
 {
@@ -605,9 +613,9 @@ static inline unsigned long pmd_page_vaddr(pmd_t pmd)
 	pr_err("%s:%d: bad pmd %016llx.\n", __FILE__, __LINE__, pmd_val(e))
 
 #define pud_none(pud)		(!pud_val(pud))
-#define pud_bad(pud)		(!pud_table(pud))
+#define pud_bad(pud)		(!(pud_val(pud) & PUD_TABLE_BIT))
 #define pud_present(pud)	pte_present(pud_pte(pud))
-#define pud_leaf(pud)		(pud_present(pud) && !pud_table(pud))
+#define pud_leaf(pud)		pud_sect(pud)
 #define pud_valid(pud)		pte_valid(pud_pte(pud))
 
 static inline void set_pud(pud_t *pudp, pud_t pud)
@@ -637,9 +645,9 @@ static inline phys_addr_t pud_page_paddr(pud_t pud)
 	return __pud_to_phys(pud);
 }
 
-static inline pmd_t *pud_pgtable(pud_t pud)
+static inline unsigned long pud_page_vaddr(pud_t pud)
 {
-	return (pmd_t *)__va(pud_page_paddr(pud));
+	return (unsigned long)__va(pud_page_paddr(pud));
 }
 
 /* Find an entry in the second-level page table. */
@@ -698,9 +706,9 @@ static inline phys_addr_t p4d_page_paddr(p4d_t p4d)
 	return __p4d_to_phys(p4d);
 }
 
-static inline pud_t *p4d_pgtable(p4d_t p4d)
+static inline unsigned long p4d_page_vaddr(p4d_t p4d)
 {
-	return (pud_t *)__va(p4d_page_paddr(p4d));
+	return (unsigned long)__va(p4d_page_paddr(p4d));
 }
 
 /* Find an entry in the frst-level page table. */
@@ -987,19 +995,17 @@ static inline bool arch_faults_on_old_pte(void)
 
 	return !cpu_has_hw_af();
 }
-#define arch_faults_on_old_pte arch_faults_on_old_pte
+#define arch_faults_on_old_pte		arch_faults_on_old_pte
 
-static inline pgprot_t arch_filter_pgprot(pgprot_t prot)
+/*
+ * Experimentally, it's cheap to set the access flag in hardware and we
+ * benefit from prefaulting mappings as 'old' to start with.
+ */
+static inline bool arch_wants_old_prefaulted_pte(void)
 {
-	if (cpus_have_const_cap(ARM64_HAS_EPAN))
-		return prot;
-
-	if (pgprot_val(prot) != pgprot_val(PAGE_EXECONLY))
-		return prot;
-
-	return PAGE_READONLY_EXEC;
+	return !arch_faults_on_old_pte();
 }
-
+#define arch_wants_old_prefaulted_pte	arch_wants_old_prefaulted_pte
 
 #endif /* !__ASSEMBLY__ */
 

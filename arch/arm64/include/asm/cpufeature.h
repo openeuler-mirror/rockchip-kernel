@@ -63,6 +63,11 @@ struct arm64_ftr_bits {
 	s64		safe_val; /* safe value for FTR_EXACT features */
 };
 
+struct arm64_ftr_override {
+	u64		val;
+	u64		mask;
+};
+
 /*
  * @arm64_ftr_reg - Feature register
  * @strict_mask		Bits which should match across all CPUs for sanity.
@@ -74,12 +79,11 @@ struct arm64_ftr_reg {
 	u64				user_mask;
 	u64				sys_val;
 	u64				user_val;
+	struct arm64_ftr_override	*override;
 	const struct arm64_ftr_bits	*ftr_bits;
 };
 
 extern struct arm64_ftr_reg arm64_ftr_reg_ctrel0;
-
-int arm64_cpu_ftr_regs_traverse(int (*op)(u32, u64, void *), void *argp);
 
 /*
  * CPU capabilities:
@@ -602,43 +606,22 @@ void __init setup_cpu_features(void);
 void check_local_cpu_capabilities(void);
 
 u64 read_sanitised_ftr_reg(u32 id);
+u64 __read_sysreg_by_encoding(u32 sys_id);
 
 static inline bool cpu_supports_mixed_endian_el0(void)
 {
 	return id_aa64mmfr0_mixed_endian_el0(read_cpuid(ID_AA64MMFR0_EL1));
 }
 
-static inline bool supports_csv2p3(int scope)
-{
-	u64 pfr0;
-	u8 csv2_val;
-
-	if (scope == SCOPE_LOCAL_CPU)
-		pfr0 = read_sysreg_s(SYS_ID_AA64PFR0_EL1);
-	else
-		pfr0 = read_sanitised_ftr_reg(SYS_ID_AA64PFR0_EL1);
-
-	csv2_val = cpuid_feature_extract_unsigned_field(pfr0,
-							ID_AA64PFR0_CSV2_SHIFT);
-	return csv2_val == 3;
-}
-
-static inline bool supports_clearbhb(int scope)
-{
-	u64 isar2;
-
-	if (scope == SCOPE_LOCAL_CPU)
-		isar2 = read_sysreg_s(SYS_ID_AA64ISAR2_EL1);
-	else
-		isar2 = read_sanitised_ftr_reg(SYS_ID_AA64ISAR2_EL1);
-
-	return cpuid_feature_extract_unsigned_field(isar2,
-						    ID_AA64ISAR2_CLEARBHB_SHIFT);
-}
+const struct cpumask *system_32bit_el0_cpumask(void);
+DECLARE_STATIC_KEY_FALSE(arm64_mismatched_32bit_el0);
 
 static inline bool system_supports_32bit_el0(void)
 {
-	return cpus_have_const_cap(ARM64_HAS_32BIT_EL0);
+	u64 pfr0 = read_sanitised_ftr_reg(SYS_ID_AA64PFR0_EL1);
+
+	return static_branch_unlikely(&arm64_mismatched_32bit_el0) ||
+	       id_aa64pfr0_32bit_el0(pfr0);
 }
 
 static inline bool system_supports_4kb_granule(void)
@@ -699,16 +682,10 @@ static __always_inline bool system_supports_fpsimd(void)
 	return !cpus_have_const_cap(ARM64_HAS_NO_FPSIMD);
 }
 
-static inline bool system_uses_hw_pan(void)
-{
-	return IS_ENABLED(CONFIG_ARM64_PAN) &&
-		cpus_have_const_cap(ARM64_HAS_PAN);
-}
-
 static inline bool system_uses_ttbr0_pan(void)
 {
 	return IS_ENABLED(CONFIG_ARM64_SW_TTBR0_PAN) &&
-		!system_uses_hw_pan();
+		!cpus_have_const_cap(ARM64_HAS_PAN);
 }
 
 static __always_inline bool system_supports_sve(void)
@@ -733,6 +710,11 @@ static inline bool system_supports_generic_auth(void)
 {
 	return IS_ENABLED(CONFIG_ARM64_PTR_AUTH) &&
 		cpus_have_const_cap(ARM64_HAS_GENERIC_AUTH);
+}
+
+static inline bool system_has_full_ptr_auth(void)
+{
+	return system_supports_address_auth() && system_supports_generic_auth();
 }
 
 static __always_inline bool system_uses_irq_prio_masking(void)
@@ -800,25 +782,10 @@ static inline bool cpu_has_hw_af(void)
 						ID_AA64MMFR1_HADBS_SHIFT);
 }
 
-static inline bool cpu_has_pan(void)
-{
-	u64 mmfr1 = read_cpuid(ID_AA64MMFR1_EL1);
-	return cpuid_feature_extract_unsigned_field(mmfr1,
-						    ID_AA64MMFR1_PAN_SHIFT);
-}
-
 #ifdef CONFIG_ARM64_AMU_EXTN
 /* Check whether the cpu supports the Activity Monitors Unit (AMU) */
 extern bool cpu_has_amu_feat(int cpu);
-#else
-static inline bool cpu_has_amu_feat(int cpu)
-{
-	return false;
-}
 #endif
-
-/* Get a cpu that supports the Activity Monitors Unit (AMU) */
-extern int get_cpu_with_amu_feat(void);
 
 static inline unsigned int get_vmid_bits(u64 mmfr1)
 {
@@ -835,6 +802,10 @@ static inline unsigned int get_vmid_bits(u64 mmfr1)
 	 */
 	return 8;
 }
+
+extern struct arm64_ftr_override id_aa64mmfr1_override;
+extern struct arm64_ftr_override id_aa64pfr1_override;
+extern struct arm64_ftr_override id_aa64isar1_override;
 
 u32 get_kvm_ipa_limit(void);
 void dump_cpu_features(void);

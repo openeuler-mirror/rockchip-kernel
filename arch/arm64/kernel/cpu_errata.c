@@ -13,11 +13,6 @@
 #include <asm/cpufeature.h>
 #include <asm/kvm_asm.h>
 #include <asm/smp_plat.h>
-#ifdef CONFIG_HISILICON_ERRATUM_HIP08_RU_PREFETCH
-#include <asm/ptrace.h>
-#include <asm/sysreg.h>
-#include <linux/smp.h>
-#endif
 
 static bool __maybe_unused
 is_affected_midr_range(const struct arm64_cpu_capabilities *entry, int scope)
@@ -59,30 +54,6 @@ is_kryo_midr(const struct arm64_cpu_capabilities *entry, int scope)
 
 	return model == entry->midr_range.model;
 }
-
-#ifdef CONFIG_HISILICON_ERRATUM_1980005
-static bool
-hisilicon_1980005_match(const struct arm64_cpu_capabilities *entry,
-		int scope)
-{
-	static const struct midr_range idc_support_list[] = {
-		MIDR_ALL_VERSIONS(MIDR_HISI_TSV110),
-		MIDR_REV(MIDR_HISI_TSV200, 1, 0),
-		{ /* sentinel */ }
-	};
-
-	return  is_midr_in_range_list(read_cpuid_id(), idc_support_list);
-}
-
-static void
-hisilicon_1980005_enable(const struct arm64_cpu_capabilities *__unused)
-{
-	cpus_set_cap(ARM64_HAS_CACHE_IDC);
-	arm64_ftr_reg_ctrel0.sys_val |= BIT(CTR_IDC_SHIFT);
-	arm64_ftr_reg_ctrel0.strict_mask &= ~BIT(CTR_IDC_SHIFT);
-	sysreg_clear_set(sctlr_el1, SCTLR_EL1_UCT, 0);
-}
-#endif
 
 static bool
 has_mismatched_cache_type(const struct arm64_cpu_capabilities *entry,
@@ -151,48 +122,6 @@ cpu_enable_cache_maint_trap(const struct arm64_cpu_capabilities *__unused)
 {
 	sysreg_clear_set(sctlr_el1, SCTLR_EL1_UCI, 0);
 }
-
-#ifdef CONFIG_HISILICON_ERRATUM_HIP08_RU_PREFETCH
-# ifdef CONFIG_HISILICON_HIP08_RU_PREFETCH_DEFAULT_OFF
-static bool readunique_prefetch_enabled;
-# else
-static bool readunique_prefetch_enabled = true;
-# endif
-static int __init readunique_prefetch_switch(char *data)
-{
-	if (!data)
-		return -EINVAL;
-
-	if (strcmp(data, "off") == 0)
-		readunique_prefetch_enabled = false;
-	else if (strcmp(data, "on") == 0)
-		readunique_prefetch_enabled = true;
-	else
-		return -EINVAL;
-
-	return 0;
-}
-early_param("readunique_prefetch", readunique_prefetch_switch);
-
-static bool
-should_disable_hisi_hip08_ru_prefetch(const struct arm64_cpu_capabilities *entry, int unused)
-{
-	u64 el;
-
-	if (readunique_prefetch_enabled)
-		return false;
-
-	el = read_sysreg(CurrentEL);
-	return el == CurrentEL_EL2;
-}
-
-#define CTLR_HISI_HIP08_RU_PREFETCH    (1L << 40)
-static void __maybe_unused
-hisi_hip08_ru_prefetch_disable(const struct arm64_cpu_capabilities *__unused)
-{
-	sysreg_clear_set(S3_1_c15_c6_4, 0, CTLR_HISI_HIP08_RU_PREFETCH);
-}
-#endif
 
 #define CAP_MIDR_RANGE(model, v_min, r_min, v_max, r_max)	\
 	.matches = is_affected_midr_range,			\
@@ -267,16 +196,6 @@ has_neoverse_n1_erratum_1542419(const struct arm64_cpu_capabilities *entry,
 	return is_midr_in_range(midr, &range) && has_dic;
 }
 
-#ifdef CONFIG_RANDOMIZE_BASE
-
-static const struct midr_range ca57_a72[] = {
-	MIDR_ALL_VERSIONS(MIDR_CORTEX_A57),
-	MIDR_ALL_VERSIONS(MIDR_CORTEX_A72),
-	{},
-};
-
-#endif
-
 #ifdef CONFIG_ARM64_WORKAROUND_REPEAT_TLBI
 static const struct arm64_cpu_capabilities arm64_repeat_tlbi_list[] = {
 #ifdef CONFIG_QCOM_FALKOR_ERRATUM_1009
@@ -291,8 +210,6 @@ static const struct arm64_cpu_capabilities arm64_repeat_tlbi_list[] = {
 #ifdef CONFIG_ARM64_ERRATUM_1286807
 	{
 		ERRATA_MIDR_RANGE(MIDR_CORTEX_A76, 0, 0, 3, 0),
-		/* Kryo4xx Gold (rcpe to rfpe) => (r0p0 to r3p0) */
-		ERRATA_MIDR_RANGE(MIDR_QCOM_KRYO_4XX_GOLD, 0xc, 0xe, 0xf, 0xe),
 	},
 #endif
 	{},
@@ -499,15 +416,6 @@ const struct arm64_cpu_capabilities arm64_errata[] = {
 		.type = ARM64_CPUCAP_LOCAL_CPU_ERRATUM,
 		.cpu_enable = cpu_enable_trap_ctr_access,
 	},
-#ifdef CONFIG_HISILICON_ERRATUM_1980005
-	{
-		.desc = "Taishan IDC coherence workaround",
-		.capability = ARM64_WORKAROUND_HISILICON_1980005,
-		.matches = hisilicon_1980005_match,
-		.type = ARM64_CPUCAP_SYSTEM_FEATURE,
-		.cpu_enable = hisilicon_1980005_enable,
-	},
-#endif
 #ifdef CONFIG_QCOM_FALKOR_ERRATUM_1003
 	{
 		.desc = "Qualcomm Technologies Falkor/Kryo erratum 1003",
@@ -543,9 +451,12 @@ const struct arm64_cpu_capabilities arm64_errata[] = {
 	},
 #ifdef CONFIG_RANDOMIZE_BASE
 	{
-		.desc = "EL2 vector hardening",
-		.capability = ARM64_HARDEN_EL2_VECTORS,
-		ERRATA_MIDR_RANGE_LIST(ca57_a72),
+	/* Must come after the Spectre-v2 entry */
+		.desc = "Spectre-v3a",
+		.capability = ARM64_SPECTRE_V3A,
+		.type = ARM64_CPUCAP_LOCAL_CPU_ERRATUM,
+		.matches = has_spectre_v3a,
+		.cpu_enable = spectre_v3a_enable_mitigation,
 	},
 #endif
 	{
@@ -554,13 +465,6 @@ const struct arm64_cpu_capabilities arm64_errata[] = {
 		.type = ARM64_CPUCAP_LOCAL_CPU_ERRATUM,
 		.matches = has_spectre_v4,
 		.cpu_enable = spectre_v4_enable_mitigation,
-	},
-	{
-		.desc = "Spectre-BHB",
-		.capability = ARM64_SPECTRE_BHB,
-		.type = ARM64_CPUCAP_LOCAL_CPU_ERRATUM,
-		.matches = is_spectre_bhb_affected,
-		.cpu_enable = spectre_bhb_enable_mitigation,
 	},
 #ifdef CONFIG_ARM64_ERRATUM_1418040
 	{
@@ -622,15 +526,6 @@ const struct arm64_cpu_capabilities arm64_errata[] = {
 		ERRATA_MIDR_RANGE(MIDR_CORTEX_A77,
 				  0, 0,
 				  1, 0),
-	},
-#endif
-#ifdef CONFIG_HISILICON_ERRATUM_HIP08_RU_PREFETCH
-	{
-		.desc = "HiSilicon HIP08 Cache Readunique Prefetch Disable",
-		.capability = ARM64_WORKAROUND_HISI_HIP08_RU_PREFETCH,
-		ERRATA_MIDR_ALL_VERSIONS(MIDR_HISI_TSV110),
-		.matches = should_disable_hisi_hip08_ru_prefetch,
-		.cpu_enable = hisi_hip08_ru_prefetch_disable,
 	},
 #endif
 	{
