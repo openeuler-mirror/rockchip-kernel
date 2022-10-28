@@ -11,7 +11,6 @@
 #include <linux/bio.h>
 #include <linux/blktrace_api.h>
 #include <linux/blk-cgroup.h>
-#include <linux/delay.h>
 #include "blk.h"
 #include "blk-cgroup-rwstat.h"
 
@@ -42,19 +41,6 @@ static struct blkcg_policy blkcg_policy_throtl;
 
 /* A workqueue to queue throttle related work */
 static struct workqueue_struct *kthrotld_workqueue;
-
-/* True if global limit is enabled in cgroup v1 */
-static bool global_limit;
-
-static int __init setup_global_limit(char *str)
-{
-	if (!strcmp(str, "1") || !strcmp(str, "Y") || !strcmp(str, "y"))
-		global_limit = true;
-
-	return 1;
-}
-
-__setup("blkcg_global_limit=", setup_global_limit);
 
 /*
  * To implement hierarchical throttling, throtl_grps form a tree and bios
@@ -571,8 +557,7 @@ static void throtl_pd_init(struct blkg_policy_data *pd)
 	 * regardless of the position of the group in the hierarchy.
 	 */
 	sq->parent_sq = &td->service_queue;
-	if ((cgroup_subsys_on_dfl(io_cgrp_subsys) || global_limit) &&
-	    blkg->parent)
+	if (cgroup_subsys_on_dfl(io_cgrp_subsys) && blkg->parent)
 		sq->parent_sq = &blkg_to_tg(blkg->parent)->service_queue;
 	tg->td = td;
 }
@@ -605,7 +590,6 @@ static void throtl_pd_online(struct blkg_policy_data *pd)
 	tg_update_has_rules(tg);
 }
 
-#ifdef CONFIG_BLK_DEV_THROTTLING_LOW
 static void blk_throtl_update_limit_valid(struct throtl_data *td)
 {
 	struct cgroup_subsys_state *pos_css;
@@ -626,11 +610,6 @@ static void blk_throtl_update_limit_valid(struct throtl_data *td)
 
 	td->limit_valid[LIMIT_LOW] = low_valid;
 }
-#else
-static inline void blk_throtl_update_limit_valid(struct throtl_data *td)
-{
-}
-#endif
 
 static void throtl_upgrade_state(struct throtl_data *td);
 static void throtl_pd_offline(struct blkg_policy_data *pd)
@@ -1421,57 +1400,7 @@ static int tg_print_conf_uint(struct seq_file *sf, void *v)
 	return 0;
 }
 
-static u64 throtl_update_bytes_disp(u64 dispatched, u64 new_limit,
-				    u64 old_limit)
-{
-	if (new_limit == old_limit)
-		return dispatched;
-
-	if (!dispatched)
-		return 0;
-
-	/*
-	 * In the case that multiply will overflow, just return 0. It will only
-	 * let bios to be dispatched earlier.
-	 */
-	if (div64_u64(U64_MAX, dispatched) < new_limit)
-		return 0;
-
-	dispatched *= new_limit;
-	return div64_u64(dispatched, old_limit);
-}
-
-static u32 throtl_update_io_disp(u32 dispatched, u32 new_limit, u32 old_limit)
-{
-	if (new_limit == old_limit)
-		return dispatched;
-
-	if (!dispatched)
-		return 0;
-	/*
-	 * In the case that multiply will overflow, just return 0. It will only
-	 * let bios to be dispatched earlier.
-	 */
-	if (UINT_MAX / dispatched < new_limit)
-		return 0;
-
-	dispatched *= new_limit;
-	return dispatched / old_limit;
-}
-
-static void throtl_update_slice(struct throtl_grp *tg, u64 *old_limits)
-{
-	tg->bytes_disp[READ] = throtl_update_bytes_disp(tg->bytes_disp[READ],
-			tg_bps_limit(tg, READ), old_limits[0]);
-	tg->bytes_disp[WRITE] = throtl_update_bytes_disp(tg->bytes_disp[WRITE],
-			tg_bps_limit(tg, WRITE), old_limits[1]);
-	tg->io_disp[READ] = throtl_update_io_disp(tg->io_disp[READ],
-			tg_iops_limit(tg, READ), (u32)old_limits[2]);
-	tg->io_disp[WRITE] = throtl_update_io_disp(tg->io_disp[WRITE],
-			tg_iops_limit(tg, WRITE), (u32)old_limits[3]);
-}
-
-static void tg_conf_updated(struct throtl_grp *tg, u64 *old_limits, bool global)
+static void tg_conf_updated(struct throtl_grp *tg, bool global)
 {
 	struct throtl_service_queue *sq = &tg->service_queue;
 	struct cgroup_subsys_state *pos_css;
@@ -1510,45 +1439,21 @@ static void tg_conf_updated(struct throtl_grp *tg, u64 *old_limits, bool global)
 				parent_tg->latency_target);
 	}
 
-	throtl_update_slice(tg, old_limits);
+	/*
+	 * We're already holding queue_lock and know @tg is valid.  Let's
+	 * apply the new config directly.
+	 *
+	 * Restart the slices for both READ and WRITES. It might happen
+	 * that a group's limit are dropped suddenly and we don't want to
+	 * account recently dispatched IO with new low rate.
+	 */
+	throtl_start_new_slice(tg, READ);
+	throtl_start_new_slice(tg, WRITE);
 
 	if (tg->flags & THROTL_TG_PENDING) {
 		tg_update_disptime(tg);
 		throtl_schedule_next_dispatch(sq->parent_sq, true);
 	}
-}
-
-static inline int throtl_check_init_done(struct request_queue *q)
-{
-	if (test_bit(QUEUE_FLAG_THROTL_INIT_DONE, &q->queue_flags))
-		return 0;
-
-	return blk_queue_dying(q) ? -ENODEV : -EBUSY;
-}
-
-/*
- * If throtl_check_init_done() return -EBUSY, we should retry after a short
- * msleep(), since that throttle init will be completed in blk_register_queue()
- * soon.
- */
-static inline int throtl_restart_syscall_when_busy(int errno)
-{
-	int ret = errno;
-
-	if (ret == -EBUSY) {
-		msleep(10);
-		ret = restart_syscall();
-	}
-
-	return ret;
-}
-
-static void tg_get_limits(struct throtl_grp *tg, u64 *limits)
-{
-	limits[0] = tg_bps_limit(tg, READ);
-	limits[1] = tg_bps_limit(tg, WRITE);
-	limits[2] = tg_iops_limit(tg, READ);
-	limits[3] = tg_iops_limit(tg, WRITE);
 }
 
 static ssize_t tg_set_conf(struct kernfs_open_file *of,
@@ -1559,15 +1464,10 @@ static ssize_t tg_set_conf(struct kernfs_open_file *of,
 	struct throtl_grp *tg;
 	int ret;
 	u64 v;
-	u64 old_limits[4];
 
 	ret = blkg_conf_prep(blkcg, &blkcg_policy_throtl, buf, &ctx);
 	if (ret)
 		return ret;
-
-	ret = throtl_check_init_done(ctx.disk->queue);
-	if (ret)
-		goto out_finish;
 
 	ret = -EINVAL;
 	if (sscanf(ctx.body, "%llu", &v) != 1)
@@ -1576,18 +1476,16 @@ static ssize_t tg_set_conf(struct kernfs_open_file *of,
 		v = U64_MAX;
 
 	tg = blkg_to_tg(ctx.blkg);
-	tg_get_limits(tg, old_limits);
 
 	if (is_u64)
 		*(u64 *)((void *)tg + of_cft(of)->private) = v;
 	else
 		*(unsigned int *)((void *)tg + of_cft(of)->private) = v;
 
-	tg_conf_updated(tg, old_limits, false);
+	tg_conf_updated(tg, false);
 	ret = 0;
 out_finish:
 	blkg_conf_finish(&ctx);
-	ret = throtl_restart_syscall_when_busy(ret);
 	return ret ?: nbytes;
 }
 
@@ -1754,7 +1652,6 @@ static ssize_t tg_set_limit(struct kernfs_open_file *of,
 	struct blkg_conf_ctx ctx;
 	struct throtl_grp *tg;
 	u64 v[4];
-	u64 old_limits[4];
 	unsigned long idle_time;
 	unsigned long latency_time;
 	int ret;
@@ -1764,16 +1661,12 @@ static ssize_t tg_set_limit(struct kernfs_open_file *of,
 	if (ret)
 		return ret;
 
-	ret = throtl_check_init_done(ctx.disk->queue);
-	if (ret)
-		goto out_finish;
-
 	tg = blkg_to_tg(ctx.blkg);
+
 	v[0] = tg->bps_conf[READ][index];
 	v[1] = tg->bps_conf[WRITE][index];
 	v[2] = tg->iops_conf[READ][index];
 	v[3] = tg->iops_conf[WRITE][index];
-	tg_get_limits(tg, old_limits);
 
 	idle_time = tg->idletime_threshold_conf;
 	latency_time = tg->latency_target_conf;
@@ -1860,12 +1753,11 @@ static ssize_t tg_set_limit(struct kernfs_open_file *of,
 			tg->td->limit_index = LIMIT_LOW;
 	} else
 		tg->td->limit_index = LIMIT_MAX;
-	tg_conf_updated(tg, old_limits, index == LIMIT_LOW &&
+	tg_conf_updated(tg, index == LIMIT_LOW &&
 		tg->td->limit_valid[LIMIT_LOW]);
 	ret = 0;
 out_finish:
 	blkg_conf_finish(&ctx);
-	ret = throtl_restart_syscall_when_busy(ret);
 	return ret ?: nbytes;
 }
 
@@ -2319,16 +2211,13 @@ bool blk_throtl_bio(struct bio *bio)
 	struct throtl_service_queue *sq;
 	bool rw = bio_data_dir(bio);
 	bool throttled = false;
-	bool locked = true;
 	struct throtl_data *td = tg->td;
 
 	rcu_read_lock();
 
 	/* see throtl_charge_bio() */
-	if (bio_flagged(bio, BIO_THROTTLED)) {
-		locked = false;
+	if (bio_flagged(bio, BIO_THROTTLED))
 		goto out;
-        }
 
 	if (!cgroup_subsys_on_dfl(io_cgrp_subsys)) {
 		blkg_rwstat_add(&tg->stat_bytes, bio->bi_opf,
@@ -2336,10 +2225,8 @@ bool blk_throtl_bio(struct bio *bio)
 		blkg_rwstat_add(&tg->stat_ios, bio->bi_opf, 1);
 	}
 
-	if (!tg->has_rules[rw]) {
-		locked = false;
+	if (!tg->has_rules[rw])
 		goto out;
-	}
 
 	spin_lock_irq(&q->queue_lock);
 
@@ -2394,7 +2281,7 @@ again:
 		sq = sq->parent_sq;
 		tg = sq_to_tg(sq);
 		if (!tg)
-			goto out;
+			goto out_unlock;
 	}
 
 	/* out-of-limit, queue to @tg */
@@ -2422,6 +2309,8 @@ again:
 		throtl_schedule_next_dispatch(tg->service_queue.parent_sq, true);
 	}
 
+out_unlock:
+	spin_unlock_irq(&q->queue_lock);
 out:
 	bio_set_flag(bio, BIO_THROTTLED);
 
@@ -2429,9 +2318,6 @@ out:
 	if (throttled || !td->track_bio_latency)
 		bio->bi_issue.value |= BIO_ISSUE_THROTL_SKIP_LATENCY;
 #endif
-	if (locked)
-		spin_unlock_irq(&q->queue_lock);
-
 	rcu_read_unlock();
 	return throttled;
 }
@@ -2566,7 +2452,6 @@ int blk_throtl_init(struct request_queue *q)
 void blk_throtl_exit(struct request_queue *q)
 {
 	BUG_ON(!q->td);
-	del_timer_sync(&q->td->service_queue.pending_timer);
 	throtl_shutdown_wq(q);
 	blkcg_deactivate_policy(q, &blkcg_policy_throtl);
 	free_percpu(q->td->latency_buckets[READ]);

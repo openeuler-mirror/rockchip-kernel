@@ -35,6 +35,8 @@ struct blk_mq_ctx {
 	struct request_queue	*queue;
 	struct blk_mq_ctxs      *ctxs;
 	struct kobject		kobj;
+
+	ANDROID_OEM_DATA_ARRAY(1, 2);
 } ____cacheline_aligned_in_smp;
 
 void blk_mq_exit_queue(struct request_queue *q);
@@ -129,7 +131,6 @@ extern int blk_mq_sysfs_register(struct request_queue *q);
 extern void blk_mq_sysfs_unregister(struct request_queue *q);
 extern void blk_mq_hctx_kobj_init(struct blk_mq_hw_ctx *hctx);
 
-void blk_mq_cancel_work_sync(struct request_queue *q);
 void blk_mq_release(struct request_queue *q);
 
 static inline struct blk_mq_ctx *__blk_mq_get_ctx(struct request_queue *q,
@@ -187,10 +188,6 @@ static inline bool blk_mq_hw_queue_mapped(struct blk_mq_hw_ctx *hctx)
 unsigned int blk_mq_in_flight(struct request_queue *q, struct hd_struct *part);
 void blk_mq_in_flight_rw(struct request_queue *q, struct hd_struct *part,
 			 unsigned int inflight[2]);
-#ifdef CONFIG_64BIT
-unsigned int blk_mq_in_flight_with_stat(struct request_queue *q,
-					struct hd_struct *part);
-#endif
 
 static inline void blk_mq_put_dispatch_budget(struct request_queue *q)
 {
@@ -287,17 +284,6 @@ static inline struct blk_plug *blk_mq_plug(struct request_queue *q,
 	return NULL;
 }
 
-/* Free all requests on the list */
-static inline void blk_mq_free_requests(struct list_head *list)
-{
-	while (!list_empty(list)) {
-		struct request *rq = list_entry_rq(list->next);
-
-		list_del_init(&rq->queuelist);
-		blk_mq_free_request(rq);
-	}
-}
-
 /*
  * For shared tag users, we track the number of currently active users
  * and attempt to provide a fair share of the tag depth for each of them.
@@ -320,15 +306,10 @@ static inline bool hctx_may_queue(struct blk_mq_hw_ctx *hctx,
 		struct request_queue *q = hctx->queue;
 		struct blk_mq_tag_set *set = q->tag_set;
 
-		if (mq_unfair_dtag &&
-		    !atomic_read(&set->pending_queues_shared_sbitmap))
-			return true;
 		if (!test_bit(QUEUE_FLAG_HCTX_ACTIVE, &q->queue_flags))
 			return true;
 		users = atomic_read(&set->active_queues_shared_sbitmap);
 	} else {
-		if (mq_unfair_dtag && !atomic_read(&hctx->tags->pending_queues))
-			return true;
 		if (!test_bit(BLK_MQ_S_TAG_ACTIVE, &hctx->state))
 			return true;
 		users = atomic_read(&hctx->tags->active_queues);

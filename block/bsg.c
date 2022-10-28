@@ -12,6 +12,7 @@
 #include <linux/idr.h>
 #include <linux/bsg.h>
 #include <linux/slab.h>
+#include <linux/pm_runtime.h>
 
 #include <scsi/scsi.h>
 #include <scsi/scsi_ioctl.h>
@@ -308,12 +309,15 @@ out_unlock:
 static int bsg_open(struct inode *inode, struct file *file)
 {
 	struct bsg_device *bd;
+	struct bsg_class_device *bcd;
 
 	bd = bsg_get_device(inode, file);
 
 	if (IS_ERR(bd))
 		return PTR_ERR(bd);
 
+	bcd = &bd->queue->bsg_dev;
+	pm_runtime_get_sync(bcd->class_dev->parent);
 	file->private_data = bd;
 	return 0;
 }
@@ -321,8 +325,12 @@ static int bsg_open(struct inode *inode, struct file *file)
 static int bsg_release(struct inode *inode, struct file *file)
 {
 	struct bsg_device *bd = file->private_data;
+	struct bsg_class_device *bcd;
 
 	file->private_data = NULL;
+
+	bcd = &bd->queue->bsg_dev;
+	pm_runtime_put_sync(bcd->class_dev->parent);
 	return bsg_put_device(bd);
 }
 
@@ -371,13 +379,10 @@ static long bsg_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	case SG_GET_RESERVED_SIZE:
 	case SG_SET_RESERVED_SIZE:
 	case SG_EMULATED_HOST:
+	case SCSI_IOCTL_SEND_COMMAND:
 		return scsi_cmd_ioctl(bd->queue, NULL, file->f_mode, cmd, uarg);
 	case SG_IO:
 		return bsg_sg_io(bd->queue, file->f_mode, uarg);
-	case SCSI_IOCTL_SEND_COMMAND:
-		pr_warn_ratelimited("%s: calling unsupported SCSI_IOCTL_SEND_COMMAND\n",
-				current->comm);
-		return -EINVAL;
 	default:
 		return -ENOTTY;
 	}

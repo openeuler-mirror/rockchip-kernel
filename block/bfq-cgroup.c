@@ -463,7 +463,7 @@ static int bfqg_stats_init(struct bfqg_stats *stats, gfp_t gfp)
 {
 	if (blkg_rwstat_init(&stats->bytes, gfp) ||
 	    blkg_rwstat_init(&stats->ios, gfp))
-		goto error;
+		return -ENOMEM;
 
 #ifdef CONFIG_BFQ_CGROUP_DEBUG
 	if (blkg_rwstat_init(&stats->merged, gfp) ||
@@ -476,15 +476,13 @@ static int bfqg_stats_init(struct bfqg_stats *stats, gfp_t gfp)
 	    bfq_stat_init(&stats->dequeue, gfp) ||
 	    bfq_stat_init(&stats->group_wait_time, gfp) ||
 	    bfq_stat_init(&stats->idle_time, gfp) ||
-	    bfq_stat_init(&stats->empty_time, gfp))
-		goto error;
+	    bfq_stat_init(&stats->empty_time, gfp)) {
+		bfqg_stats_exit(stats);
+		return -ENOMEM;
+	}
 #endif
 
 	return 0;
-
-error:
-	bfqg_stats_exit(stats);
-	return -ENOMEM;
 }
 
 static struct bfq_group_data *cpd_to_bfqgd(struct blkcg_policy_data *cpd)
@@ -643,10 +641,7 @@ void bfq_bfqq_move(struct bfq_data *bfqd, struct bfq_queue *bfqq,
 		   struct bfq_group *bfqg)
 {
 	struct bfq_entity *entity = &bfqq->entity;
-	struct bfq_group *old_parent = bfqq_group(bfqq);
 
-	if (bfqq == &bfqd->oom_bfqq)
-		return;
 	/*
 	 * Get extra reference to prevent bfqq from being freed in
 	 * next possible expire or deactivate.
@@ -667,22 +662,18 @@ void bfq_bfqq_move(struct bfq_data *bfqd, struct bfq_queue *bfqq,
 		bfq_deactivate_bfqq(bfqd, bfqq, false, false);
 	else if (entity->on_st_or_in_serv)
 		bfq_put_idle_entity(bfq_entity_service_tree(entity), entity);
+	bfqg_and_blkg_put(bfqq_group(bfqq));
 
 	entity->parent = bfqg->my_entity;
 	entity->sched_data = &bfqg->sched_data;
 	/* pin down bfqg and its associated blkg  */
 	bfqg_and_blkg_get(bfqg);
 
-	/*
-	 * Don't leave the bfqq->pos_root to old bfqg, since the ref to old
-	 * bfqg will be released and the bfqg might be freed.
-	 */
-	if (unlikely(!bfqd->nonrot_with_queueing))
-		bfq_pos_tree_add_move(bfqd, bfqq);
-	bfqg_and_blkg_put(old_parent);
-
-	if (bfq_bfqq_busy(bfqq))
+	if (bfq_bfqq_busy(bfqq)) {
+		if (unlikely(!bfqd->nonrot_with_queueing))
+			bfq_pos_tree_add_move(bfqd, bfqq);
 		bfq_activate_bfqq(bfqd, bfqq);
+	}
 
 	if (!bfqd->in_service_queue && !bfqd->rq_in_driver)
 		bfq_schedule_dispatch(bfqd);
@@ -728,39 +719,9 @@ static struct bfq_group *__bfq_bic_change_cgroup(struct bfq_data *bfqd,
 	}
 
 	if (sync_bfqq) {
-		if (!sync_bfqq->new_bfqq && !bfq_bfqq_coop(sync_bfqq)) {
-			/* We are the only user of this bfqq, just move it */
-			if (sync_bfqq->entity.sched_data != &bfqg->sched_data)
-				bfq_bfqq_move(bfqd, sync_bfqq, bfqg);
-		} else {
-			struct bfq_queue *bfqq;
-
-			/*
-			 * The queue was merged to a different queue. Check
-			 * that the merge chain still belongs to the same
-			 * cgroup.
-			 */
-			for (bfqq = sync_bfqq; bfqq; bfqq = bfqq->new_bfqq)
-				if (bfqq->entity.sched_data !=
-				    &bfqg->sched_data)
-					break;
-			if (bfqq) {
-				/*
-				 * Some queue changed cgroup so the merge is
-				 * not valid anymore. We cannot easily just
-				 * cancel the merge (by clearing new_bfqq) as
-				 * there may be other processes using this
-				 * queue and holding refs to all queues below
-				 * sync_bfqq->new_bfqq. Similarly if the merge
-				 * already happened, we need to detach from
-				 * bfqq now so that we cannot merge bio to a
-				 * request from the old cgroup.
-				 */
-				bfq_put_cooperator(sync_bfqq);
-				bfq_release_process_ref(bfqd, sync_bfqq);
-				bic_set_bfqq(bic, NULL, 1);
-			}
-		}
+		entity = &sync_bfqq->entity;
+		if (entity->sched_data != &bfqg->sched_data)
+			bfq_bfqq_move(bfqd, sync_bfqq, bfqg);
 	}
 
 	return bfqg;
@@ -964,7 +925,6 @@ static void bfq_pd_offline(struct blkg_policy_data *pd)
 
 put_async_queues:
 	bfq_put_async_queues(bfqd, bfqg);
-	pd->plid = BLKCG_MAX_POLS;
 
 	spin_unlock_irqrestore(&bfqd->lock, flags);
 	/*
