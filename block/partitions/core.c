@@ -192,7 +192,7 @@ static ssize_t part_ro_show(struct device *dev,
 			    struct device_attribute *attr, char *buf)
 {
 	struct hd_struct *p = dev_to_part(dev);
-	return sprintf(buf, "%d\n", p->read_only ? 1 : 0);
+	return sprintf(buf, "%d\n", p->policy ? 1 : 0);
 }
 
 static ssize_t part_alignment_offset_show(struct device *dev,
@@ -414,8 +414,7 @@ static struct hd_struct *add_partition(struct gendisk *disk, int partno,
 	p->start_sect = start;
 	p->nr_sects = len;
 	p->partno = partno;
-	p->read_only = get_disk_ro(disk) | test_bit(partno, disk->user_ro_bitmap);
-	p->stat_time = 0;
+	p->policy = get_disk_ro(disk);
 
 	if (info) {
 		struct partition_meta_info *pinfo;
@@ -520,28 +519,17 @@ int bdev_add_partition(struct block_device *bdev, int partno,
 		sector_t start, sector_t length)
 {
 	struct hd_struct *part;
-	struct gendisk *disk = bdev->bd_disk;
-	int ret;
 
 	mutex_lock(&bdev->bd_mutex);
-	down_read(&disk->lookup_sem);
-	if (!(disk->flags & GENHD_FL_UP)) {
-		ret = -ENXIO;
-		goto out;
+	if (partition_overlaps(bdev->bd_disk, start, length, -1)) {
+		mutex_unlock(&bdev->bd_mutex);
+		return -EBUSY;
 	}
 
-	if (partition_overlaps(disk, start, length, -1)) {
-		ret = -EBUSY;
-		goto out;
-	}
-
-	part = add_partition(disk, partno, start, length,
+	part = add_partition(bdev->bd_disk, partno, start, length,
 			ADDPART_FLAG_NONE, NULL);
-	ret = PTR_ERR_OR_ZERO(part);
-out:
-	up_read(&disk->lookup_sem);
 	mutex_unlock(&bdev->bd_mutex);
-	return ret;
+	return PTR_ERR_OR_ZERO(part);
 }
 
 int bdev_del_partition(struct block_device *bdev, int partno)
@@ -556,7 +544,6 @@ int bdev_del_partition(struct block_device *bdev, int partno)
 
 	mutex_lock(&bdevp->bd_mutex);
 	mutex_lock_nested(&bdev->bd_mutex, 1);
-	down_read(&bdev->bd_disk->lookup_sem);
 
 	ret = -ENXIO;
 	part = disk_get_part(bdev->bd_disk, partno);
@@ -573,7 +560,6 @@ int bdev_del_partition(struct block_device *bdev, int partno)
 	delete_partition(part);
 	ret = 0;
 out_unlock:
-	up_read(&bdev->bd_disk->lookup_sem);
 	mutex_unlock(&bdev->bd_mutex);
 	mutex_unlock(&bdevp->bd_mutex);
 	bdput(bdevp);
