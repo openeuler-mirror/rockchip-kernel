@@ -20,6 +20,7 @@
 #include <linux/percpu.h>
 #include <linux/sched.h>
 #include <linux/smp.h>
+#include <trace/hooks/topology.h>
 
 bool topology_scale_freq_invariant(void)
 {
@@ -32,6 +33,7 @@ __weak bool arch_freq_counters_available(const struct cpumask *cpus)
 	return false;
 }
 DEFINE_PER_CPU(unsigned long, freq_scale) = SCHED_CAPACITY_SCALE;
+EXPORT_PER_CPU_SYMBOL_GPL(freq_scale);
 
 void topology_set_freq_scale(const struct cpumask *cpus, unsigned long cur_freq,
 			     unsigned long max_freq)
@@ -52,11 +54,14 @@ void topology_set_freq_scale(const struct cpumask *cpus, unsigned long cur_freq,
 
 	scale = (cur_freq << SCHED_CAPACITY_SHIFT) / max_freq;
 
+	trace_android_vh_arch_set_freq_scale(cpus, cur_freq, max_freq, &scale);
+
 	for_each_cpu(i, cpus)
 		per_cpu(freq_scale, i) = scale;
 }
 
 DEFINE_PER_CPU(unsigned long, cpu_scale) = SCHED_CAPACITY_SCALE;
+EXPORT_PER_CPU_SYMBOL_GPL(cpu_scale);
 
 void topology_set_cpu_scale(unsigned int cpu, unsigned long capacity)
 {
@@ -64,6 +69,7 @@ void topology_set_cpu_scale(unsigned int cpu, unsigned long capacity)
 }
 
 DEFINE_PER_CPU(unsigned long, thermal_pressure);
+EXPORT_PER_CPU_SYMBOL_GPL(thermal_pressure);
 
 void topology_set_thermal_pressure(const struct cpumask *cpus,
 			       unsigned long th_pressure)
@@ -73,6 +79,7 @@ void topology_set_thermal_pressure(const struct cpumask *cpus,
 	for_each_cpu(cpu, cpus)
 		WRITE_ONCE(per_cpu(thermal_pressure, cpu), th_pressure);
 }
+EXPORT_SYMBOL_GPL(topology_set_thermal_pressure);
 
 static ssize_t cpu_capacity_show(struct device *dev,
 				 struct device_attribute *attr,
@@ -108,6 +115,8 @@ static int register_cpu_capacity_sysctl(void)
 subsys_initcall(register_cpu_capacity_sysctl);
 
 static int update_topology;
+bool topology_update_done;
+EXPORT_SYMBOL_GPL(topology_update_done);
 
 int topology_update_cpu_topology(void)
 {
@@ -122,6 +131,8 @@ static void update_topology_flags_workfn(struct work_struct *work)
 {
 	update_topology = 1;
 	rebuild_sched_domains();
+	topology_update_done = true;
+	trace_android_vh_update_topology_flags_workfn(NULL);
 	pr_debug("sched_domain hierarchy rebuilt, flags updated\n");
 	update_topology = 0;
 }
@@ -506,11 +517,6 @@ const struct cpumask *cpu_coregroup_mask(int cpu)
 	return core_mask;
 }
 
-const struct cpumask *cpu_clustergroup_mask(int cpu)
-{
-	return &cpu_topology[cpu].cluster_sibling;
-}
-
 void update_siblings_masks(unsigned int cpuid)
 {
 	struct cpu_topology *cpu_topo, *cpuid_topo = &cpu_topology[cpuid];
@@ -520,19 +526,13 @@ void update_siblings_masks(unsigned int cpuid)
 	for_each_online_cpu(cpu) {
 		cpu_topo = &cpu_topology[cpu];
 
-		if (cpu_topo->llc_id != -1 && cpuid_topo->llc_id == cpu_topo->llc_id) {
+		if (cpuid_topo->llc_id == cpu_topo->llc_id) {
 			cpumask_set_cpu(cpu, &cpuid_topo->llc_sibling);
 			cpumask_set_cpu(cpuid, &cpu_topo->llc_sibling);
 		}
 
 		if (cpuid_topo->package_id != cpu_topo->package_id)
 			continue;
-
-		if (cpuid_topo->cluster_id == cpu_topo->cluster_id &&
-		    cpuid_topo->cluster_id != -1) {
-			cpumask_set_cpu(cpu, &cpuid_topo->cluster_sibling);
-			cpumask_set_cpu(cpuid, &cpu_topo->cluster_sibling);
-		}
 
 		cpumask_set_cpu(cpuid, &cpu_topo->core_sibling);
 		cpumask_set_cpu(cpu, &cpuid_topo->core_sibling);
@@ -552,9 +552,6 @@ static void clear_cpu_topology(int cpu)
 	cpumask_clear(&cpu_topo->llc_sibling);
 	cpumask_set_cpu(cpu, &cpu_topo->llc_sibling);
 
-	cpumask_clear(&cpu_topo->cluster_sibling);
-	cpumask_set_cpu(cpu, &cpu_topo->cluster_sibling);
-
 	cpumask_clear(&cpu_topo->core_sibling);
 	cpumask_set_cpu(cpu, &cpu_topo->core_sibling);
 	cpumask_clear(&cpu_topo->thread_sibling);
@@ -570,7 +567,6 @@ void __init reset_cpu_topology(void)
 
 		cpu_topo->thread_id = -1;
 		cpu_topo->core_id = -1;
-		cpu_topo->cluster_id = -1;
 		cpu_topo->package_id = -1;
 		cpu_topo->llc_id = -1;
 
@@ -586,8 +582,6 @@ void remove_cpu_topology(unsigned int cpu)
 		cpumask_clear_cpu(cpu, topology_core_cpumask(sibling));
 	for_each_cpu(sibling, topology_sibling_cpumask(cpu))
 		cpumask_clear_cpu(cpu, topology_sibling_cpumask(sibling));
-	for_each_cpu(sibling, topology_cluster_cpumask(cpu))
-		cpumask_clear_cpu(cpu, topology_cluster_cpumask(sibling));
 	for_each_cpu(sibling, topology_llc_cpumask(cpu))
 		cpumask_clear_cpu(cpu, topology_llc_cpumask(sibling));
 
