@@ -61,6 +61,7 @@
 static DEFINE_MUTEX(core_lock);
 static DEFINE_IDR(i2c_adapter_idr);
 
+static int i2c_check_addr_ex(struct i2c_adapter *adapter, int addr);
 static int i2c_detect(struct i2c_adapter *adapter, struct i2c_driver *driver);
 
 static DEFINE_STATIC_KEY_FALSE(i2c_trace_msg_key);
@@ -76,27 +77,6 @@ void i2c_transfer_trace_unreg(void)
 {
 	static_branch_dec(&i2c_trace_msg_key);
 }
-
-const char *i2c_freq_mode_string(u32 bus_freq_hz)
-{
-	switch (bus_freq_hz) {
-	case I2C_MAX_STANDARD_MODE_FREQ:
-		return "Standard Mode (100 kHz)";
-	case I2C_MAX_FAST_MODE_FREQ:
-		return "Fast Mode (400 kHz)";
-	case I2C_MAX_FAST_MODE_PLUS_FREQ:
-		return "Fast Mode Plus (1.0 MHz)";
-	case I2C_MAX_TURBO_MODE_FREQ:
-		return "Turbo Mode (1.4 MHz)";
-	case I2C_MAX_HIGH_SPEED_MODE_FREQ:
-		return "High Speed Mode (3.4 MHz)";
-	case I2C_MAX_ULTRA_FAST_MODE_FREQ:
-		return "Ultra Fast Mode (5.0 MHz)";
-	default:
-		return "Unknown Mode";
-	}
-}
-EXPORT_SYMBOL_GPL(i2c_freq_mode_string);
 
 const struct i2c_device_id *i2c_match_id(const struct i2c_device_id *id,
 						const struct i2c_client *client)
@@ -829,7 +809,8 @@ static void i2c_adapter_unlock_bus(struct i2c_adapter *adapter,
 
 static void i2c_dev_set_name(struct i2c_adapter *adap,
 			     struct i2c_client *client,
-			     struct i2c_board_info const *info)
+			     struct i2c_board_info const *info,
+			     int status)
 {
 	struct acpi_device *adev = ACPI_COMPANION(&client->dev);
 
@@ -843,8 +824,12 @@ static void i2c_dev_set_name(struct i2c_adapter *adap,
 		return;
 	}
 
-	dev_set_name(&client->dev, "%d-%04x", i2c_adapter_id(adap),
-		     i2c_encode_flags_to_addr(client));
+	if (status == 0)
+		dev_set_name(&client->dev, "%d-%04x", i2c_adapter_id(adap),
+			i2c_encode_flags_to_addr(client));
+	else
+		dev_set_name(&client->dev, "%d-%04x-%01x", i2c_adapter_id(adap),
+			i2c_encode_flags_to_addr(client), status);
 }
 
 int i2c_dev_irq_from_resources(const struct resource *resources,
@@ -920,9 +905,11 @@ i2c_new_client_device(struct i2c_adapter *adap, struct i2c_board_info const *inf
 	}
 
 	/* Check for address business */
-	status = i2c_check_addr_busy(adap, i2c_encode_flags_to_addr(client));
+	status = i2c_check_addr_ex(adap, i2c_encode_flags_to_addr(client));
 	if (status)
-		goto out_err;
+		dev_err(&adap->dev,
+			"%d i2c clients have been registered at 0x%02x",
+			status, client->addr);
 
 	client->dev.parent = &client->adapter->dev;
 	client->dev.bus = &i2c_bus_type;
@@ -930,7 +917,7 @@ i2c_new_client_device(struct i2c_adapter *adap, struct i2c_board_info const *inf
 	client->dev.of_node = of_node_get(info->of_node);
 	client->dev.fwnode = info->fwnode;
 
-	i2c_dev_set_name(adap, client, info);
+	i2c_dev_set_name(adap, client, info, status);
 
 	if (info->properties) {
 		status = device_add_properties(&client->dev, info->properties);
@@ -956,10 +943,6 @@ out_free_props:
 		device_remove_properties(&client->dev);
 out_err_put_of_node:
 	of_node_put(info->of_node);
-out_err:
-	dev_err(&adap->dev,
-		"Failed to register i2c client %s at 0x%02x (%d)\n",
-		client->name, client->addr, status);
 out_err_silent:
 	kfree(client);
 	return ERR_PTR(status);
@@ -1726,32 +1709,6 @@ void i2c_del_adapter(struct i2c_adapter *adap)
 }
 EXPORT_SYMBOL(i2c_del_adapter);
 
-static void devm_i2c_del_adapter(void *adapter)
-{
-	i2c_del_adapter(adapter);
-}
-
-/**
- * devm_i2c_add_adapter - device-managed variant of i2c_add_adapter()
- * @dev: managing device for adding this I2C adapter
- * @adapter: the adapter to add
- * Context: can sleep
- *
- * Add adapter with dynamic bus number, same with i2c_add_adapter()
- * but the adapter will be auto deleted on driver detach.
- */
-int devm_i2c_add_adapter(struct device *dev, struct i2c_adapter *adapter)
-{
-	int ret;
-
-	ret = i2c_add_adapter(adapter);
-	if (ret)
-		return ret;
-
-	return devm_add_action_or_reset(dev, devm_i2c_del_adapter, adapter);
-}
-EXPORT_SYMBOL_GPL(devm_i2c_add_adapter);
-
 static void i2c_parse_timing(struct device *dev, char *prop_name, u32 *cur_val_p,
 			    u32 def_val, bool use_def)
 {
@@ -1884,6 +1841,33 @@ void i2c_del_driver(struct i2c_driver *driver)
 EXPORT_SYMBOL(i2c_del_driver);
 
 /* ------------------------------------------------------------------------- */
+
+struct i2c_addr_cnt {
+	int addr;
+	int cnt;
+};
+
+static int __i2c_check_addr_ex(struct device *dev, void *addrp)
+{
+	struct i2c_client *client = i2c_verify_client(dev);
+	struct i2c_addr_cnt *addrinfo = (struct i2c_addr_cnt *)addrp;
+	int addr = addrinfo->addr;
+
+	if (client && client->addr == addr)
+		addrinfo->cnt++;
+
+	return 0;
+}
+
+static int i2c_check_addr_ex(struct i2c_adapter *adapter, int addr)
+{
+	struct i2c_addr_cnt addrinfo;
+
+	addrinfo.addr = addr;
+	addrinfo.cnt = 0;
+	device_for_each_child(&adapter->dev, &addrinfo, __i2c_check_addr_ex);
+	return addrinfo.cnt;
+}
 
 struct i2c_cmd_arg {
 	unsigned	cmd;
