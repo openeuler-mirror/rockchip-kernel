@@ -118,9 +118,6 @@ module_param_named(disable, ghes_disable, bool, 0);
 static LIST_HEAD(ghes_hed);
 static DEFINE_MUTEX(ghes_list_mutex);
 
-BLOCKING_NOTIFIER_HEAD(ghes_ts_err_chain);
-EXPORT_SYMBOL(ghes_ts_err_chain);
-
 /*
  * Because the memory area used to transfer hardware error information
  * from BIOS to Linux can be determined only in NMI, IRQ or timer
@@ -493,8 +490,9 @@ static bool ghes_handle_arm_hw_error(struct acpi_hest_generic_data *gdata, int s
 	int sec_sev, i;
 	char *p;
 
+	log_arm_hw_error(err);
+
 	sec_sev = ghes_severity(gdata->error_severity);
-	log_arm_hw_error(err, sec_sev);
 	if (sev != GHES_SEV_RECOVERABLE || sec_sev != GHES_SEV_RECOVERABLE)
 		return false;
 
@@ -657,20 +655,14 @@ static bool ghes_do_proc(struct ghes *ghes,
 		}
 		else if (guid_equal(sec_type, &CPER_SEC_PROC_ARM)) {
 			queued = ghes_handle_arm_hw_error(gdata, sev);
-		}
-		else if (guid_equal(sec_type, &CPER_SEC_TS_CORE)) {
-			blocking_notifier_call_chain(&ghes_ts_err_chain,
-					0, acpi_hest_get_payload(gdata));
 		} else {
 			void *err = acpi_hest_get_payload(gdata);
 
+			ghes_defer_non_standard_event(gdata, sev);
 			log_non_standard_event(sec_type, fru_id, fru_text,
 					       sec_sev, err,
 					       gdata->error_data_length);
 		}
-
-		/* Customization deliver all types error to driver. */
-		ghes_defer_non_standard_event(gdata, sev);
 	}
 
 	return queued;
