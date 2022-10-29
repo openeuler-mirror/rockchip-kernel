@@ -93,12 +93,6 @@ static const unsigned long ata_eh_identify_timeouts[] = {
 	ULONG_MAX,
 };
 
-static const unsigned long ata_eh_revalidate_timeouts[] = {
-	15000,	/* Some drives are slow to read log pages when waking-up */
-	15000,  /* combined time till here is enough even for media access */
-	ULONG_MAX,
-};
-
 static const unsigned long ata_eh_flush_timeouts[] = {
 	15000,	/* be generous with flush */
 	15000,  /* ditto */
@@ -135,8 +129,6 @@ static const struct ata_eh_cmd_timeout_ent
 ata_eh_cmd_timeout_table[ATA_EH_CMD_TIMEOUT_TABLE_SIZE] = {
 	{ .commands = CMDS(ATA_CMD_ID_ATA, ATA_CMD_ID_ATAPI),
 	  .timeouts = ata_eh_identify_timeouts, },
-	{ .commands = CMDS(ATA_CMD_READ_LOG_EXT, ATA_CMD_READ_LOG_DMA_EXT),
-	  .timeouts = ata_eh_revalidate_timeouts, },
 	{ .commands = CMDS(ATA_CMD_READ_NATIVE_MAX, ATA_CMD_READ_NATIVE_MAX_EXT),
 	  .timeouts = ata_eh_other_timeouts, },
 	{ .commands = CMDS(ATA_CMD_SET_MAX, ATA_CMD_SET_MAX_EXT),
@@ -3237,8 +3229,6 @@ static int ata_eh_set_lpm(struct ata_link *link, enum ata_lpm_policy policy,
 			  struct ata_device **r_failed_dev)
 {
 	struct ata_port *ap = ata_is_host_link(link) ? link->ap : NULL;
-	struct device *device = ap->host->dev;
-	struct pci_dev *pdev = (!device || !dev_is_pci(device)) ? NULL : to_pci_dev(device);
 	struct ata_eh_context *ehc = &link->eh_context;
 	struct ata_device *dev, *link_dev = NULL, *lpm_dev = NULL;
 	enum ata_lpm_policy old_policy = link->lpm_policy;
@@ -3246,11 +3236,6 @@ static int ata_eh_set_lpm(struct ata_link *link, enum ata_lpm_policy policy,
 	unsigned int hints = ATA_LPM_EMPTY | ATA_LPM_HIPM;
 	unsigned int err_mask;
 	int rc;
-
-	/* if controller does not support lpm, then sets no LPM flags*/
-	if ((pdev && pdev->vendor == PCI_VENDOR_ID_ZHAOXIN) &&
-		!(ap->host->flags & (ATA_HOST_PART | ATA_HOST_SSC | ATA_HOST_DEVSLP)))
-		link->flags |= ATA_LFLAG_NO_LPM;
 
 	/* if the link or host doesn't do LPM, noop */
 	if (!IS_ENABLED(CONFIG_SATA_HOST) ||
