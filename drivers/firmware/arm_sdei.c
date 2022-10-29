@@ -31,6 +31,7 @@
 #include <linux/slab.h>
 #include <linux/smp.h>
 #include <linux/spinlock.h>
+#include <linux/uaccess.h>
 
 /*
  * The call to use to reach the firmware.
@@ -185,28 +186,6 @@ int sdei_api_event_context(u32 query, u64 *result)
 			      result);
 }
 NOKPROBE_SYMBOL(sdei_api_event_context);
-
-int sdei_api_event_interrupt_bind(int hwirq)
-{
-	u64 event_number;
-
-	invoke_sdei_fn(SDEI_1_0_FN_SDEI_INTERRUPT_BIND, hwirq, 0, 0, 0, 0,
-			&event_number);
-
-	return (int)event_number;
-}
-
-int sdei_api_clear_eoi(int hwirq)
-{
-	return invoke_sdei_fn(SDEI_1_0_FN_SDEI_CLEAR_EOI, hwirq, 0, 0, 0, 0,
-			NULL);
-}
-
-int sdei_api_set_secure_timer_period(int sec)
-{
-	return invoke_sdei_fn(SDEI_1_0_FN_SET_SECURE_TIMER_PERIOD, sec, 0, 0, 0,
-			0, NULL);
-}
 
 static int sdei_api_event_get_info(u32 event, u32 info, u64 *result)
 {
@@ -399,7 +378,7 @@ static int sdei_platform_reset(void)
 	return err;
 }
 
-int sdei_api_event_enable(u32 event_num)
+static int sdei_api_event_enable(u32 event_num)
 {
 	return invoke_sdei_fn(SDEI_1_0_FN_SDEI_EVENT_ENABLE, event_num, 0, 0, 0,
 			      0, NULL);
@@ -448,7 +427,7 @@ int sdei_event_enable(u32 event_num)
 	return err;
 }
 
-int sdei_api_event_disable(u32 event_num)
+static int sdei_api_event_disable(u32 event_num)
 {
 	return invoke_sdei_fn(SDEI_1_0_FN_SDEI_EVENT_DISABLE, event_num, 0, 0,
 			      0, 0, NULL);
@@ -941,6 +920,45 @@ int sdei_unregister_ghes(struct ghes *ghes)
 	return err;
 }
 
+#ifdef CONFIG_FIQ_DEBUGGER_TRUST_ZONE
+int sdei_event_enable_nolock(u32 event_num)
+{
+	return sdei_api_event_enable(event_num);
+}
+
+int sdei_event_disable_nolock(u32 event_num)
+{
+	return sdei_api_event_disable(event_num);
+}
+
+int sdei_event_routing_set_nolock(u32 event_num, unsigned long flags,
+				  unsigned long affinity)
+{
+	return invoke_sdei_fn(SDEI_1_0_FN_SDEI_EVENT_ROUTING_SET, event_num,
+			      (unsigned long)flags, (unsigned long)affinity,
+			      0, 0, 0);
+}
+
+int sdei_event_routing_set(u32 event_num, unsigned long flags,
+			   unsigned long affinity)
+{
+	int err = -EINVAL;
+	struct sdei_event *event;
+
+	mutex_lock(&sdei_events_lock);
+	event = sdei_event_find(event_num);
+	if (!event) {
+		mutex_unlock(&sdei_events_lock);
+		return -ENOENT;
+	}
+
+	err = sdei_event_routing_set_nolock(event_num, flags, affinity);
+	mutex_unlock(&sdei_events_lock);
+
+	return err;
+}
+#endif
+
 static int sdei_get_conduit(struct platform_device *pdev)
 {
 	const char *method;
@@ -1113,12 +1131,25 @@ int sdei_event_handler(struct pt_regs *regs,
 		       struct sdei_registered_event *arg)
 {
 	int err;
+	mm_segment_t orig_addr_limit;
 	u32 event_num = arg->event_num;
+
+	/*
+	 * Save restore 'fs'.
+	 * The architecture's entry code save/restores 'fs' when taking an
+	 * exception from the kernel. This ensures addr_limit isn't inherited
+	 * if you interrupted something that allowed the uaccess routines to
+	 * access kernel memory.
+	 * Do the same here because this doesn't come via the same entry code.
+	*/
+	orig_addr_limit = force_uaccess_begin();
 
 	err = arg->callback(event_num, regs, arg->callback_arg);
 	if (err)
 		pr_err_ratelimited("event %u on CPU %u failed with error: %d\n",
 				   event_num, smp_processor_id(), err);
+
+	force_uaccess_end(orig_addr_limit);
 
 	return err;
 }

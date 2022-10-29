@@ -15,95 +15,6 @@
 
 #include "efistub.h"
 
-#define MAX_MEMMAP_REGIONS 32
-
-struct mem_vector {
-	unsigned long long start;
-	unsigned long long size;
-};
-
-static struct mem_vector mem_avoid[MAX_MEMMAP_REGIONS];
-
-static int
-efi_parse_memmap(char *p, unsigned long long *start, unsigned long long *size)
-{
-	char *oldp;
-	u64 mem_size;
-
-	if (!p)
-		return -EINVAL;
-
-	oldp = p;
-	mem_size = memparse(p, &p);
-	if (p == oldp)
-		return -EINVAL;
-	if (!mem_size)
-		return -EINVAL;
-	if (*p != '$')
-		return -EINVAL;
-
-	*start = memparse(p + 1, &p);
-	*size = mem_size;
-
-	return 0;
-}
-
-void efi_parse_option_memmap(const char *str)
-{
-	int rc;
-	static int idx;
-	char *k, *p = (char *)str;
-
-	while (p && (idx < MAX_MEMMAP_REGIONS)) {
-		k = strchr(p, ',');
-		if (k)
-			*k++ = 0;
-
-		rc = efi_parse_memmap(p, &mem_avoid[idx].start, &mem_avoid[idx].size);
-		if (rc < 0)
-			efi_err("Failed to parse memmap cmdlines, index: %d, str: %s\n", idx, p);
-
-		p = k;
-		idx++;
-	}
-}
-
-void mem_avoid_memmap(void)
-{
-	int i;
-	efi_status_t status;
-	unsigned long nr_pages;
-	unsigned long long start, end;
-
-	for (i = 0; i < MAX_MEMMAP_REGIONS; i++) {
-		if (!mem_avoid[i].size)
-			continue;
-		start = round_down(mem_avoid[i].start, EFI_ALLOC_ALIGN);
-		end = round_up(mem_avoid[i].start + mem_avoid[i].size, EFI_ALLOC_ALIGN);
-		nr_pages = (end - start) / EFI_PAGE_SIZE;
-
-		mem_avoid[i].start = start;
-		mem_avoid[i].size = end - start;
-		status = efi_bs_call(allocate_pages, EFI_ALLOCATE_ADDRESS,
-				     EFI_LOADER_DATA, nr_pages, &mem_avoid[i].start);
-		if (status != EFI_SUCCESS) {
-			efi_err("Failed to reserve memmap, index: %d, status: %lu\n", i, status);
-			mem_avoid[i].size = 0;
-		}
-	}
-}
-
-void free_avoid_memmap(void)
-{
-	int i;
-
-	for (i = 0; i < MAX_MEMMAP_REGIONS; i++) {
-		if (!mem_avoid[i].size)
-			continue;
-		efi_free(mem_avoid[i].size, mem_avoid[i].start);
-	}
-}
-
 efi_status_t check_platform_features(void)
 {
 	u64 tg;
@@ -168,18 +79,6 @@ static bool check_image_region(u64 base, u64 size)
 	return ret;
 }
 
-/*
- * Although relocatable kernels can fix up the misalignment with respect to
- * MIN_KIMG_ALIGN, the resulting virtual text addresses are subtly out of
- * sync with those recorded in the vmlinux when kaslr is disabled but the
- * image required relocation anyway. Therefore retain 2M alignment unless
- * KASLR is in use.
- */
-static u64 min_kimg_align(void)
-{
-	return efi_nokaslr ? MIN_KIMG_ALIGN : EFI_KIMG_ALIGN;
-}
-
 efi_status_t handle_kernel_image(unsigned long *image_addr,
 				 unsigned long *image_size,
 				 unsigned long *reserve_addr,
@@ -189,6 +88,16 @@ efi_status_t handle_kernel_image(unsigned long *image_addr,
 	efi_status_t status;
 	unsigned long kernel_size, kernel_memsize = 0;
 	u32 phys_seed = 0;
+
+	/*
+	 * Although relocatable kernels can fix up the misalignment with
+	 * respect to MIN_KIMG_ALIGN, the resulting virtual text addresses are
+	 * subtly out of sync with those recorded in the vmlinux when kaslr is
+	 * disabled but the image required relocation anyway. Therefore retain
+	 * 2M alignment if KASLR was explicitly disabled, even if it was not
+	 * going to be activated to begin with.
+	 */
+	u64 min_kimg_align = efi_nokaslr ? MIN_KIMG_ALIGN : EFI_KIMG_ALIGN;
 
 	if (IS_ENABLED(CONFIG_RANDOMIZE_BASE)) {
 		if (!efi_nokaslr) {
@@ -210,9 +119,9 @@ efi_status_t handle_kernel_image(unsigned long *image_addr,
 	if (image->image_base != _text)
 		efi_err("FIRMWARE BUG: efi_loaded_image_t::image_base has bogus value\n");
 
-	if (!IS_ALIGNED((u64)_text, SEGMENT_ALIGN))
-		efi_err("FIRMWARE BUG: kernel image not aligned on %dk boundary\n",
-			SEGMENT_ALIGN >> 10);
+	if (!IS_ALIGNED((u64)_text, EFI_KIMG_ALIGN))
+		efi_err("FIRMWARE BUG: kernel image not aligned on %ldk boundary\n",
+			EFI_KIMG_ALIGN >> 10);
 
 	kernel_size = _edata - _text;
 	kernel_memsize = kernel_size + (_end - _edata);
@@ -223,7 +132,7 @@ efi_status_t handle_kernel_image(unsigned long *image_addr,
 		 * If KASLR is enabled, and we have some randomness available,
 		 * locate the kernel at a randomized offset in physical memory.
 		 */
-		status = efi_random_alloc(*reserve_size, min_kimg_align(),
+		status = efi_random_alloc(*reserve_size, min_kimg_align,
 					  reserve_addr, phys_seed);
 	} else {
 		status = EFI_OUT_OF_RESOURCES;
@@ -232,7 +141,7 @@ efi_status_t handle_kernel_image(unsigned long *image_addr,
 	if (status != EFI_SUCCESS) {
 		if (!check_image_region((u64)_text, kernel_memsize)) {
 			efi_err("FIRMWARE BUG: Image BSS overlaps adjacent EFI memory region\n");
-		} else if (IS_ALIGNED((u64)_text, min_kimg_align())) {
+		} else if (IS_ALIGNED((u64)_text, min_kimg_align)) {
 			/*
 			 * Just execute from wherever we were loaded by the
 			 * UEFI PE/COFF loader if the alignment is suitable.
@@ -243,7 +152,7 @@ efi_status_t handle_kernel_image(unsigned long *image_addr,
 		}
 
 		status = efi_allocate_pages_aligned(*reserve_size, reserve_addr,
-						    ULONG_MAX, min_kimg_align());
+						    ULONG_MAX, min_kimg_align);
 
 		if (status != EFI_SUCCESS) {
 			efi_err("Failed to relocate kernel\n");
