@@ -36,13 +36,12 @@
 #include <linux/splice.h>
 #include <linux/in6.h>
 #include <linux/if_packet.h>
-#include <linux/llist.h>
 #include <net/flow.h>
-#include <net/page_pool.h>
-#include <linux/kabi.h>
 #if IS_ENABLED(CONFIG_NF_CONNTRACK)
 #include <linux/netfilter/nf_conntrack_common.h>
 #endif
+#include <linux/android_kabi.h>
+#include <linux/android_vendor.h>
 
 /* The interface for checksum offload between the stack and networking drivers
  * is as follows...
@@ -534,6 +533,8 @@ struct skb_shared_info {
 	 * remains valid until skb destructor */
 	void *		destructor_arg;
 
+	ANDROID_OEM_DATA_ARRAY(1, 3);
+
 	/* must be last field, see pskb_expand_head() */
 	skb_frag_t	frags[MAX_SKB_FRAGS];
 };
@@ -667,8 +668,6 @@ typedef unsigned char *sk_buff_data_t;
  *	@head_frag: skb was allocated from page fragments,
  *		not allocated by kmalloc() or vmalloc().
  *	@pfmemalloc: skbuff was allocated from PFMEMALLOC reserves
- *	@pp_recycle: mark the packet for recycling instead of freeing (implies
- *		page_pool support on driver)
  *	@active_extensions: active extensions (skb_ext_id types)
  *	@ndisc_nodetype: router type (from link layer)
  *	@ooo_okay: allow the mapping of a socket to a queue to be changed
@@ -733,7 +732,6 @@ struct sk_buff {
 		};
 		struct rb_node		rbnode; /* used in netem, ip4 defrag, and tcp stack */
 		struct list_head	list;
-		struct llist_node	ll_node;
 	};
 
 	union {
@@ -790,12 +788,10 @@ struct sk_buff {
 				fclone:2,
 				peeked:1,
 				head_frag:1,
-				pfmemalloc:1,
-				pp_recycle:1; /* page_pool recycle indicator */
+				pfmemalloc:1;
 #ifdef CONFIG_SKB_EXTENSIONS
 	__u8			active_extensions;
 #endif
-
 	/* fields enclosed in headers_start/headers_end are copied
 	 * using a single memcpy() in __copy_skb_header()
 	 */
@@ -916,10 +912,8 @@ struct sk_buff {
 	__u32			headers_end[0];
 	/* public: */
 
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
-	KABI_RESERVE(3)
-	KABI_RESERVE(4)
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
 
 	/* These elements must be at the end, see alloc_skb() for details.  */
 	sk_buff_data_t		tail;
@@ -1652,22 +1646,6 @@ static inline int skb_unclone(struct sk_buff *skb, gfp_t pri)
 	return 0;
 }
 
-/* This variant of skb_unclone() makes sure skb->truesize is not changed */
-static inline int skb_unclone_keeptruesize(struct sk_buff *skb, gfp_t pri)
-{
-	might_sleep_if(gfpflags_allow_blocking(pri));
-
-	if (skb_cloned(skb)) {
-		unsigned int save = skb->truesize;
-		int res;
-
-		res = pskb_expand_head(skb, 0, 0, pri);
-		skb->truesize = save;
-		return res;
-	}
-	return 0;
-}
-
 /**
  *	skb_header_cloned - is the header a clone
  *	@skb: buffer to check
@@ -1937,7 +1915,7 @@ static inline void __skb_insert(struct sk_buff *newsk,
 	WRITE_ONCE(newsk->prev, prev);
 	WRITE_ONCE(next->prev, newsk);
 	WRITE_ONCE(prev->next, newsk);
-	WRITE_ONCE(list->qlen, list->qlen + 1);
+	list->qlen++;
 }
 
 static inline void __skb_queue_splice(const struct sk_buff_head *list,
@@ -2250,14 +2228,6 @@ static inline void skb_set_tail_pointer(struct sk_buff *skb, const int offset)
 }
 
 #endif /* NET_SKBUFF_DATA_USES_OFFSET */
-
-static inline void skb_assert_len(struct sk_buff *skb)
-{
-#ifdef CONFIG_DEBUG_NET
-	if (WARN_ONCE(!skb->len, "%s\n", __func__))
-		DO_ONCE_LITE(skb_dump, KERN_ERR, skb, false);
-#endif /* CONFIG_DEBUG_NET */
-}
 
 /*
  *	Add data to an sk_buff
@@ -2960,28 +2930,12 @@ static inline struct page *dev_alloc_page(void)
 }
 
 /**
- * dev_page_is_reusable - check whether a page can be reused for network Rx
- * @page: the page to test
- *
- * A page shouldn't be considered for reusing/recycling if it was allocated
- * under memory pressure or at a distant memory node.
- *
- * Returns false if this page should be returned to page allocator, true
- * otherwise.
- */
-static inline bool dev_page_is_reusable(const struct page *page)
-{
-	return likely(page_to_nid(page) == numa_mem_id() &&
-		      !page_is_pfmemalloc(page));
-}
-
-/**
  *	skb_propagate_pfmemalloc - Propagate pfmemalloc if skb is allocated after RX page
  *	@page: The page that was allocated from skb_alloc_page
  *	@skb: The skb that may need pfmemalloc set
  */
-static inline void skb_propagate_pfmemalloc(const struct page *page,
-					    struct sk_buff *skb)
+static inline void skb_propagate_pfmemalloc(struct page *page,
+					     struct sk_buff *skb)
 {
 	if (page_is_pfmemalloc(page))
 		skb->pfmemalloc = true;
@@ -3064,20 +3018,12 @@ static inline void skb_frag_ref(struct sk_buff *skb, int f)
 /**
  * __skb_frag_unref - release a reference on a paged fragment.
  * @frag: the paged fragment
- * @recycle: recycle the page if allocated via page_pool
  *
- * Releases a reference on the paged fragment @frag
- * or recycles the page via the page_pool API.
+ * Releases a reference on the paged fragment @frag.
  */
-static inline void __skb_frag_unref(skb_frag_t *frag, bool recycle)
+static inline void __skb_frag_unref(skb_frag_t *frag)
 {
-	struct page *page = skb_frag_page(frag);
-
-#ifdef CONFIG_PAGE_POOL
-	if (recycle && page_pool_return_skb_page(page))
-		return;
-#endif
-	put_page(page);
+	put_page(skb_frag_page(frag));
 }
 
 /**
@@ -3089,7 +3035,7 @@ static inline void __skb_frag_unref(skb_frag_t *frag, bool recycle)
  */
 static inline void skb_frag_unref(struct sk_buff *skb, int f)
 {
-	__skb_frag_unref(&skb_shinfo(skb)->frags[f], skb->pp_recycle);
+	__skb_frag_unref(&skb_shinfo(skb)->frags[f]);
 }
 
 /**
@@ -4698,25 +4644,6 @@ static inline void skb_set_kcov_handle(struct sk_buff *skb,
 				       const u64 kcov_handle) { }
 static inline u64 skb_get_kcov_handle(struct sk_buff *skb) { return 0; }
 #endif /* CONFIG_KCOV && CONFIG_SKB_EXTENSIONS */
-
-static inline bool skb_csum_is_sctp(struct sk_buff *skb)
-{
-	return skb->csum_not_inet;
-}
-
-#ifdef CONFIG_PAGE_POOL
-static inline void skb_mark_for_recycle(struct sk_buff *skb)
-{
-	skb->pp_recycle = 1;
-}
-#endif
-
-static inline bool skb_pp_recycle(struct sk_buff *skb, void *data)
-{
-	if (!IS_ENABLED(CONFIG_PAGE_POOL) || !skb->pp_recycle)
-		return false;
-	return page_pool_return_skb_page(virt_to_page(data));
-}
 
 #endif	/* __KERNEL__ */
 #endif	/* _LINUX_SKBUFF_H */

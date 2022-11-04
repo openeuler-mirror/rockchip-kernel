@@ -13,7 +13,6 @@
 #ifndef _SYSFS_H_
 #define _SYSFS_H_
 
-#include <linux/kabi.h>
 #include <linux/kernfs.h>
 #include <linux/compiler.h>
 #include <linux/errno.h>
@@ -176,8 +175,6 @@ struct bin_attribute {
 			 char *, loff_t, size_t);
 	int (*mmap)(struct file *, struct kobject *, struct bin_attribute *attr,
 		    struct vm_area_struct *vma);
-
-	KABI_RESERVE(1)
 };
 
 /**

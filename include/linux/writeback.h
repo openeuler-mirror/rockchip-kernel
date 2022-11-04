@@ -12,7 +12,6 @@
 #include <linux/backing-dev-defs.h>
 #include <linux/blk_types.h>
 #include <linux/blk-cgroup.h>
-#include <linux/kabi.h>
 
 struct bio;
 
@@ -93,9 +92,6 @@ struct writeback_control {
 	size_t wb_lcand_bytes;		/* bytes written by last candidate */
 	size_t wb_tcand_bytes;		/* bytes written by this candidate */
 #endif
-
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
 };
 
 static inline int wbc_to_write_flags(struct writeback_control *wbc)
@@ -364,6 +360,7 @@ extern unsigned int dirty_writeback_interval;
 extern unsigned int dirty_expire_interval;
 extern unsigned int dirtytime_expire_interval;
 extern int vm_highmem_is_dirtyable;
+extern int block_dump;
 extern int laptop_mode;
 
 int dirty_background_ratio_handler(struct ctl_table *table, int write,

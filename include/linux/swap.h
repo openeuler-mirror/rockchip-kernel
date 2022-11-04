@@ -12,7 +12,6 @@
 #include <linux/fs.h>
 #include <linux/atomic.h>
 #include <linux/page-flags.h>
-#include <linux/kabi.h>
 #include <asm/page.h>
 
 struct notifier_block;
@@ -55,16 +54,6 @@ static inline int current_is_kswapd(void)
  */
 
 /*
- * Userswap entry type
- */
-#ifdef CONFIG_USERSWAP
-#define SWP_USERSWAP_NUM 1
-#define SWP_USERSWAP_ENTRY (MAX_SWAPFILES+SWP_HWPOISON_NUM+SWP_MIGRATION_NUM+SWP_DEVICE_NUM)
-#else
-#define SWP_USERSWAP_NUM 0
-#endif
-
-/*
  * Unaddressable device memory support. See include/linux/hmm.h and
  * Documentation/vm/hmm.rst. Short description is we need struct pages for
  * device memory that is unaddressable (inaccessible) by CPU, so that we can
@@ -104,7 +93,7 @@ static inline int current_is_kswapd(void)
 
 #define MAX_SWAPFILES \
 	((1 << MAX_SWAPFILES_SHIFT) - SWP_DEVICE_NUM - \
-	SWP_MIGRATION_NUM - SWP_HWPOISON_NUM - SWP_USERSWAP_NUM)
+	SWP_MIGRATION_NUM - SWP_HWPOISON_NUM)
 
 /*
  * Magic header for a swap area. The first part of the union is
@@ -292,8 +281,6 @@ struct swap_info_struct {
 					 */
 	struct work_struct discard_work; /* discard worker */
 	struct swap_cluster_list discard_clusters; /* discard clusters list */
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
 	struct plist_node avail_lists[]; /*
 					   * entries in swap_avail_heads, one
 					   * entry per node.
@@ -351,7 +338,13 @@ extern void lru_note_cost(struct lruvec *lruvec, bool file,
 			  unsigned int nr_pages);
 extern void lru_note_cost_page(struct page *);
 extern void lru_cache_add(struct page *);
+extern void lru_add_page_tail(struct page *page, struct page *page_tail,
+			 struct lruvec *lruvec, struct list_head *head);
 extern void mark_page_accessed(struct page *);
+
+extern bool lru_cache_disabled(void);
+extern void lru_cache_disable(void);
+extern void lru_cache_enable(void);
 extern void lru_add_drain(void);
 extern void lru_add_drain_cpu(int cpu);
 extern void lru_add_drain_cpu_zone(struct zone *zone);
@@ -360,16 +353,23 @@ extern void rotate_reclaimable_page(struct page *page);
 extern void deactivate_file_page(struct page *page);
 extern void deactivate_page(struct page *page);
 extern void mark_page_lazyfree(struct page *page);
+extern void mark_page_lazyfree_movetail(struct page *page, bool tail);
 extern void swap_setup(void);
 
-extern void lru_cache_add_inactive_or_unevictable(struct page *page,
-						struct vm_area_struct *vma);
+extern void __lru_cache_add_inactive_or_unevictable(struct page *page,
+						unsigned long vma_flags);
+
+static inline void lru_cache_add_inactive_or_unevictable(struct page *page,
+						struct vm_area_struct *vma)
+{
+	return __lru_cache_add_inactive_or_unevictable(page, vma->vm_flags);
+}
 
 /* linux/mm/vmscan.c */
 extern unsigned long zone_reclaimable_pages(struct zone *zone);
 extern unsigned long try_to_free_pages(struct zonelist *zonelist, int order,
 					gfp_t gfp_mask, nodemask_t *mask);
-extern int __isolate_lru_page_prepare(struct page *page, isolate_mode_t mode);
+extern int __isolate_lru_page(struct page *page, isolate_mode_t mode);
 extern unsigned long try_to_free_mem_cgroup_pages(struct mem_cgroup *memcg,
 						  unsigned long nr_pages,
 						  gfp_t gfp_mask,
@@ -383,42 +383,6 @@ extern int vm_swappiness;
 extern int remove_mapping(struct address_space *mapping, struct page *page);
 
 extern unsigned long reclaim_pages(struct list_head *page_list);
-#ifdef CONFIG_ETMEM
-enum etmem_swapcache_watermark_en {
-	ETMEM_SWAPCACHE_WMARK_LOW,
-	ETMEM_SWAPCACHE_WMARK_HIGH,
-	ETMEM_SWAPCACHE_NR_WMARK
-};
-
-extern int add_page_for_swap(struct page *page, struct list_head *pagelist);
-extern struct page *get_page_from_vaddr(struct mm_struct *mm,
-					unsigned long vaddr);
-extern int do_swapcache_reclaim(unsigned long *swapcache_watermark,
-				unsigned int watermark_nr);
-extern bool kernel_swap_enabled(void);
-#else
-static inline int add_page_for_swap(struct page *page, struct list_head *pagelist)
-{
-	return 0;
-}
-
-static inline struct page *get_page_from_vaddr(struct mm_struct *mm,
-						unsigned long vaddr)
-{
-	return NULL;
-}
-
-static inline int do_swapcache_reclaim(unsigned long *swapcache_watermark,
-				       unsigned int watermark_nr)
-{
-	return 0;
-}
-
-static inline bool kernel_swap_enabled(void)
-{
-	return true;
-}
-#endif
 #ifdef CONFIG_NUMA
 extern int node_reclaim_mode;
 extern int sysctl_min_unmapped_ratio;
@@ -484,6 +448,7 @@ extern struct page *swap_cluster_readahead(swp_entry_t entry, gfp_t flag,
 				struct vm_fault *vmf);
 extern struct page *swapin_readahead(swp_entry_t entry, gfp_t flag,
 				struct vm_fault *vmf);
+
 /* linux/mm/swapfile.c */
 extern atomic_long_t nr_swap_pages;
 extern long total_swap_pages;
@@ -720,7 +685,13 @@ static inline int mem_cgroup_swappiness(struct mem_cgroup *mem)
 #endif
 
 #if defined(CONFIG_SWAP) && defined(CONFIG_MEMCG) && defined(CONFIG_BLK_CGROUP)
-extern void cgroup_throttle_swaprate(struct page *page, gfp_t gfp_mask);
+extern void __cgroup_throttle_swaprate(struct page *page, gfp_t gfp_mask);
+static inline  void cgroup_throttle_swaprate(struct page *page, gfp_t gfp_mask)
+{
+	if (mem_cgroup_disabled())
+		return;
+	__cgroup_throttle_swaprate(page, gfp_mask);
+}
 #else
 static inline void cgroup_throttle_swaprate(struct page *page, gfp_t gfp_mask)
 {
@@ -729,8 +700,22 @@ static inline void cgroup_throttle_swaprate(struct page *page, gfp_t gfp_mask)
 
 #ifdef CONFIG_MEMCG_SWAP
 extern void mem_cgroup_swapout(struct page *page, swp_entry_t entry);
-extern int mem_cgroup_try_charge_swap(struct page *page, swp_entry_t entry);
-extern void mem_cgroup_uncharge_swap(swp_entry_t entry, unsigned int nr_pages);
+extern int __mem_cgroup_try_charge_swap(struct page *page, swp_entry_t entry);
+static inline int mem_cgroup_try_charge_swap(struct page *page, swp_entry_t entry)
+{
+	if (mem_cgroup_disabled())
+		return 0;
+	return __mem_cgroup_try_charge_swap(page, entry);
+}
+
+extern void __mem_cgroup_uncharge_swap(swp_entry_t entry, unsigned int nr_pages);
+static inline void mem_cgroup_uncharge_swap(swp_entry_t entry, unsigned int nr_pages)
+{
+	if (mem_cgroup_disabled())
+		return;
+	__mem_cgroup_uncharge_swap(entry, nr_pages);
+}
+
 extern long mem_cgroup_get_nr_swap_pages(struct mem_cgroup *memcg);
 extern bool mem_cgroup_swap_full(struct page *page);
 #else

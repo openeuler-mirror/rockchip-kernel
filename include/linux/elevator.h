@@ -2,9 +2,9 @@
 #ifndef _LINUX_ELEVATOR_H
 #define _LINUX_ELEVATOR_H
 
-#include <linux/kabi.h>
 #include <linux/percpu.h>
 #include <linux/hashtable.h>
+#include <linux/android_kabi.h>
 
 #ifdef CONFIG_BLOCK
 
@@ -52,14 +52,10 @@ struct elevator_mq_ops {
 	void (*init_icq)(struct io_cq *);
 	void (*exit_icq)(struct io_cq *);
 
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
-	KABI_RESERVE(3)
-	KABI_RESERVE(4)
-	KABI_RESERVE(5)
-	KABI_RESERVE(6)
-	KABI_RESERVE(7)
-	KABI_RESERVE(8)
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
+	ANDROID_KABI_RESERVE(3);
+	ANDROID_KABI_RESERVE(4);
 };
 
 #define ELV_NAME_MAX	(16)
@@ -97,10 +93,8 @@ struct elevator_type
 	char icq_cache_name[ELV_NAME_MAX + 6];	/* elvname + "_io_cq" */
 	struct list_head list;
 
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
-	KABI_RESERVE(3)
-	KABI_RESERVE(4)
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
 };
 
 #define ELV_HASH_BITS 6
@@ -132,8 +126,7 @@ extern void elv_merge_requests(struct request_queue *, struct request *,
 			       struct request *);
 extern void elv_merged_request(struct request_queue *, struct request *,
 		enum elv_merge);
-extern bool elv_attempt_insert_merge(struct request_queue *, struct request *,
-				     struct list_head *);
+extern bool elv_attempt_insert_merge(struct request_queue *, struct request *);
 extern struct request *elv_former_request(struct request_queue *, struct request *);
 extern struct request *elv_latter_request(struct request_queue *, struct request *);
 

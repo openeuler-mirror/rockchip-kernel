@@ -4,7 +4,6 @@
 
 #include <linux/mm_types_task.h>
 
-#include <linux/kabi.h>
 #include <linux/auxvec.h>
 #include <linux/list.h>
 #include <linux/spinlock.h>
@@ -16,6 +15,7 @@
 #include <linux/page-flags-layout.h>
 #include <linux/workqueue.h>
 #include <linux/seqlock.h>
+#include <linux/android_kabi.h>
 
 #include <asm/mmu.h>
 
@@ -28,7 +28,7 @@
 
 struct address_space;
 struct mem_cgroup;
-struct kvm;
+
 /*
  * Each physical page in the system has a struct page associated with
  * it to keep track of whatever it is we are using the page for at the
@@ -81,7 +81,7 @@ struct page {
 		struct {	/* Page cache and anonymous pages */
 			/**
 			 * @lru: Pageout list, eg. active_list protected by
-			 * lruvec->lru_lock.  Sometimes used as a generic list
+			 * pgdat->lru_lock.  Sometimes used as a generic list
 			 * by the page owner.
 			 */
 			struct list_head lru;
@@ -98,14 +98,10 @@ struct page {
 		};
 		struct {	/* page_pool used by netstack */
 			/**
-			 * @pp_magic: magic value to avoid recycling non
-			 * page_pool allocated pages.
+			 * @dma_addr: might require a 64-bit value on
+			 * 32-bit architectures.
 			 */
-			unsigned long pp_magic;
-			struct page_pool *pp;
-			unsigned long _pp_mapping_pad;
-			unsigned long dma_addr;
-			atomic_long_t pp_frag_count;
+			unsigned long dma_addr[2];
 		};
 		struct {	/* slab, slob and slub */
 			union {
@@ -206,7 +202,10 @@ struct page {
 	atomic_t _refcount;
 
 #ifdef CONFIG_MEMCG
-	unsigned long memcg_data;
+	union {
+		struct mem_cgroup *mem_cgroup;
+		struct obj_cgroup **obj_cgroups;
+	};
 #endif
 
 	/*
@@ -340,11 +339,18 @@ struct vm_area_struct {
 	/*
 	 * For areas with an address space and backing store,
 	 * linkage into the address_space->i_mmap interval tree.
+	 *
+	 * For private anonymous mappings, a pointer to a null terminated string
+	 * in the user process containing the name given to the vma, or NULL
+	 * if unnamed.
 	 */
-	struct {
-		struct rb_node rb;
-		unsigned long rb_subtree_last;
-	} shared;
+	union {
+		struct {
+			struct rb_node rb;
+			unsigned long rb_subtree_last;
+		} shared;
+		const char __user *anon_name;
+	};
 
 	/*
 	 * A file's MAP_PRIVATE vma can be in both i_mmap tree and anon_vma
@@ -375,11 +381,15 @@ struct vm_area_struct {
 	struct mempolicy *vm_policy;	/* NUMA policy for the VMA */
 #endif
 	struct vm_userfaultfd_ctx vm_userfaultfd_ctx;
+#ifdef CONFIG_SPECULATIVE_PAGE_FAULT
+	seqcount_t vm_sequence;
+	atomic_t vm_ref_count;		/* see vma_get(), vma_put() */
+#endif
 
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
-	KABI_RESERVE(3)
-	KABI_RESERVE(4)
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
+	ANDROID_KABI_RESERVE(3);
+	ANDROID_KABI_RESERVE(4);
 } __randomize_layout;
 
 struct core_thread {
@@ -399,6 +409,9 @@ struct mm_struct {
 		struct vm_area_struct *mmap;		/* list of VMAs */
 		struct rb_root mm_rb;
 		u64 vmacache_seqnum;                   /* per-thread vmacache */
+#ifdef CONFIG_SPECULATIVE_PAGE_FAULT
+		rwlock_t mm_rb_lock;
+#endif
 #ifdef CONFIG_MMU
 		unsigned long (*get_unmapped_area) (struct file *filp,
 				unsigned long addr, unsigned long len,
@@ -586,27 +599,8 @@ struct mm_struct {
 		u32 pasid;
 #endif
 
-#ifdef CONFIG_MEMORY_RELIABLE
-		atomic_long_t reserve_0;
-#endif
+		ANDROID_KABI_RESERVE(1);
 	} __randomize_layout;
-
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
-	KABI_RESERVE(3)
-	KABI_RESERVE(4)
-	KABI_RESERVE(5)
-	KABI_RESERVE(6)
-	KABI_RESERVE(7)
-	KABI_RESERVE(8)
-
-#if IS_ENABLED(CONFIG_KVM) && !defined(__GENKSYMS__)
-	struct kvm *kvm;
-#endif
-
-#if IS_ENABLED(CONFIG_ASCEND_SHARE_POOL)
-	struct sp_group_master *sp_group_master;
-#endif
 
 	/*
 	 * The mm_cpumask needs to be at the end of mm_struct, because it
@@ -616,18 +610,6 @@ struct mm_struct {
 };
 
 extern struct mm_struct init_mm;
-
-#if IS_ENABLED(CONFIG_KVM)
-static inline struct kvm *mm_kvm(struct mm_struct *mm)
-{
-	return mm->kvm;
-}
-#else
-static inline struct kvm *mm_kvm(struct mm_struct *mm)
-{
-	return NULL;
-}
-#endif
 
 /* Pointer magic because the dynamic array size confuses some compilers. */
 static inline void mm_init_cpumask(struct mm_struct *mm)
@@ -782,6 +764,7 @@ enum vm_fault_reason {
 	VM_FAULT_FALLBACK       = (__force vm_fault_t)0x000800,
 	VM_FAULT_DONE_COW       = (__force vm_fault_t)0x001000,
 	VM_FAULT_NEEDDSYNC      = (__force vm_fault_t)0x002000,
+	VM_FAULT_PTNOTSAME      = (__force vm_fault_t)0x004000,
 	VM_FAULT_HINDEX_MASK    = (__force vm_fault_t)0x0f0000,
 };
 
@@ -847,5 +830,14 @@ enum tlb_flush_reason {
 typedef struct {
 	unsigned long val;
 } swp_entry_t;
+
+/* Return the name for an anonymous mapping or NULL for a file-backed mapping */
+static inline const char __user *vma_get_anon_name(struct vm_area_struct *vma)
+{
+	if (vma->vm_file)
+		return NULL;
+
+	return vma->anon_name;
+}
 
 #endif /* _LINUX_MM_TYPES_H */

@@ -44,7 +44,6 @@ static inline unsigned long pte_index(unsigned long address)
 {
 	return (address >> PAGE_SHIFT) & (PTRS_PER_PTE - 1);
 }
-#define pte_index pte_index
 
 #ifndef pmd_index
 static inline unsigned long pmd_index(unsigned long address)
@@ -89,7 +88,7 @@ static inline pte_t *pte_offset_kernel(pmd_t *pmd, unsigned long address)
 #ifndef pmd_offset
 static inline pmd_t *pmd_offset(pud_t *pud, unsigned long address)
 {
-	return pud_pgtable(*pud) + pmd_index(address);
+	return (pmd_t *)pud_page_vaddr(*pud) + pmd_index(address);
 }
 #define pmd_offset pmd_offset
 #endif
@@ -97,7 +96,7 @@ static inline pmd_t *pmd_offset(pud_t *pud, unsigned long address)
 #ifndef pud_offset
 static inline pud_t *pud_offset(p4d_t *p4d, unsigned long address)
 {
-	return p4d_pgtable(*p4d) + pud_index(address);
+	return (pud_t *)p4d_page_vaddr(*p4d) + pud_index(address);
 }
 #define pud_offset pud_offset
 #endif
@@ -1262,6 +1261,17 @@ static inline int pmd_trans_unstable(pmd_t *pmd)
 #else
 	return 0;
 #endif
+}
+
+/*
+ * the ordering of these checks is important for pmds with _page_devmap set.
+ * if we check pmd_trans_unstable() first we will trip the bad_pmd() check
+ * inside of pmd_none_or_trans_huge_or_clear_bad(). this will end up correctly
+ * returning 1 but not before it spams dmesg with the pmd_clear_bad() output.
+ */
+static inline int pmd_devmap_trans_unstable(pmd_t *pmd)
+{
+	return pmd_devmap(*pmd) || pmd_trans_unstable(pmd);
 }
 
 #ifndef CONFIG_NUMA_BALANCING

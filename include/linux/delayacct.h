@@ -8,7 +8,6 @@
 #define _LINUX_DELAYACCT_H
 
 #include <uapi/linux/taskstats.h>
-#include <linux/kabi.h>
 
 /*
  * Per-task flags relevant to delay accounting
@@ -54,9 +53,6 @@ struct task_delay_info {
 
 	u32 freepages_count;	/* total count of memory reclaim */
 	u32 thrashing_count;	/* total count of thrash waits */
-
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
 };
 #endif
 

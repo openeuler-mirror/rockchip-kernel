@@ -13,7 +13,6 @@
 #include <linux/sysctl.h>
 #include <linux/rtnetlink.h>
 #include <linux/refcount.h>
-#include <linux/kabi.h>
 
 struct ipv4_devconf {
 	void	*sysctl;
@@ -42,16 +41,13 @@ struct in_device {
 	unsigned long		mr_qri;		/* Query Response Interval */
 	unsigned char		mr_qrv;		/* Query Robustness Variable */
 	unsigned char		mr_gq_running;
-	u32			mr_ifc_count;
+	unsigned char		mr_ifc_count;
 	struct timer_list	mr_gq_timer;	/* general query timer */
 	struct timer_list	mr_ifc_timer;	/* interface change timer */
 
 	struct neigh_parms	*arp_parms;
 	struct ipv4_devconf	cnf;
 	struct rcu_head		rcu_head;
-
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
 };
 
 #define IPV4_DEVCONF(cnf, attr) ((cnf).data[IPV4_DEVCONF_ ## attr - 1])

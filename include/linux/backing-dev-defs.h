@@ -2,7 +2,6 @@
 #ifndef __LINUX_BACKING_DEV_DEFS_H
 #define __LINUX_BACKING_DEV_DEFS_H
 
-#include <linux/kabi.h>
 #include <linux/list.h>
 #include <linux/radix-tree.h>
 #include <linux/rbtree.h>
@@ -14,6 +13,7 @@
 #include <linux/workqueue.h>
 #include <linux/kref.h>
 #include <linux/refcount.h>
+#include <linux/android_kabi.h>
 
 struct page;
 struct device;
@@ -162,10 +162,8 @@ struct bdi_writeback {
 	};
 #endif
 
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
-	KABI_RESERVE(3)
-	KABI_RESERVE(4)
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
 };
 
 struct backing_dev_info {
@@ -205,10 +203,8 @@ struct backing_dev_info {
 	struct dentry *debug_dir;
 #endif
 
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
-	KABI_RESERVE(3)
-	KABI_RESERVE(4)
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
 };
 
 enum {

@@ -21,7 +21,7 @@
 #include <linux/if_vlan.h>
 #include <linux/vmalloc.h>
 #include <linux/sockptr.h>
-#include <crypto/sha1.h>
+#include <crypto/sha.h>
 
 #include <net/sch_generic.h>
 
@@ -998,7 +998,6 @@ extern int bpf_jit_enable;
 extern int bpf_jit_harden;
 extern int bpf_jit_kallsyms;
 extern long bpf_jit_limit;
-extern long bpf_jit_limit_max;
 
 typedef void (*bpf_jit_fill_hole_t)(void *area, unsigned int size);
 
@@ -1295,11 +1294,6 @@ struct bpf_sysctl_kern {
 	loff_t *ppos;
 	/* Temporary "register" for indirect stores to ppos. */
 	u64 tmp_reg;
-};
-
-#define BPF_SOCKOPT_KERN_BUF_SIZE	32
-struct bpf_sockopt_buf {
-	u8		data[BPF_SOCKOPT_KERN_BUF_SIZE];
 };
 
 struct bpf_sockopt_kern {

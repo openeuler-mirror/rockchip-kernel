@@ -14,9 +14,9 @@
 #include <linux/netfilter/x_tables.h>
 #include <linux/stringify.h>
 #include <linux/vmalloc.h>
+#include <linux/android_kabi.h>
 #include <net/netlink.h>
 #include <uapi/linux/netfilter/ipset/ip_set.h>
-#include <linux/kabi.h>
 
 #define _IP_SET_MODULE_DESC(a, b, c)		\
 	MODULE_DESCRIPTION(a " type of IP sets, revisions " b "-" c)
@@ -192,7 +192,7 @@ struct ip_set_type_variant {
 	/* Region-locking is used */
 	bool region_lock;
 
-	KABI_RESERVE(1)
+	ANDROID_KABI_RESERVE(1);
 };
 
 struct ip_set_region {
@@ -232,7 +232,7 @@ struct ip_set_type {
 	/* Set this to THIS_MODULE if you are a module, otherwise NULL */
 	struct module *me;
 
-	KABI_RESERVE(1)
+	ANDROID_KABI_RESERVE(1);
 };
 
 /* register and unregister set type */
@@ -276,7 +276,7 @@ struct ip_set {
 	/* The type specific data */
 	void *data;
 
-	KABI_RESERVE(1)
+	ANDROID_KABI_RESERVE(1);
 };
 
 static inline void

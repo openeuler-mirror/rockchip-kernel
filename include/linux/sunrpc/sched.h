@@ -17,7 +17,6 @@
 #include <linux/wait_bit.h>
 #include <linux/workqueue.h>
 #include <linux/sunrpc/xdr.h>
-#include <linux/kabi.h>
 
 /*
  * This is the actual RPC procedure call info.
@@ -28,8 +27,6 @@ struct rpc_message {
 	void *			rpc_argp;	/* Arguments */
 	void *			rpc_resp;	/* Result */
 	const struct cred *	rpc_cred;	/* Credentials */
-
-	KABI_RESERVE(1)
 };
 
 struct rpc_call_ops;
@@ -95,11 +92,6 @@ struct rpc_task {
 				tk_garb_retry : 2,
 				tk_cred_retry : 2,
 				tk_rebind_retry : 2;
-
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
-	KABI_RESERVE(3)
-	KABI_RESERVE(4)
 };
 
 typedef void			(*rpc_action)(struct rpc_task *);
@@ -109,9 +101,6 @@ struct rpc_call_ops {
 	void (*rpc_call_done)(struct rpc_task *, void *);
 	void (*rpc_count_stats)(struct rpc_task *, void *);
 	void (*rpc_release)(void *);
-
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
 };
 
 struct rpc_task_setup {
@@ -125,9 +114,6 @@ struct rpc_task_setup {
 	struct workqueue_struct *workqueue;
 	unsigned short flags;
 	signed char priority;
-
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
 };
 
 /*

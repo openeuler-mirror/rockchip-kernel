@@ -15,7 +15,6 @@
 #include <linux/uidgid.h>
 #include <linux/sched.h>
 #include <linux/sched/user.h>
-#include <linux/kabi.h>
 
 struct cred;
 struct inode;
@@ -151,16 +150,6 @@ struct cred {
 		int non_rcu;			/* Can we skip RCU deletion? */
 		struct rcu_head	rcu;		/* RCU deletion hook */
 	};
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
-	KABI_RESERVE(3)
-	KABI_RESERVE(4)
-	KABI_RESERVE(5)
-	KABI_RESERVE(6)
-	KABI_RESERVE(7)
-	KABI_RESERVE(8)
-	KABI_RESERVE(9)
-	KABI_RESERVE(10)
 } __randomize_layout;
 
 extern void __put_cred(struct cred *);

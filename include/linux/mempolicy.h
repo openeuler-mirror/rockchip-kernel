@@ -181,29 +181,12 @@ extern int mpol_parse_str(char *str, struct mempolicy **mpol);
 
 extern void mpol_to_str(char *buffer, int maxlen, struct mempolicy *pol);
 
-#ifdef CONFIG_COHERENT_DEVICE
-static inline bool is_cdm_vma(struct vm_area_struct *vma)
-{
-	if (vma->vm_flags & VM_CDM)
-		return true;
-	return false;
-}
-#else
-static inline bool is_cdm_vma(struct vm_area_struct *vma)
-{
-	return false;
-}
-#endif
-
 /* Check if a vma is migratable */
 extern bool vma_migratable(struct vm_area_struct *vma);
 
 extern int mpol_misplaced(struct page *, struct vm_area_struct *, unsigned long);
 extern void mpol_put_task_policy(struct task_struct *);
 
-extern long __do_mbind(unsigned long start, unsigned long len,
-		       unsigned short mode, unsigned short mode_flags,
-		       nodemask_t *nmask, unsigned long flags, struct mm_struct *mm);
 #else
 
 struct mempolicy {};
@@ -302,13 +285,6 @@ static inline int mpol_misplaced(struct page *page, struct vm_area_struct *vma,
 				 unsigned long address)
 {
 	return -1; /* no node preference */
-}
-
-static inline long __do_mbind(unsigned long start, unsigned long len,
-			unsigned short mode, unsigned short mode_flags,
-			nodemask_t *nmask, unsigned long flags, struct mm_struct *mm)
-{
-	return 0;
 }
 
 static inline void mpol_put_task_policy(struct task_struct *task)

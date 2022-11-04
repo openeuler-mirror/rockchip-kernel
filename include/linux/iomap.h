@@ -2,7 +2,6 @@
 #ifndef LINUX_IOMAP_H
 #define LINUX_IOMAP_H 1
 
-#include <linux/kabi.h>
 #include <linux/atomic.h>
 #include <linux/bitmap.h>
 #include <linux/blk_types.h>
@@ -10,6 +9,7 @@
 #include <linux/types.h>
 #include <linux/mm_types.h>
 #include <linux/blkdev.h>
+#include <linux/android_kabi.h>
 
 struct address_space;
 struct fiemap_extent_info;
@@ -89,6 +89,8 @@ struct iomap {
 	void			*inline_data;
 	void			*private; /* filesystem private */
 	const struct iomap_page_ops *page_ops;
+
+	ANDROID_KABI_RESERVE(1);
 };
 
 static inline sector_t
@@ -143,10 +145,8 @@ struct iomap_ops {
 	int (*iomap_end)(struct inode *inode, loff_t pos, loff_t length,
 			ssize_t written, unsigned flags, struct iomap *iomap);
 
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
-	KABI_RESERVE(3)
-	KABI_RESERVE(4)
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
 };
 
 /*

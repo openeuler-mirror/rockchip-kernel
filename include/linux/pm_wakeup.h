@@ -14,7 +14,6 @@
 #endif
 
 #include <linux/types.h>
-#include <linux/kabi.h>
 
 struct wake_irq;
 
@@ -62,9 +61,6 @@ struct wakeup_source {
 	struct device		*dev;
 	bool			active:1;
 	bool			autosleep_enabled:1;
-
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
 };
 
 #define for_each_wakeup_source(ws) \

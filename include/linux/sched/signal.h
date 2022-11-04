@@ -12,7 +12,7 @@
 #include <linux/posix-timers.h>
 #include <linux/mm_types.h>
 #include <asm/ptrace.h>
-#include <linux/kabi.h>
+#include <linux/android_kabi.h>
 
 /*
  * Types defining task->signal and task->sighand and APIs using them:
@@ -237,10 +237,10 @@ struct signal_struct {
 						 * permissions.
 						 */
 
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
-	KABI_RESERVE(3)
-	KABI_RESERVE(4)
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
+	ANDROID_KABI_RESERVE(3);
+	ANDROID_KABI_RESERVE(4);
 } __randomize_layout;
 
 /*

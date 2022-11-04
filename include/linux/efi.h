@@ -167,8 +167,6 @@ struct capsule_info {
 	size_t			page_bytes_remain;
 };
 
-int efi_capsule_setup_info(struct capsule_info *cap_info, void *kbuff,
-                           size_t hdr_bytes);
 int __efi_capsule_setup_info(struct capsule_info *cap_info);
 
 typedef int (*efi_freemem_callback_t) (u64 start, u64 end, void *arg);
@@ -645,7 +643,6 @@ extern int __init efi_memmap_split_count(efi_memory_desc_t *md,
 					 struct range *range);
 extern void __init efi_memmap_insert(struct efi_memory_map *old_memmap,
 				     void *buf, struct efi_mem_range *mem);
-extern void __init efi_print_memmap(void);
 
 #ifdef CONFIG_EFI_ESRT
 extern void __init efi_esrt_init(void);
@@ -814,7 +811,6 @@ static inline bool efi_rt_services_supported(unsigned int mask)
 {
 	return (efi.runtime_supported_mask & mask) == mask;
 }
-extern void efi_find_mirror(void);
 #else
 static inline bool efi_enabled(int feature)
 {
@@ -838,8 +834,6 @@ static inline bool efi_rt_services_supported(unsigned int mask)
 {
 	return false;
 }
-
-static inline void efi_find_mirror(void) {}
 #endif
 
 extern int efi_status_to_err(efi_status_t status);

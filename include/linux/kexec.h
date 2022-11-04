@@ -269,10 +269,9 @@ struct kimage {
 	unsigned long control_page;
 
 	/* Flags to indicate special processing */
-	unsigned int type : 2;
+	unsigned int type : 1;
 #define KEXEC_TYPE_DEFAULT 0
 #define KEXEC_TYPE_CRASH   1
-#define KEXEC_TYPE_QUICK   2
 	unsigned int preserve_context : 1;
 	/* If set, we are using file mode kexec syscall */
 	unsigned int file_mode:1;
@@ -305,15 +304,7 @@ struct kimage {
 #ifdef CONFIG_IMA_KEXEC
 	/* Virtual address of IMA measurement buffer for kexec syscall */
 	void *ima_buffer;
-
-	phys_addr_t ima_buffer_addr;
-	size_t ima_buffer_size;
 #endif
-
-	/* Core ELF header buffer */
-	void *elf_headers;
-	unsigned long elf_headers_sz;
-	unsigned long elf_load_addr;
 };
 
 /* kexec interface functions */
@@ -339,23 +330,11 @@ extern int kexec_load_disabled;
 #endif
 
 /* List of defined/legal kexec flags */
-#define __KEXEC_FLAGS_CRASH	KEXEC_ON_CRASH
-
-#ifdef CONFIG_KEXEC_JUMP
-#define __KEXEC_FLAGS_JUMP	KEXEC_PRESERVE_CONTEXT
+#ifndef CONFIG_KEXEC_JUMP
+#define KEXEC_FLAGS    KEXEC_ON_CRASH
 #else
-#define __KEXEC_FLAGS_JUMP	0
+#define KEXEC_FLAGS    (KEXEC_ON_CRASH | KEXEC_PRESERVE_CONTEXT)
 #endif
-
-#ifdef CONFIG_QUICK_KEXEC
-#define __KEXEC_FLAGS_QUICK	KEXEC_QUICK
-#else
-#define __KEXEC_FLAGS_QUICK	0
-#endif
-
-#define KEXEC_FLAGS	\
-	(__KEXEC_FLAGS_CRASH | __KEXEC_FLAGS_JUMP | __KEXEC_FLAGS_QUICK)
-
 
 /* List of defined/legal kexec file flags */
 #define KEXEC_FILE_FLAGS	(KEXEC_FILE_UNLOAD | KEXEC_FILE_ON_CRASH | \
@@ -363,10 +342,9 @@ extern int kexec_load_disabled;
 
 /* Location of a reserved region to hold the crash kernel.
  */
+extern struct resource crashk_res;
+extern struct resource crashk_low_res;
 extern note_buf_t __percpu *crash_notes;
-#ifdef CONFIG_QUICK_KEXEC
-extern struct resource quick_kexec_res;
-#endif
 
 /* flag to track if kexec reboot is in progress */
 extern bool kexec_in_progress;

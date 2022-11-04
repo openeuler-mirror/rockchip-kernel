@@ -13,7 +13,7 @@
 #include <linux/compiler.h>
 #include <linux/types.h>
 #include <linux/bits.h>
-#include <linux/kabi.h>
+#include <linux/android_kabi.h>
 /*
  * Resources are tree-like, allowing
  * nesting etc..
@@ -25,10 +25,11 @@ struct resource {
 	unsigned long flags;
 	unsigned long desc;
 	struct resource *parent, *sibling, *child;
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
-	KABI_RESERVE(3)
-	KABI_RESERVE(4)
+
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
+	ANDROID_KABI_RESERVE(3);
+	ANDROID_KABI_RESERVE(4);
 };
 
 /*
@@ -144,7 +145,6 @@ enum {
 	IORES_DESC_DEVICE_PRIVATE_MEMORY	= 6,
 	IORES_DESC_RESERVED			= 7,
 	IORES_DESC_SOFT_RESERVED		= 8,
-	IORES_DESC_QUICK_KEXEC			= 9,
 };
 
 /*
@@ -312,13 +312,6 @@ struct resource *devm_request_free_mem_region(struct device *dev,
 		struct resource *base, unsigned long size);
 struct resource *request_free_mem_region(struct resource *base,
 		unsigned long size, const char *name);
-
-static inline void irqresource_disabled(struct resource *res, u32 irq)
-{
-	res->start = irq;
-	res->end = irq;
-	res->flags = IORESOURCE_IRQ | IORESOURCE_DISABLED | IORESOURCE_UNSET;
-}
 
 #ifdef CONFIG_IO_STRICT_DEVMEM
 void revoke_devmem(struct resource *res);

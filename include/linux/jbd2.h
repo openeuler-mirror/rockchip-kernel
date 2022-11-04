@@ -19,7 +19,6 @@
 #define JBD2_DEBUG
 #else
 
-#include <linux/kabi.h>
 #include <linux/types.h>
 #include <linux/buffer_head.h>
 #include <linux/journal-head.h>
@@ -773,11 +772,6 @@ struct journal_s
 	unsigned long		j_flags;
 
 	/**
-	 * @j_atomic_flags: Atomic journaling state flags.
-	 */
-	unsigned long		j_atomic_flags;
-
-	/**
 	 * @j_errno:
 	 *
 	 * Is there an outstanding uncleared error on the journal (from a prior
@@ -899,29 +893,6 @@ struct journal_s
 	 * @j_checkpoint_mutex.  [j_checkpoint_mutex]
 	 */
 	struct buffer_head	*j_chkpt_bhs[JBD2_NR_BATCH];
-
-	/**
-	 * @j_shrinker:
-	 *
-	 * Journal head shrinker, reclaim buffer's journal head which
-	 * has been written back.
-	 */
-	struct shrinker		j_shrinker;
-
-	/**
-	 * @j_checkpoint_jh_count:
-	 *
-	 * Number of journal buffers on the checkpoint list. [j_list_lock]
-	 */
-	struct percpu_counter	j_checkpoint_jh_count;
-
-	/**
-	 * @j_shrink_transaction:
-	 *
-	 * Record next transaction will shrink on the checkpoint list.
-	 * [j_list_lock]
-	 */
-	transaction_t		*j_shrink_transaction;
 
 	/**
 	 * @j_head:
@@ -1303,11 +1274,6 @@ struct journal_s
 				    struct buffer_head *bh,
 				    enum passtype pass, int off,
 				    tid_t expected_commit_id);
-
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
-	KABI_RESERVE(3)
-	KABI_RESERVE(4)
 };
 
 #define jbd2_might_wait_for_commit(j) \
@@ -1396,12 +1362,6 @@ JBD2_FEATURE_INCOMPAT_FUNCS(fast_commit,	FAST_COMMIT)
 #define JBD2_FULL_COMMIT_ONGOING	0x200	/* Full commit is ongoing */
 
 /*
- * Journal atomic flag definitions
- */
-#define JBD2_CHECKPOINT_IO_ERROR	0x001	/* Detect io error while writing
-						 * buffer back to disk */
-
-/*
  * Function declarations for the journaling transaction and buffer
  * management
  */
@@ -1437,7 +1397,6 @@ extern void jbd2_journal_commit_transaction(journal_t *);
 
 /* Checkpoint list management */
 void __jbd2_journal_clean_checkpoint_list(journal_t *journal, bool destroy);
-unsigned long jbd2_journal_shrink_checkpoint_list(journal_t *journal, unsigned long *nr_to_scan);
 int __jbd2_journal_remove_checkpoint(struct journal_head *);
 void jbd2_journal_destroy_checkpoint(journal_t *journal);
 void __jbd2_journal_insert_checkpoint(struct journal_head *, transaction_t *);

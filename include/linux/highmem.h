@@ -232,28 +232,24 @@ static inline void clear_user_highpage(struct page *page, unsigned long vaddr)
 }
 #endif
 
-#ifndef __HAVE_ARCH_ALLOC_ZEROED_USER_HIGHPAGE
+#ifndef __HAVE_ARCH_ALLOC_ZEROED_USER_HIGHPAGE_MOVABLE
 /**
- * __alloc_zeroed_user_highpage - Allocate a zeroed HIGHMEM page for a VMA with caller-specified movable GFP flags
- * @movableflags: The GFP flags related to the pages future ability to move like __GFP_MOVABLE
+ * alloc_zeroed_user_highpage_movable - Allocate a zeroed HIGHMEM page for a VMA that the caller knows can move
  * @vma: The VMA the page is to be allocated for
  * @vaddr: The virtual address the page will be inserted into
  *
- * This function will allocate a page for a VMA but the caller is expected
- * to specify via movableflags whether the page will be movable in the
- * future or not
+ * This function will allocate a page for a VMA that the caller knows will
+ * be able to migrate in the future using move_pages() or reclaimed
  *
  * An architecture may override this function by defining
- * __HAVE_ARCH_ALLOC_ZEROED_USER_HIGHPAGE and providing their own
+ * __HAVE_ARCH_ALLOC_ZEROED_USER_HIGHPAGE_MOVABLE and providing their own
  * implementation.
  */
 static inline struct page *
-__alloc_zeroed_user_highpage(gfp_t movableflags,
-			struct vm_area_struct *vma,
-			unsigned long vaddr)
+alloc_zeroed_user_highpage_movable(struct vm_area_struct *vma,
+				   unsigned long vaddr)
 {
-	struct page *page = alloc_page_vma(GFP_HIGHUSER | movableflags,
-			vma, vaddr);
+	struct page *page = alloc_page_vma(GFP_HIGHUSER_MOVABLE | __GFP_CMA, vma, vaddr);
 
 	if (page)
 		clear_user_highpage(page, vaddr);
@@ -262,21 +258,6 @@ __alloc_zeroed_user_highpage(gfp_t movableflags,
 }
 #endif
 
-/**
- * alloc_zeroed_user_highpage_movable - Allocate a zeroed HIGHMEM page for a VMA that the caller knows can move
- * @vma: The VMA the page is to be allocated for
- * @vaddr: The virtual address the page will be inserted into
- *
- * This function will allocate a page for a VMA that the caller knows will
- * be able to migrate in the future using move_pages() or reclaimed
- */
-static inline struct page *
-alloc_zeroed_user_highpage_movable(struct vm_area_struct *vma,
-					unsigned long vaddr)
-{
-	return __alloc_zeroed_user_highpage(__GFP_MOVABLE, vma, vaddr);
-}
-
 static inline void clear_highpage(struct page *page)
 {
 	void *kaddr = kmap_atomic(page);
@@ -284,22 +265,21 @@ static inline void clear_highpage(struct page *page)
 	kunmap_atomic(kaddr);
 }
 
-/*
- * If we pass in a base or tail page, we can zero up to PAGE_SIZE.
- * If we pass in a head page, we can zero up to the size of the compound page.
- */
-#if defined(CONFIG_HIGHMEM) && defined(CONFIG_TRANSPARENT_HUGEPAGE)
-void zero_user_segments(struct page *page, unsigned start1, unsigned end1,
-		unsigned start2, unsigned end2);
-#else /* !HIGHMEM || !TRANSPARENT_HUGEPAGE */
+#ifndef __HAVE_ARCH_TAG_CLEAR_HIGHPAGE
+
+static inline void tag_clear_highpage(struct page *page)
+{
+}
+
+#endif
+
 static inline void zero_user_segments(struct page *page,
-		unsigned start1, unsigned end1,
-		unsigned start2, unsigned end2)
+	unsigned start1, unsigned end1,
+	unsigned start2, unsigned end2)
 {
 	void *kaddr = kmap_atomic(page);
-	unsigned int i;
 
-	BUG_ON(end1 > page_size(page) || end2 > page_size(page));
+	BUG_ON(end1 > PAGE_SIZE || end2 > PAGE_SIZE);
 
 	if (end1 > start1)
 		memset(kaddr + start1, 0, end1 - start1);
@@ -308,10 +288,8 @@ static inline void zero_user_segments(struct page *page,
 		memset(kaddr + start2, 0, end2 - start2);
 
 	kunmap_atomic(kaddr);
-	for (i = 0; i < compound_nr(page); i++)
-		flush_dcache_page(page + i);
+	flush_dcache_page(page);
 }
-#endif /* !HIGHMEM || !TRANSPARENT_HUGEPAGE */
 
 static inline void zero_user_segment(struct page *page,
 	unsigned start, unsigned end)
@@ -355,19 +333,5 @@ static inline void copy_highpage(struct page *to, struct page *from)
 }
 
 #endif
-
-#ifndef __HAVE_ARCH_COPY_HUGEPAGES
-
-static inline void copy_highpages(struct page *to, struct page *from, int nr_pages)
-{
-	int i;
-
-	for (i = 0; i < nr_pages; i++) {
-		cond_resched();
-		copy_highpage(to + i, from + i);
-	}
-}
-
-#endif /* __HAVE_ARCH_COPY_HUGEPAGES */
 
 #endif /* _LINUX_HIGHMEM_H */
