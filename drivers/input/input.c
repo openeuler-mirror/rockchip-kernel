@@ -47,17 +47,6 @@ static DEFINE_MUTEX(input_mutex);
 
 static const struct input_value input_value_sync = { EV_SYN, SYN_REPORT, 1 };
 
-static const unsigned int input_max_code[EV_CNT] = {
-	[EV_KEY] = KEY_MAX,
-	[EV_REL] = REL_MAX,
-	[EV_ABS] = ABS_MAX,
-	[EV_MSC] = MSC_MAX,
-	[EV_SW] = SW_MAX,
-	[EV_LED] = LED_MAX,
-	[EV_SND] = SND_MAX,
-	[EV_FF] = FF_MAX,
-};
-
 static inline int is_event_supported(unsigned int code,
 				     unsigned long *bm, unsigned int max)
 {
@@ -67,17 +56,14 @@ static inline int is_event_supported(unsigned int code,
 static int input_defuzz_abs_event(int value, int old_val, int fuzz)
 {
 	if (fuzz) {
-		if (value > (long)old_val - fuzz / 2 &&
-				value < (long)old_val + fuzz / 2)
+		if (value > old_val - fuzz / 2 && value < old_val + fuzz / 2)
 			return old_val;
 
-		if (value > (long)old_val - fuzz &&
-				value < (long)old_val + fuzz)
-			return ((long)old_val * 3 + value) / 4;
+		if (value > old_val - fuzz && value < old_val + fuzz)
+			return (old_val * 3 + value) / 4;
 
-		if (value > (long)old_val - fuzz * 2 &&
-				value < (long)old_val + fuzz * 2)
-			return ((long)old_val + value) / 2;
+		if (value > old_val - fuzz * 2 && value < old_val + fuzz * 2)
+			return (old_val + value) / 2;
 	}
 
 	return value;
@@ -1990,14 +1976,6 @@ EXPORT_SYMBOL(input_get_timestamp);
  */
 void input_set_capability(struct input_dev *dev, unsigned int type, unsigned int code)
 {
-	if (type < EV_CNT && input_max_code[type] &&
-	    code > input_max_code[type]) {
-		pr_err("%s: invalid code %u for type %u\n", __func__, code,
-		       type);
-		dump_stack();
-		return;
-	}
-
 	switch (type) {
 	case EV_KEY:
 		__set_bit(code, dev->keybit);
