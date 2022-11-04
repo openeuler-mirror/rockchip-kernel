@@ -99,6 +99,7 @@
 #include <linux/mem_encrypt.h>
 #include <linux/kcsan.h>
 #include <linux/init_syscalls.h>
+#include <linux/stackdepot.h>
 
 #include <asm/io.h>
 #include <asm/bugs.h>
@@ -381,21 +382,10 @@ static char * __init xbc_make_cmdline(const char *key)
 	ret = xbc_snprint_cmdline(new_cmdline, len + 1, root);
 	if (ret < 0 || ret > len) {
 		pr_err("Failed to print extra kernel cmdline.\n");
-		memblock_free(__pa(new_cmdline), len + 1);
 		return NULL;
 	}
 
 	return new_cmdline;
-}
-
-static u32 boot_config_checksum(unsigned char *p, u32 size)
-{
-	u32 ret = 0;
-
-	while (size--)
-		ret += *p++;
-
-	return ret;
 }
 
 static int __init bootconfig_params(char *param, char *val,
@@ -441,7 +431,7 @@ static void __init setup_boot_config(const char *cmdline)
 		return;
 	}
 
-	if (boot_config_checksum((unsigned char *)data, size) != csum) {
+	if (xbc_calc_checksum(data, size) != csum) {
 		pr_err("bootconfig checksum failed\n");
 		return;
 	}
@@ -574,7 +564,6 @@ static int __init unknown_bootoption(char *param, char *val,
 	return 0;
 }
 
-#ifndef CONFIG_SECURITY_BOOT_INIT
 static int __init init_setup(char *str)
 {
 	unsigned int i;
@@ -603,7 +592,6 @@ static int __init rdinit_setup(char *str)
 	return 1;
 }
 __setup("rdinit=", rdinit_setup);
-#endif
 
 #ifndef CONFIG_SMP
 static const unsigned int setup_max_cpus = NR_CPUS;
@@ -829,9 +817,10 @@ static void __init mm_init(void)
 	 * bigger than MAX_ORDER unless SPARSEMEM.
 	 */
 	page_ext_init_flatmem();
-	init_debug_pagealloc();
+	init_mem_debugging_and_hardening();
 	kfence_alloc_pool();
 	report_meminit();
+	stack_depot_init();
 	mem_init();
 	/* page_owner must be initialized after buddy is ready */
 	page_ext_init_flatmem_late();
@@ -840,6 +829,7 @@ static void __init mm_init(void)
 	pgtable_init();
 	debug_objects_mem_init();
 	vmalloc_init();
+	ioremap_huge_init();
 	/* Should be run before the first non-init thread is created */
 	init_espfix_bsp();
 	/* Should be run after espfix64 is set up. */
@@ -884,7 +874,23 @@ asmlinkage __visible void __init __no_sanitize_address start_kernel(void)
 	build_all_zonelists(NULL);
 	page_alloc_init();
 
+#ifdef CONFIG_ARCH_ROCKCHIP
+	{
+		const char *s = saved_command_line;
+		const char *e = &saved_command_line[strlen(saved_command_line)];
+		int n =
+		    pr_notice("Kernel command line: %s\n", saved_command_line);
+		n -= strlen("Kernel command line: ");
+		s += n;
+		/* command line maybe too long to print one time */
+		while (n > 0 && s < e) {
+			n = pr_cont("%s\n", s);
+			s += n;
+		}
+	}
+#else
 	pr_notice("Kernel command line: %s\n", saved_command_line);
+#endif
 	/* parameters may set static keys */
 	jump_label_init();
 	parse_early_param();
@@ -958,18 +964,21 @@ asmlinkage __visible void __init __no_sanitize_address start_kernel(void)
 	softirq_init();
 	timekeeping_init();
 	kfence_init();
-	time_init();
 
 	/*
 	 * For best initial stack canary entropy, prepare it after:
 	 * - setup_arch() for any UEFI RNG entropy and boot cmdline access
-	 * - timekeeping_init() for ktime entropy used in random_init()
-	 * - time_init() for making random_get_entropy() work on some platforms
-	 * - random_init() to initialize the RNG from from early entropy sources
+	 * - timekeeping_init() for ktime entropy used in rand_initialize()
+	 * - rand_initialize() to get any arch-specific entropy like RDRAND
+	 * - add_latent_entropy() to get any latent entropy
+	 * - adding command line entropy
 	 */
-	random_init(command_line);
+	rand_initialize();
+	add_latent_entropy();
+	add_device_randomness(command_line, strlen(command_line));
 	boot_init_stack_canary();
 
+	time_init();
 	perf_event_init();
 	profile_init();
 	call_function_init();
@@ -1107,7 +1116,7 @@ static int __init initcall_blacklist(char *str)
 		}
 	} while (str_entry);
 
-	return 1;
+	return 0;
 }
 
 static bool __init_or_module initcall_blacklisted(initcall_t fn)
@@ -1275,6 +1284,183 @@ static int __init ignore_unknown_bootoption(char *param, char *val,
 	return 0;
 }
 
+#ifdef CONFIG_INITCALL_ASYNC
+extern initcall_entry_t __initcall0s_start[];
+extern initcall_entry_t __initcall1s_start[];
+extern initcall_entry_t __initcall2s_start[];
+extern initcall_entry_t __initcall3s_start[];
+extern initcall_entry_t __initcall4s_start[];
+extern initcall_entry_t __initcall5s_start[];
+extern initcall_entry_t __initcall6s_start[];
+extern initcall_entry_t __initcall7s_start[];
+
+static initcall_entry_t *initcall_sync_levels[] __initdata = {
+	__initcall0s_start,
+	__initcall1s_start,
+	__initcall2s_start,
+	__initcall3s_start,
+	__initcall4s_start,
+	__initcall5s_start,
+	__initcall6s_start,
+	__initcall7s_start,
+	__initcall_end,
+};
+
+struct initcall_work {
+	struct kthread_work work;
+	initcall_t call;
+};
+
+struct initcall_worker {
+	struct kthread_worker *worker;
+	bool queued;
+};
+
+static struct initcall_worker *initcall_workers;
+static int initcall_nr_workers;
+
+static int __init setup_initcall_nr_threads(char *str)
+{
+	get_option(&str, &initcall_nr_workers);
+
+	return 1;
+}
+__setup("initcall_nr_threads=", setup_initcall_nr_threads);
+
+static void __init initcall_work_func(struct kthread_work *work)
+{
+	struct initcall_work *iwork =
+		container_of(work, struct initcall_work, work);
+
+	do_one_initcall(iwork->call);
+}
+
+static void __init initcall_queue_work(struct initcall_worker *iworker,
+				       struct initcall_work *iwork)
+{
+	kthread_queue_work(iworker->worker, &iwork->work);
+	iworker->queued = true;
+}
+
+static void __init initcall_flush_worker(int level, bool sync)
+{
+	int i;
+	struct initcall_worker *iworker;
+
+	for (i = 0; i < initcall_nr_workers; i++) {
+		iworker = &initcall_workers[i];
+		if (iworker->queued) {
+			kthread_flush_worker(iworker->worker);
+			iworker->queued = false;
+		}
+	}
+}
+
+static int __init do_initcall_level_threaded(int level)
+{
+	initcall_entry_t *fn;
+	size_t i = 0, w = 0;
+	size_t n = initcall_levels[level + 1] - initcall_levels[level];
+	struct initcall_work *iwork, *iworks;
+	ktime_t start = 0, end;
+
+	if (!n)
+		return 0;
+
+	iworks = kmalloc_array(n, sizeof(*iworks), GFP_KERNEL);
+	if (!iworks)
+		return -ENOMEM;
+
+	if (initcall_debug)
+		start = ktime_get();
+
+	for (fn = initcall_levels[level]; fn < initcall_sync_levels[level];
+	     fn++, i++) {
+		iwork = &iworks[i];
+		iwork->call = initcall_from_entry(fn);
+		kthread_init_work(&iwork->work, initcall_work_func);
+		initcall_queue_work(&initcall_workers[w], iwork);
+		if (++w >= initcall_nr_workers)
+			w = 0;
+	}
+	if (initcall_sync_levels[level] > initcall_levels[level]) {
+		initcall_flush_worker(level, false);
+
+		if (initcall_debug) {
+			end = ktime_get();
+			printk(KERN_DEBUG "initcall level %s %lld usecs\n",
+			       initcall_level_names[level],
+			       ktime_us_delta(end, start));
+			start = end;
+		}
+	}
+
+	for (fn = initcall_sync_levels[level]; fn < initcall_levels[level + 1];
+	     fn++, i++) {
+		iwork = &iworks[i];
+		iwork->call = initcall_from_entry(fn);
+		kthread_init_work(&iwork->work, initcall_work_func);
+		initcall_queue_work(&initcall_workers[w], iwork);
+		if (++w >= initcall_nr_workers)
+			w = 0;
+	}
+	if (initcall_levels[level + 1] > initcall_sync_levels[level]) {
+		initcall_flush_worker(level, true);
+
+		if (initcall_debug) {
+			end = ktime_get();
+			printk(KERN_DEBUG "initcall level %s_sync %lld usecs\n",
+			       initcall_level_names[level],
+			       ktime_us_delta(end, start));
+		}
+	}
+
+	kfree(iworks);
+
+	return 0;
+}
+
+static void __init initcall_init_workers(void)
+{
+	int i;
+
+	if (initcall_nr_workers < 0)
+		initcall_nr_workers = num_online_cpus() * 2;
+
+	if (!initcall_nr_workers)
+		return;
+
+	initcall_workers =
+		kcalloc(initcall_nr_workers, sizeof(*initcall_workers),
+			GFP_KERNEL);
+	if (!initcall_workers)
+		initcall_nr_workers = 0;
+
+	for (i = 0; i < initcall_nr_workers; i++) {
+		struct kthread_worker *worker;
+
+		worker = kthread_create_worker(0, "init/%d", i);
+		if (IS_ERR(worker)) {
+			i--;
+			initcall_nr_workers = (i >= 0 ? i : 0);
+			break;
+		}
+		initcall_workers[i].worker = worker;
+	}
+}
+
+static void __init initcall_free_works(void)
+{
+	int i;
+
+	for (i = 0; i < initcall_nr_workers; i++)
+		if (initcall_workers[i].worker)
+			kthread_destroy_worker(initcall_workers[i].worker);
+
+	kfree(initcall_workers);
+}
+#endif /* CONFIG_INITCALL_ASYNC */
+
 static void __init do_initcall_level(int level, char *command_line)
 {
 	initcall_entry_t *fn;
@@ -1286,6 +1472,13 @@ static void __init do_initcall_level(int level, char *command_line)
 		   NULL, ignore_unknown_bootoption);
 
 	trace_initcall_level(initcall_level_names[level]);
+
+#ifdef CONFIG_INITCALL_ASYNC
+	if (initcall_nr_workers)
+		if (do_initcall_level_threaded(level) == 0)
+			return;
+#endif
+
 	for (fn = initcall_levels[level]; fn < initcall_levels[level+1]; fn++)
 		do_one_initcall(initcall_from_entry(fn));
 }
@@ -1295,6 +1488,10 @@ static void __init do_initcalls(void)
 	int level;
 	size_t len = strlen(saved_command_line) + 1;
 	char *command_line;
+
+#ifdef CONFIG_INITCALL_ASYNC
+	initcall_init_workers();
+#endif
 
 	command_line = kzalloc(len, GFP_KERNEL);
 	if (!command_line)
@@ -1307,6 +1504,10 @@ static void __init do_initcalls(void)
 	}
 
 	kfree(command_line);
+
+#ifdef CONFIG_INITCALL_ASYNC
+	initcall_free_works();
+#endif
 }
 
 /*
@@ -1370,9 +1571,7 @@ static noinline void __init kernel_init_freeable(void);
 bool rodata_enabled __ro_after_init = true;
 static int __init set_debug_rodata(char *str)
 {
-	if (strtobool(str, &rodata_enabled))
-		pr_warn("Invalid option string for rodata: '%s'\n", str);
-	return 1;
+	return strtobool(str, &rodata_enabled);
 }
 __setup("rodata=", set_debug_rodata);
 #endif
@@ -1517,9 +1716,14 @@ static noinline void __init kernel_init_freeable(void)
 
 	rcu_init_tasks_generic();
 	do_pre_smp_initcalls();
+	lockup_detector_init();
 
 	smp_init();
 	sched_init_smp();
+
+#if defined(CONFIG_ROCKCHIP_THUNDER_BOOT) && defined(CONFIG_SMP)
+	kthread_run(defer_free_memblock, NULL, "defer_mem");
+#endif
 
 	padata_init();
 	page_alloc_init_late();
@@ -1528,9 +1732,11 @@ static noinline void __init kernel_init_freeable(void)
 
 	do_basic_setup();
 
-	lockup_detector_init();
-
 	kunit_run_all_tests();
+
+#if IS_BUILTIN(CONFIG_INITRD_ASYNC)
+	async_synchronize_full();
+#endif
 
 	console_on_rootfs();
 
