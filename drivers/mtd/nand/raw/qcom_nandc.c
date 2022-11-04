@@ -2,6 +2,7 @@
 /*
  * Copyright (c) 2016, The Linux Foundation. All rights reserved.
  */
+
 #include <linux/clk.h>
 #include <linux/slab.h>
 #include <linux/bitops.h>
@@ -2967,6 +2968,10 @@ static int qcom_nandc_probe(struct platform_device *pdev)
 	if (!nandc->base_dma)
 		return -ENXIO;
 
+	ret = qcom_nandc_alloc(nandc);
+	if (ret)
+		goto err_nandc_alloc;
+
 	ret = clk_prepare_enable(nandc->core_clk);
 	if (ret)
 		goto err_core_clk;
@@ -2974,10 +2979,6 @@ static int qcom_nandc_probe(struct platform_device *pdev)
 	ret = clk_prepare_enable(nandc->aon_clk);
 	if (ret)
 		goto err_aon_clk;
-
-	ret = qcom_nandc_alloc(nandc);
-	if (ret)
-		goto err_nandc_alloc;
 
 	ret = qcom_nandc_setup(nandc);
 	if (ret)
@@ -2990,14 +2991,15 @@ static int qcom_nandc_probe(struct platform_device *pdev)
 	return 0;
 
 err_setup:
-	qcom_nandc_unalloc(nandc);
-err_nandc_alloc:
 	clk_disable_unprepare(nandc->aon_clk);
 err_aon_clk:
 	clk_disable_unprepare(nandc->core_clk);
 err_core_clk:
+	qcom_nandc_unalloc(nandc);
+err_nandc_alloc:
 	dma_unmap_resource(dev, res->start, resource_size(res),
 			   DMA_BIDIRECTIONAL, 0);
+
 	return ret;
 }
 

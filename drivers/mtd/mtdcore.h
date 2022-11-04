@@ -4,6 +4,7 @@
  * You should not use them for _anything_ else.
  */
 
+extern struct mutex mtd_table_mutex;
 extern struct backing_dev_info *mtd_bdi;
 
 struct mtd_info *__mtd_next_device(int i);
@@ -21,9 +22,6 @@ void mtd_part_parser_cleanup(struct mtd_partitions *parts);
 
 int __init init_mtdchar(void);
 void __exit cleanup_mtdchar(void);
-extern void mtd_table_mutex_lock(void);
-extern void mtd_table_mutex_unlock(void);
-extern void mtd_table_assert_mutex_locked(void);
 
 #define mtd_for_each_device(mtd)			\
 	for ((mtd) = __mtd_next_device(0);		\
