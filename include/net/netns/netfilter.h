@@ -3,7 +3,7 @@
 #define __NETNS_NETFILTER_H
 
 #include <linux/netfilter_defs.h>
-#include <linux/kabi.h>
+#include <linux/android_kabi.h>
 
 struct proc_dir_entry;
 struct nf_logger;
@@ -36,6 +36,6 @@ struct netns_nf {
 	bool			defrag_ipv6;
 #endif
 
-	KABI_RESERVE(1)
+	ANDROID_KABI_RESERVE(1);
 };
 #endif

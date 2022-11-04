@@ -13,6 +13,7 @@
 #include <linux/rtnetlink.h>
 #include <linux/spinlock.h>
 #include <linux/notifier.h>
+#include <linux/android_kabi.h>
 #include <net/dst.h>
 #include <net/flow.h>
 #include <net/ip_fib.h>
@@ -68,7 +69,7 @@ struct fib6_config {
 	u16		fc_encap_type;
 	bool		fc_is_fdb;
 
-	KABI_RESERVE(1)
+	ANDROID_KABI_RESERVE(1);
 };
 
 struct fib6_node {
@@ -86,7 +87,7 @@ struct fib6_node {
 	struct fib6_info __rcu	*rr_ptr;
 	struct rcu_head		rcu;
 
-	KABI_RESERVE(1)
+	ANDROID_KABI_RESERVE(1);
 };
 
 struct fib6_gc_args {
@@ -204,7 +205,7 @@ struct fib6_info {
 	struct rcu_head			rcu;
 	struct nexthop			*nh;
 
-	KABI_RESERVE(1)
+	ANDROID_KABI_RESERVE(1);
 
 	struct fib6_nh			fib6_nh[];
 };
@@ -226,7 +227,7 @@ struct rt6_info {
 	/* more non-fragment space at head required */
 	unsigned short			rt6i_nfheader_len;
 
-	KABI_RESERVE(1)
+	ANDROID_KABI_RESERVE(1);
 };
 
 struct fib6_result {
@@ -289,7 +290,7 @@ static inline bool fib6_get_cookie_safe(const struct fib6_info *f6i,
 	fn = rcu_dereference(f6i->fib6_node);
 
 	if (fn) {
-		*cookie = READ_ONCE(fn->fn_sernum);
+		*cookie = fn->fn_sernum;
 		/* pairs with smp_wmb() in fib6_update_sernum_upto_root() */
 		smp_rmb();
 		status = true;
@@ -500,7 +501,6 @@ int fib6_nh_init(struct net *net, struct fib6_nh *fib6_nh,
 		 struct fib6_config *cfg, gfp_t gfp_flags,
 		 struct netlink_ext_ack *extack);
 void fib6_nh_release(struct fib6_nh *fib6_nh);
-void fib6_nh_release_dsts(struct fib6_nh *fib6_nh);
 
 int call_fib6_entry_notifiers(struct net *net,
 			      enum fib_event_type event_type,

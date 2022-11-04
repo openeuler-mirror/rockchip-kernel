@@ -7,8 +7,8 @@
 #include <linux/workqueue.h>
 #include <linux/rhashtable-types.h>
 #include <linux/xfrm.h>
+#include <linux/android_kabi.h>
 #include <net/dst_ops.h>
-#include <linux/kabi.h>
 
 struct ctl_table_header;
 
@@ -75,12 +75,11 @@ struct netns_xfrm {
 #endif
 	spinlock_t		xfrm_state_lock;
 	seqcount_t		xfrm_state_hash_generation;
-	seqcount_spinlock_t	xfrm_policy_hash_generation;
 
 	spinlock_t xfrm_policy_lock;
 	struct mutex xfrm_cfg_mutex;
 
-	KABI_RESERVE(1)
+	ANDROID_KABI_RESERVE(1);
 };
 
 #endif
