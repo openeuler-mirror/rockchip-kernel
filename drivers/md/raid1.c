@@ -300,8 +300,6 @@ static void call_bio_endio(struct r1bio *r1_bio)
 	if (!test_bit(R1BIO_Uptodate, &r1_bio->state))
 		bio->bi_status = BLK_STS_IOERR;
 
-	if (blk_queue_io_stat(bio->bi_disk->queue))
-		bio_end_io_acct(bio, r1_bio->start_time);
 	bio_endio(bio);
 }
 
@@ -643,8 +641,7 @@ static int read_balance(struct r1conf *conf, struct r1bio *r1_bio, int *max_sect
 		rdev = rcu_dereference(conf->mirrors[disk].rdev);
 		if (r1_bio->bios[disk] == IO_BLOCKED
 		    || rdev == NULL
-		    || test_bit(Faulty, &rdev->flags)
-			|| test_bit(WantRemove, &rdev->flags))
+		    || test_bit(Faulty, &rdev->flags))
 			continue;
 		if (!test_bit(In_sync, &rdev->flags) &&
 		    rdev->recovery_offset < this_sector + sectors)
@@ -773,8 +770,7 @@ static int read_balance(struct r1conf *conf, struct r1bio *r1_bio, int *max_sect
 
 	if (best_disk >= 0) {
 		rdev = rcu_dereference(conf->mirrors[best_disk].rdev);
-		if (!rdev || test_bit(Faulty, &rdev->flags)
-				|| test_bit(WantRemove, &rdev->flags))
+		if (!rdev)
 			goto retry;
 		atomic_inc(&rdev->nr_pending);
 		sectors = best_good_sectors;
@@ -1212,7 +1208,7 @@ static void raid1_read_request(struct mddev *mddev, struct bio *bio,
 	const unsigned long do_sync = (bio->bi_opf & REQ_SYNC);
 	int max_sectors;
 	int rdisk;
-	bool r1bio_existed = !!r1_bio;
+	bool print_msg = !!r1_bio;
 	char b[BDEVNAME_SIZE];
 
 	/*
@@ -1222,7 +1218,7 @@ static void raid1_read_request(struct mddev *mddev, struct bio *bio,
 	 */
 	gfp_t gfp = r1_bio ? (GFP_NOIO | __GFP_HIGH) : GFP_NOIO;
 
-	if (r1bio_existed) {
+	if (print_msg) {
 		/* Need to get the block device name carefully */
 		struct md_rdev *rdev;
 		rcu_read_lock();
@@ -1254,7 +1250,7 @@ static void raid1_read_request(struct mddev *mddev, struct bio *bio,
 
 	if (rdisk < 0) {
 		/* couldn't find anywhere to read from */
-		if (r1bio_existed) {
+		if (print_msg) {
 			pr_crit_ratelimited("md/raid1:%s: %s: unrecoverable I/O read error for block %llu\n",
 					    mdname(mddev),
 					    b,
@@ -1265,7 +1261,7 @@ static void raid1_read_request(struct mddev *mddev, struct bio *bio,
 	}
 	mirror = conf->mirrors + rdisk;
 
-	if (r1bio_existed)
+	if (print_msg)
 		pr_info_ratelimited("md/raid1:%s: redirecting sector %llu to other mirror: %s\n",
 				    mdname(mddev),
 				    (unsigned long long)r1_bio->sector,
@@ -1293,9 +1289,6 @@ static void raid1_read_request(struct mddev *mddev, struct bio *bio,
 	}
 
 	r1_bio->read_disk = rdisk;
-
-	if (!r1bio_existed && blk_queue_io_stat(bio->bi_disk->queue))
-		r1_bio->start_time = bio_start_io_acct(bio);
 
 	read_bio = bio_clone_fast(bio, gfp, &mddev->bio_set);
 
@@ -1331,7 +1324,6 @@ static void raid1_write_request(struct mddev *mddev, struct bio *bio,
 	struct raid1_plug_cb *plug = NULL;
 	int first_clone;
 	int max_sectors;
-	bool write_behind = false;
 
 	if (mddev_is_clustered(mddev) &&
 	     md_cluster_ops->area_resyncing(mddev, WRITE,
@@ -1384,23 +1376,13 @@ static void raid1_write_request(struct mddev *mddev, struct bio *bio,
 	max_sectors = r1_bio->sectors;
 	for (i = 0;  i < disks; i++) {
 		struct md_rdev *rdev = rcu_dereference(conf->mirrors[i].rdev);
-
-		/*
-		 * The write-behind io is only attempted on drives marked as
-		 * write-mostly, which means we could allocate write behind
-		 * bio later.
-		 */
-		if (rdev && test_bit(WriteMostly, &rdev->flags))
-			write_behind = true;
-
 		if (rdev && unlikely(test_bit(Blocked, &rdev->flags))) {
 			atomic_inc(&rdev->nr_pending);
 			blocked_rdev = rdev;
 			break;
 		}
 		r1_bio->bios[i] = NULL;
-		if (!rdev || test_bit(Faulty, &rdev->flags)
-				|| test_bit(WantRemove, &rdev->flags)) {
+		if (!rdev || test_bit(Faulty, &rdev->flags)) {
 			if (i < conf->raid_disks)
 				set_bit(R1BIO_Degraded, &r1_bio->state);
 			continue;
@@ -1467,15 +1449,6 @@ static void raid1_write_request(struct mddev *mddev, struct bio *bio,
 		goto retry_write;
 	}
 
-	/*
-	 * When using a bitmap, we may call alloc_behind_master_bio below.
-	 * alloc_behind_master_bio allocates a copy of the data payload a page
-	 * at a time and thus needs a new bio that can fit the whole payload
-	 * this bio in page sized chunks.
-	 */
-	if (write_behind && bitmap)
-		max_sectors = min_t(int, max_sectors,
-				    BIO_MAX_PAGES * (PAGE_SIZE >> 9));
 	if (max_sectors < bio_sectors(bio)) {
 		struct bio *split = bio_split(bio, max_sectors,
 					      GFP_NOIO, &conf->bio_split);
@@ -1486,8 +1459,6 @@ static void raid1_write_request(struct mddev *mddev, struct bio *bio,
 		r1_bio->sectors = max_sectors;
 	}
 
-	if (blk_queue_io_stat(bio->bi_disk->queue))
-		r1_bio->start_time = bio_start_io_acct(bio);
 	atomic_set(&r1_bio->remaining, 1);
 	atomic_set(&r1_bio->behind_remaining, 0);
 
@@ -1505,7 +1476,6 @@ static void raid1_write_request(struct mddev *mddev, struct bio *bio,
 			 * allocate memory, or a reader on WriteMostly
 			 * is waiting for behind writes to flush */
 			if (bitmap &&
-			    test_bit(WriteMostly, &rdev->flags) &&
 			    (atomic_read(&bitmap->behind_writes)
 			     < mddev->bitmap_info.max_write_behind) &&
 			    !waitqueue_active(&bitmap->behind_wait)) {
@@ -1789,7 +1759,6 @@ static int raid1_add_disk(struct mddev *mddev, struct md_rdev *rdev)
 
 			p->head_position = 0;
 			rdev->raid_disk = mirror;
-			clear_bit(WantRemove, &rdev->flags);
 			err = 0;
 			/* As all devices are equivalent, we don't need a full recovery
 			 * if this was recently any drive of the array
@@ -1804,7 +1773,6 @@ static int raid1_add_disk(struct mddev *mddev, struct md_rdev *rdev)
 			/* Add this device as a replacement */
 			clear_bit(In_sync, &rdev->flags);
 			set_bit(Replacement, &rdev->flags);
-			clear_bit(WantRemove, &rdev->flags);
 			rdev->raid_disk = mirror;
 			err = 0;
 			conf->fullsync = 1;
@@ -1844,26 +1812,16 @@ static int raid1_remove_disk(struct mddev *mddev, struct md_rdev *rdev)
 			err = -EBUSY;
 			goto abort;
 		}
-
-		/*
-		 * Before set p->rdev = NULL, we set WantRemove bit avoiding
-		 * race between rdev remove and issue bio, which can cause
-		 * NULL pointer deference of rdev by conf->mirrors[i].rdev.
-		 */
-		set_bit(WantRemove, &rdev->flags);
-
+		p->rdev = NULL;
 		if (!test_bit(RemoveSynchronized, &rdev->flags)) {
 			synchronize_rcu();
 			if (atomic_read(&rdev->nr_pending)) {
 				/* lost the race, try later */
 				err = -EBUSY;
-				clear_bit(WantRemove, &rdev->flags);
+				p->rdev = rdev;
 				goto abort;
 			}
 		}
-
-		p->rdev = NULL;
-
 		if (conf->mirrors[conf->raid_disks + number].rdev) {
 			/* We just removed a device that is being replaced.
 			 * Move down the replacement.  We drain all IO before
@@ -2758,8 +2716,7 @@ static sector_t raid1_sync_request(struct mddev *mddev, sector_t sector_nr,
 
 		rdev = rcu_dereference(conf->mirrors[i].rdev);
 		if (rdev == NULL ||
-		    test_bit(Faulty, &rdev->flags) ||
-			test_bit(WantRemove, &rdev->flags)) {
+		    test_bit(Faulty, &rdev->flags)) {
 			if (i < conf->raid_disks)
 				still_degraded = 1;
 		} else if (!test_bit(In_sync, &rdev->flags)) {

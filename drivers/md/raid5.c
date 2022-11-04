@@ -686,17 +686,17 @@ int raid5_calc_degraded(struct r5conf *conf)
 	return degraded;
 }
 
-static bool has_failed(struct r5conf *conf)
+static int has_failed(struct r5conf *conf)
 {
-	int degraded = conf->mddev->degraded;
+	int degraded;
 
-	if (test_bit(MD_BROKEN, &conf->mddev->flags))
-		return true;
+	if (conf->mddev->reshape_position == MaxSector)
+		return conf->mddev->degraded > conf->max_degraded;
 
-	if (conf->mddev->reshape_position != MaxSector)
-		degraded = raid5_calc_degraded(conf);
-
-	return degraded > conf->max_degraded;
+	degraded = raid5_calc_degraded(conf);
+	if (degraded > conf->max_degraded)
+		return 1;
+	return 0;
 }
 
 struct stripe_head *
@@ -953,8 +953,7 @@ static void dispatch_bio_list(struct bio_list *tmp)
 		submit_bio_noacct(bio);
 }
 
-static int cmp_stripe(void *priv, const struct list_head *a,
-		      const struct list_head *b)
+static int cmp_stripe(void *priv, struct list_head *a, struct list_head *b)
 {
 	const struct r5pending_data *da = list_entry(a,
 				struct r5pending_data, sibling);
@@ -2877,31 +2876,34 @@ static void raid5_error(struct mddev *mddev, struct md_rdev *rdev)
 	unsigned long flags;
 	pr_debug("raid456: error called\n");
 
-	pr_crit("md/raid:%s: Disk failure on %s, disabling device.\n",
-		mdname(mddev), bdevname(rdev->bdev, b));
-
 	spin_lock_irqsave(&conf->device_lock, flags);
+
+	if (test_bit(In_sync, &rdev->flags) &&
+	    mddev->degraded == conf->max_degraded) {
+		/*
+		 * Don't allow to achieve failed state
+		 * Don't try to recover this device
+		 */
+		conf->recovery_disabled = mddev->recovery_disabled;
+		spin_unlock_irqrestore(&conf->device_lock, flags);
+		return;
+	}
+
 	set_bit(Faulty, &rdev->flags);
 	clear_bit(In_sync, &rdev->flags);
 	mddev->degraded = raid5_calc_degraded(conf);
-
-	if (has_failed(conf)) {
-		set_bit(MD_BROKEN, &conf->mddev->flags);
-		conf->recovery_disabled = mddev->recovery_disabled;
-
-		pr_crit("md/raid:%s: Cannot continue operation (%d/%d failed).\n",
-			mdname(mddev), mddev->degraded, conf->raid_disks);
-	} else {
-		pr_crit("md/raid:%s: Operation continuing on %d devices.\n",
-			mdname(mddev), conf->raid_disks - mddev->degraded);
-	}
-
 	spin_unlock_irqrestore(&conf->device_lock, flags);
 	set_bit(MD_RECOVERY_INTR, &mddev->recovery);
 
 	set_bit(Blocked, &rdev->flags);
 	set_mask_bits(&mddev->sb_flags, 0,
 		      BIT(MD_SB_CHANGE_DEVS) | BIT(MD_SB_CHANGE_PENDING));
+	pr_crit("md/raid:%s: Disk failure on %s, disabling device.\n"
+		"md/raid:%s: Operation continuing on %d devices.\n",
+		mdname(mddev),
+		bdevname(rdev->bdev, b),
+		mdname(mddev),
+		conf->raid_disks - mddev->degraded);
 	r5c_update_on_rdev_error(mddev, rdev);
 }
 
@@ -5361,13 +5363,11 @@ static struct bio *remove_bio_from_retry(struct r5conf *conf,
  */
 static void raid5_align_endio(struct bio *bi)
 {
-	struct md_io_acct *md_io_acct = bi->bi_private;
-	struct bio *raid_bi = md_io_acct->orig_bio;
+	struct bio* raid_bi  = bi->bi_private;
 	struct mddev *mddev;
 	struct r5conf *conf;
 	struct md_rdev *rdev;
 	blk_status_t error = bi->bi_status;
-	unsigned long start_time = md_io_acct->start_time;
 
 	bio_put(bi);
 
@@ -5379,8 +5379,6 @@ static void raid5_align_endio(struct bio *bi)
 	rdev_dec_pending(rdev, conf->mddev);
 
 	if (!error) {
-		if (blk_queue_io_stat(raid_bi->bi_disk->queue))
-			bio_end_io_acct(raid_bi, start_time);
 		bio_endio(raid_bi);
 		if (atomic_dec_and_test(&conf->active_aligned_reads))
 			wake_up(&conf->wait_for_quiescent);
@@ -5395,79 +5393,91 @@ static void raid5_align_endio(struct bio *bi)
 static int raid5_read_one_chunk(struct mddev *mddev, struct bio *raid_bio)
 {
 	struct r5conf *conf = mddev->private;
-	struct bio *align_bio;
+	int dd_idx;
+	struct bio* align_bi;
 	struct md_rdev *rdev;
-	sector_t sector, end_sector, first_bad;
-	int bad_sectors, dd_idx;
-	struct md_io_acct *md_io_acct;
+	sector_t end_sector;
 
 	if (!in_chunk_boundary(mddev, raid_bio)) {
 		pr_debug("%s: non aligned\n", __func__);
 		return 0;
 	}
+	/*
+	 * use bio_clone_fast to make a copy of the bio
+	 */
+	align_bi = bio_clone_fast(raid_bio, GFP_NOIO, &mddev->bio_set);
+	if (!align_bi)
+		return 0;
+	/*
+	 *   set bi_end_io to a new function, and set bi_private to the
+	 *     original bio.
+	 */
+	align_bi->bi_end_io  = raid5_align_endio;
+	align_bi->bi_private = raid_bio;
+	/*
+	 *	compute position
+	 */
+	align_bi->bi_iter.bi_sector =
+		raid5_compute_sector(conf, raid_bio->bi_iter.bi_sector,
+				     0, &dd_idx, NULL);
 
-	sector = raid5_compute_sector(conf, raid_bio->bi_iter.bi_sector, 0,
-			&dd_idx, NULL);
-	end_sector = bio_end_sector(raid_bio);
-
+	end_sector = bio_end_sector(align_bi);
 	rcu_read_lock();
-	if (r5c_big_stripe_cached(conf, sector))
-		goto out_rcu_unlock;
-
 	rdev = rcu_dereference(conf->disks[dd_idx].replacement);
 	if (!rdev || test_bit(Faulty, &rdev->flags) ||
 	    rdev->recovery_offset < end_sector) {
 		rdev = rcu_dereference(conf->disks[dd_idx].rdev);
-		if (!rdev)
-			goto out_rcu_unlock;
-		if (test_bit(Faulty, &rdev->flags) ||
-			!(test_bit(In_sync, &rdev->flags) ||
-			rdev->recovery_offset >= end_sector))
-			goto out_rcu_unlock;
+		if (rdev &&
+		    (test_bit(Faulty, &rdev->flags) ||
+		    !(test_bit(In_sync, &rdev->flags) ||
+		      rdev->recovery_offset >= end_sector)))
+			rdev = NULL;
 	}
 
-	atomic_inc(&rdev->nr_pending);
-	rcu_read_unlock();
-
-	align_bio = bio_clone_fast(raid_bio, GFP_NOIO, &mddev->bio_set);
-	align_bio = bio_clone_fast(raid_bio, GFP_NOIO, &mddev->io_acct_set);
-	md_io_acct = container_of(align_bio, struct md_io_acct, bio_clone);
-	raid_bio->bi_next = (void *)rdev;
-	if (blk_queue_io_stat(raid_bio->bi_disk->queue))
-		md_io_acct->start_time = bio_start_io_acct(raid_bio);
-	md_io_acct->orig_bio = raid_bio;
-
-	bio_set_dev(align_bio, rdev->bdev);
-	align_bio->bi_end_io = raid5_align_endio;
-	align_bio->bi_private = md_io_acct;
-	align_bio->bi_iter.bi_sector = sector;
-
-	if (is_badblock(rdev, sector, bio_sectors(align_bio), &first_bad,
-				&bad_sectors)) {
-		bio_put(align_bio);
-		rdev_dec_pending(rdev, mddev);
+	if (r5c_big_stripe_cached(conf, align_bi->bi_iter.bi_sector)) {
+		rcu_read_unlock();
+		bio_put(align_bi);
 		return 0;
 	}
 
-	/* No reshape active, so we can trust rdev->data_offset */
-	align_bio->bi_iter.bi_sector += rdev->data_offset;
+	if (rdev) {
+		sector_t first_bad;
+		int bad_sectors;
 
-	spin_lock_irq(&conf->device_lock);
-	wait_event_lock_irq(conf->wait_for_quiescent, conf->quiesce == 0,
-				conf->device_lock);
-	atomic_inc(&conf->active_aligned_reads);
-	spin_unlock_irq(&conf->device_lock);
+		atomic_inc(&rdev->nr_pending);
+		rcu_read_unlock();
+		raid_bio->bi_next = (void*)rdev;
+		bio_set_dev(align_bi, rdev->bdev);
 
-	if (mddev->gendisk)
-		trace_block_bio_remap(align_bio->bi_disk->queue,
-					align_bio, disk_devt(mddev->gendisk),
-					raid_bio->bi_iter.bi_sector);
-	submit_bio_noacct(align_bio);
-	return 1;
+		if (is_badblock(rdev, align_bi->bi_iter.bi_sector,
+				bio_sectors(align_bi),
+				&first_bad, &bad_sectors)) {
+			bio_put(align_bi);
+			rdev_dec_pending(rdev, mddev);
+			return 0;
+		}
 
-out_rcu_unlock:
-	rcu_read_unlock();
-	return 0;
+		/* No reshape active, so we can trust rdev->data_offset */
+		align_bi->bi_iter.bi_sector += rdev->data_offset;
+
+		spin_lock_irq(&conf->device_lock);
+		wait_event_lock_irq(conf->wait_for_quiescent,
+				    conf->quiesce == 0,
+				    conf->device_lock);
+		atomic_inc(&conf->active_aligned_reads);
+		spin_unlock_irq(&conf->device_lock);
+
+		if (mddev->gendisk)
+			trace_block_bio_remap(align_bi->bi_disk->queue,
+					      align_bi, disk_devt(mddev->gendisk),
+					      raid_bio->bi_iter.bi_sector);
+		submit_bio_noacct(align_bi);
+		return 1;
+	} else {
+		rcu_read_unlock();
+		bio_put(align_bi);
+		return 0;
+	}
 }
 
 static struct bio *chunk_aligned_read(struct mddev *mddev, struct bio *raid_bio)
@@ -5806,7 +5816,6 @@ static bool raid5_make_request(struct mddev *mddev, struct bio * bi)
 	last_sector = bio_end_sector(bi);
 	bi->bi_next = NULL;
 
-	md_account_bio(mddev, &bi);
 	prepare_to_wait(&conf->wait_for_overlap, &w, TASK_UNINTERRUPTIBLE);
 	for (; logical_sector < last_sector; logical_sector += RAID5_STRIPE_SECTORS(conf)) {
 		int previous;
