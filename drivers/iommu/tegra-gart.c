@@ -270,7 +270,7 @@ static void gart_iommu_sync_map(struct iommu_domain *domain, unsigned long iova,
 static void gart_iommu_sync(struct iommu_domain *domain,
 			    struct iommu_iotlb_gather *gather)
 {
-	size_t length = gather->end - gather->start + 1;
+	size_t length = gather->end - gather->start;
 
 	gart_iommu_sync_map(domain, gather->start, length);
 }
