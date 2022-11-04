@@ -45,13 +45,10 @@ EXPORT_SYMBOL(hex_to_bin);
 int hex2bin(u8 *dst, const char *src, size_t count)
 {
 	while (count--) {
-		int hi, lo;
+		int hi = hex_to_bin(*src++);
+		int lo = hex_to_bin(*src++);
 
-		hi = hex_to_bin(*src++);
-		if (unlikely(hi < 0))
-			return -EINVAL;
-		lo = hex_to_bin(*src++);
-		if (unlikely(lo < 0))
+		if ((hi < 0) || (lo < 0))
 			return -EINVAL;
 
 		*dst++ = (hi << 4) | lo;
