@@ -339,16 +339,6 @@ config SPI_FSL_QUADSPI
 	  This controller does not support generic SPI messages. It only
 	  supports the high-level SPI memory interface.
 
-config SPI_HISI_KUNPENG
-	tristate "HiSilicon SPI Controller for Kunpeng SoCs"
-	depends on (ARM64 && ACPI) || COMPILE_TEST
-	help
-	  This enables support for HiSilicon SPI controller found on
-	  Kunpeng SoCs.
-
-	  This driver can also be built as a module. If so, the module
-	  will be called hisi-kunpeng-spi.
-
 config SPI_HISI_SFC_V3XX
 	tristate "HiSilicon SPI NOR Flash Controller for Hi16XX chipsets"
 	depends on (ARM64 && ACPI) || COMPILE_TEST
@@ -649,6 +639,19 @@ config SPI_ROCKCHIP
 	  Rockchip SPI controller support DMA transport and PIO mode.
 	  The main usecase of this controller is to use spi flash as boot
 	  device.
+
+config SPI_ROCKCHIP_SFC
+	tristate "Rockchip Serial Flash Controller (SFC)"
+	imply ROCKCHIP_MTD_VENDOR_STORAGE
+	depends on ARCH_ROCKCHIP || COMPILE_TEST
+	depends on HAS_IOMEM && HAS_DMA
+	help
+	  This enables support for Rockchip serial flash controller. This
+	  is a specialized controller used to access SPI flash on some
+	  Rockchip SOCs.
+
+	  ROCKCHIP SFC supports DMA and PIO modes. When DMA is not available,
+	  the driver automatically falls back to PIO mode.
 
 config SPI_RB4XX
 	tristate "Mikrotik RB4XX SPI master"
@@ -980,12 +983,6 @@ config SPI_AMD
 #
 # Add new SPI master controllers in alphabetical order above this line
 #
-config SPI_CHIP3
-	tristate "Memory-mapped io interface driver for SUNWAY CHIP3 SPI core"
-	depends on SW64
-	help
-          general driver for SPI controller core from DesignWare
-
 
 comment "SPI Multiplexer support"
 
@@ -1033,6 +1030,18 @@ config SPI_TLE62X0
 #
 # Add new SPI protocol masters in alphabetical order above this line
 #
+
+config SPI_WK2XXX
+	tristate "wk2xxx Spi Switch Uart"
+	depends on SPI
+	help
+         Say Y to get the third party encryption service.
+
+config SPI_FIREFLY
+	tristate "config SPI_FIREFLY"
+	default y
+	help
+	  Select this option if your Firefly board needs to run SPI demo.
 
 endif # SPI_MASTER
 
