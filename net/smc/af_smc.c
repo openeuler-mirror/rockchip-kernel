@@ -146,18 +146,14 @@ static int __smc_release(struct smc_sock *smc)
 		sock_set_flag(sk, SOCK_DEAD);
 		sk->sk_shutdown |= SHUTDOWN_MASK;
 	} else {
-		if (sk->sk_state != SMC_CLOSED) {
-			if (sk->sk_state != SMC_LISTEN &&
-			    sk->sk_state != SMC_INIT)
-				sock_put(sk); /* passive closing */
-			if (sk->sk_state == SMC_LISTEN) {
-				/* wake up clcsock accept */
-				rc = kernel_sock_shutdown(smc->clcsock,
-							  SHUT_RDWR);
-			}
-			sk->sk_state = SMC_CLOSED;
-			sk->sk_state_change(sk);
+		if (sk->sk_state != SMC_LISTEN && sk->sk_state != SMC_INIT)
+			sock_put(sk); /* passive closing */
+		if (sk->sk_state == SMC_LISTEN) {
+			/* wake up clcsock accept */
+			rc = kernel_sock_shutdown(smc->clcsock, SHUT_RDWR);
 		}
+		sk->sk_state = SMC_CLOSED;
+		sk->sk_state_change(sk);
 		smc_restore_fallback_changes(smc);
 	}
 
@@ -180,7 +176,7 @@ static int smc_release(struct socket *sock)
 {
 	struct sock *sk = sock->sk;
 	struct smc_sock *smc;
-	int old_state, rc = 0;
+	int rc = 0;
 
 	if (!sk)
 		goto out;
@@ -188,14 +184,10 @@ static int smc_release(struct socket *sock)
 	sock_hold(sk); /* sock_put below */
 	smc = smc_sk(sk);
 
-	old_state = sk->sk_state;
-
 	/* cleanup for a dangling non-blocking connect */
-	if (smc->connect_nonblock && old_state == SMC_INIT)
+	if (smc->connect_nonblock && sk->sk_state == SMC_INIT)
 		tcp_abort(smc->clcsock->sk, ECONNABORTED);
-
-	if (cancel_work_sync(&smc->connect_work))
-		sock_put(&smc->sk); /* sock_hold in smc_connect for passive closing */
+	flush_work(&smc->connect_work);
 
 	if (sk->sk_state == SMC_LISTEN)
 		/* smc_close_non_accepted() is called and acquires
@@ -204,10 +196,6 @@ static int smc_release(struct socket *sock)
 		lock_sock_nested(sk, SINGLE_DEPTH_NESTING);
 	else
 		lock_sock(sk);
-
-	if (old_state == SMC_INIT && sk->sk_state == SMC_ACTIVE &&
-	    !smc->use_fallback)
-		smc_close_active_abort(smc);
 
 	rc = __smc_release(smc);
 
@@ -521,26 +509,12 @@ static void smc_link_save_peer_info(struct smc_link *link,
 
 static void smc_switch_to_fallback(struct smc_sock *smc)
 {
-	wait_queue_head_t *smc_wait = sk_sleep(&smc->sk);
-	wait_queue_head_t *clc_wait = sk_sleep(smc->clcsock->sk);
-	unsigned long flags;
-
 	smc->use_fallback = true;
 	if (smc->sk.sk_socket && smc->sk.sk_socket->file) {
 		smc->clcsock->file = smc->sk.sk_socket->file;
 		smc->clcsock->file->private_data = smc->clcsock;
 		smc->clcsock->wq.fasync_list =
 			smc->sk.sk_socket->wq.fasync_list;
-
-		/* There may be some entries remaining in
-		 * smc socket->wq, which should be removed
-		 * to clcsocket->wq during the fallback.
-		 */
-		spin_lock_irqsave(&smc_wait->lock, flags);
-		spin_lock_nested(&clc_wait->lock, SINGLE_DEPTH_NESTING);
-		list_splice_init(&smc_wait->head, &clc_wait->head);
-		spin_unlock(&clc_wait->lock);
-		spin_unlock_irqrestore(&smc_wait->lock, flags);
 	}
 }
 
@@ -1044,7 +1018,7 @@ static void smc_connect_work(struct work_struct *work)
 	if (smc->clcsock->sk->sk_err) {
 		smc->sk.sk_err = smc->clcsock->sk->sk_err;
 	} else if ((1 << smc->clcsock->sk->sk_state) &
-					(TCPF_SYN_SENT | TCPF_SYN_RECV)) {
+					(TCPF_SYN_SENT | TCP_SYN_RECV)) {
 		rc = sk_stream_wait_connect(smc->clcsock->sk, &timeo);
 		if ((rc == -EPIPE) &&
 		    ((1 << smc->clcsock->sk->sk_state) &
@@ -1057,8 +1031,6 @@ static void smc_connect_work(struct work_struct *work)
 		smc->sk.sk_state = SMC_CLOSED;
 		if (rc == -EPIPE || rc == -EAGAIN)
 			smc->sk.sk_err = EPIPE;
-		else if (rc == -ECONNREFUSED)
-			smc->sk.sk_err = ECONNREFUSED;
 		else if (signal_pending(current))
 			smc->sk.sk_err = -sock_intr_errno(timeo);
 		sock_put(&smc->sk); /* passive closing */
@@ -1118,9 +1090,9 @@ static int smc_connect(struct socket *sock, struct sockaddr *addr,
 	if (rc && rc != -EINPROGRESS)
 		goto out;
 
+	sock_hold(&smc->sk); /* sock put in passive closing */
 	if (smc->use_fallback)
 		goto out;
-	sock_hold(&smc->sk); /* sock put in passive closing */
 	if (flags & O_NONBLOCK) {
 		if (queue_work(smc_hs_wq, &smc->connect_work))
 			smc->connect_nonblock = 1;
@@ -1888,10 +1860,8 @@ static int smc_listen(struct socket *sock, int backlog)
 	smc->clcsock->sk->sk_user_data =
 		(void *)((uintptr_t)smc | SK_USER_DATA_NOCOPY);
 	rc = kernel_listen(smc->clcsock, backlog);
-	if (rc) {
-		smc->clcsock->sk->sk_data_ready = smc->clcsk_data_ready;
+	if (rc)
 		goto out;
-	}
 	sk->sk_max_ack_backlog = backlog;
 	sk->sk_ack_backlog = 0;
 	sk->sk_state = SMC_LISTEN;
@@ -2122,10 +2092,8 @@ static __poll_t smc_poll(struct file *file, struct socket *sock,
 static int smc_shutdown(struct socket *sock, int how)
 {
 	struct sock *sk = sock->sk;
-	bool do_shutdown = true;
 	struct smc_sock *smc;
 	int rc = -EINVAL;
-	int old_state;
 	int rc1 = 0;
 
 	smc = smc_sk(sk);
@@ -2146,19 +2114,13 @@ static int smc_shutdown(struct socket *sock, int how)
 	if (smc->use_fallback) {
 		rc = kernel_sock_shutdown(smc->clcsock, how);
 		sk->sk_shutdown = smc->clcsock->sk->sk_shutdown;
-		if (sk->sk_shutdown == SHUTDOWN_MASK) {
+		if (sk->sk_shutdown == SHUTDOWN_MASK)
 			sk->sk_state = SMC_CLOSED;
-			sock_put(sk);
-		}
 		goto out;
 	}
 	switch (how) {
 	case SHUT_RDWR:		/* shutdown in both directions */
-		old_state = sk->sk_state;
 		rc = smc_close_active(smc);
-		if (old_state == SMC_ACTIVE &&
-		    sk->sk_state == SMC_PEERCLOSEWAIT1)
-			do_shutdown = false;
 		break;
 	case SHUT_WR:
 		rc = smc_close_shutdown_write(smc);
@@ -2168,7 +2130,7 @@ static int smc_shutdown(struct socket *sock, int how)
 		/* nothing more to do because peer is not involved */
 		break;
 	}
-	if (do_shutdown && smc->clcsock)
+	if (smc->clcsock)
 		rc1 = kernel_sock_shutdown(smc->clcsock, how);
 	/* map sock_shutdown_cmd constants to sk_shutdown value range */
 	sk->sk_shutdown |= how + 1;

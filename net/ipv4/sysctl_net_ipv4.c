@@ -465,30 +465,6 @@ static int proc_fib_multipath_hash_policy(struct ctl_table *table, int write,
 }
 #endif
 
-#if IS_ENABLED(CONFIG_TCP_COMP)
-static int proc_tcp_compression_ports(struct ctl_table *table, int write,
-				      void __user *buffer, size_t *lenp,
-				      loff_t *ppos)
-{
-	unsigned long *bitmap = *(unsigned long **)table->data;
-	unsigned long bitmap_len = table->maxlen;
-	int ret;
-
-	ret = proc_do_large_bitmap(table, write, buffer, lenp, ppos);
-	if (write && ret == 0) {
-		if (bitmap_empty(bitmap, bitmap_len)) {
-			if (static_key_enabled(&tcp_have_comp))
-				static_branch_disable(&tcp_have_comp);
-		} else {
-			if (!static_key_enabled(&tcp_have_comp))
-				static_branch_enable(&tcp_have_comp);
-		}
-	}
-
-	return ret;
-}
-#endif
-
 static struct ctl_table ipv4_table[] = {
 	{
 		.procname	= "tcp_max_orphans",
@@ -612,24 +588,6 @@ static struct ctl_table ipv4_table[] = {
 		.mode		= 0644,
 		.proc_handler	= proc_do_static_key,
 	},
-#if IS_ENABLED(CONFIG_TCP_COMP)
-	{
-		.procname	= "tcp_compression_ports",
-		.data		= &sysctl_tcp_compression_ports,
-		.maxlen		= 65536,
-		.mode		= 0644,
-		.proc_handler	= proc_tcp_compression_ports,
-	},
-	{
-		.procname	= "tcp_compression_local",
-		.data		= &sysctl_tcp_compression_local,
-		.maxlen		= sizeof(int),
-		.mode		= 0644,
-		.proc_handler	= proc_dointvec_minmax,
-		.extra1		= SYSCTL_ZERO,
-		.extra2		= SYSCTL_ONE,
-	},
-#endif
 	{ }
 };
 
@@ -764,6 +722,13 @@ static struct ctl_table ipv4_net_table[] = {
 	{
 		.procname	= "ip_local_reserved_ports",
 		.data		= &init_net.ipv4.sysctl_local_reserved_ports,
+		.maxlen		= 65536,
+		.mode		= 0644,
+		.proc_handler	= proc_do_large_bitmap,
+	},
+	{
+		.procname	= "ip_local_unbindable_ports",
+		.data		= &init_net.ipv4.sysctl_local_unbindable_ports,
 		.maxlen		= 65536,
 		.mode		= 0644,
 		.proc_handler	= proc_do_large_bitmap,
@@ -1432,11 +1397,17 @@ static __net_init int ipv4_sysctl_init_net(struct net *net)
 
 	net->ipv4.sysctl_local_reserved_ports = kzalloc(65536 / 8, GFP_KERNEL);
 	if (!net->ipv4.sysctl_local_reserved_ports)
-		goto err_ports;
+		goto err_reserved_ports;
+
+	net->ipv4.sysctl_local_unbindable_ports = kzalloc(65536 / 8, GFP_KERNEL);
+	if (!net->ipv4.sysctl_local_unbindable_ports)
+		goto err_unbindable_ports;
 
 	return 0;
 
-err_ports:
+err_unbindable_ports:
+	kfree(net->ipv4.sysctl_local_reserved_ports);
+err_reserved_ports:
 	unregister_net_sysctl_table(net->ipv4.ipv4_hdr);
 err_reg:
 	if (!net_eq(net, &init_net))
@@ -1449,6 +1420,7 @@ static __net_exit void ipv4_sysctl_exit_net(struct net *net)
 {
 	struct ctl_table *table;
 
+	kfree(net->ipv4.sysctl_local_unbindable_ports);
 	kfree(net->ipv4.sysctl_local_reserved_ports);
 	table = net->ipv4.ipv4_hdr->ctl_table_arg;
 	unregister_net_sysctl_table(net->ipv4.ipv4_hdr);

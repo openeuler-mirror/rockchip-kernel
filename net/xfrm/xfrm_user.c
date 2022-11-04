@@ -2423,7 +2423,6 @@ static int xfrm_do_migrate(struct sk_buff *skb, struct nlmsghdr *nlh,
 	int n = 0;
 	struct net *net = sock_net(skb->sk);
 	struct xfrm_encap_tmpl  *encap = NULL;
-	u32 if_id = 0;
 
 	if (attrs[XFRMA_MIGRATE] == NULL)
 		return -EINVAL;
@@ -2448,10 +2447,7 @@ static int xfrm_do_migrate(struct sk_buff *skb, struct nlmsghdr *nlh,
 			return 0;
 	}
 
-	if (attrs[XFRMA_IF_ID])
-		if_id = nla_get_u32(attrs[XFRMA_IF_ID]);
-
-	err = xfrm_migrate(&pi->sel, pi->dir, type, m, n, kmp, net, encap, if_id);
+	err = xfrm_migrate(&pi->sel, pi->dir, type, m, n, kmp, net, encap);
 
 	kfree(encap);
 
@@ -2709,19 +2705,22 @@ static int xfrm_user_rcv_msg(struct sk_buff *skb, struct nlmsghdr *nlh,
 	if (!netlink_net_capable(skb, CAP_NET_ADMIN))
 		return -EPERM;
 
-	if (in_compat_syscall()) {
-		struct xfrm_translator *xtr = xfrm_get_translator();
+	/* Use the 64-bit / untranslated format on Android, even for compat */
+	if (!IS_ENABLED(CONFIG_ANDROID) || IS_ENABLED(CONFIG_XFRM_USER_COMPAT)) {
+		if (in_compat_syscall()) {
+			struct xfrm_translator *xtr = xfrm_get_translator();
 
-		if (!xtr)
-			return -EOPNOTSUPP;
+			if (!xtr)
+				return -EOPNOTSUPP;
 
-		nlh64 = xtr->rcv_msg_compat(nlh, link->nla_max,
-					    link->nla_pol, extack);
-		xfrm_put_translator(xtr);
-		if (IS_ERR(nlh64))
-			return PTR_ERR(nlh64);
-		if (nlh64)
-			nlh = nlh64;
+			nlh64 = xtr->rcv_msg_compat(nlh, link->nla_max,
+						    link->nla_pol, extack);
+			xfrm_put_translator(xtr);
+			if (IS_ERR(nlh64))
+				return PTR_ERR(nlh64);
+			if (nlh64)
+				nlh = nlh64;
+		}
 	}
 
 	if ((type == (XFRM_MSG_GETSA - XFRM_MSG_BASE) ||
@@ -2902,7 +2901,7 @@ static inline unsigned int xfrm_sa_len(struct xfrm_state *x)
 	if (x->props.extra_flags)
 		l += nla_total_size(sizeof(x->props.extra_flags));
 	if (x->xso.dev)
-		 l += nla_total_size(sizeof(struct xfrm_user_offload));
+		 l += nla_total_size(sizeof(x->xso));
 	if (x->props.smark.v | x->props.smark.m) {
 		l += nla_total_size(sizeof(x->props.smark.v));
 		l += nla_total_size(sizeof(x->props.smark.m));

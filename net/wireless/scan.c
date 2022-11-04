@@ -418,16 +418,13 @@ cfg80211_add_nontrans_list(struct cfg80211_bss *trans_bss,
 	}
 	ssid_len = ssid[1];
 	ssid = ssid + 2;
+	rcu_read_unlock();
 
 	/* check if nontrans_bss is in the list */
 	list_for_each_entry(bss, &trans_bss->nontrans_list, nontrans_list) {
-		if (is_bss(bss, nontrans_bss->bssid, ssid, ssid_len)) {
-			rcu_read_unlock();
+		if (is_bss(bss, nontrans_bss->bssid, ssid, ssid_len))
 			return 0;
-		}
 	}
-
-	rcu_read_unlock();
 
 	/* add to the list */
 	list_add_tail(&nontrans_bss->nontrans_list, &trans_bss->nontrans_list);
@@ -702,12 +699,8 @@ static bool cfg80211_find_ssid_match(struct cfg80211_colocated_ap *ap,
 
 	for (i = 0; i < request->n_ssids; i++) {
 		/* wildcard ssid in the scan request */
-		if (!request->ssids[i].ssid_len) {
-			if (ap->multi_bss && !ap->transmitted_bssid)
-				continue;
-
+		if (!request->ssids[i].ssid_len)
 			return true;
-		}
 
 		if (ap->ssid_len &&
 		    ap->ssid_len == request->ssids[i].ssid_len) {
@@ -832,9 +825,6 @@ static int cfg80211_scan_6ghz(struct cfg80211_registered_device *rdev)
 
 		if (request->n_ssids > 0 &&
 		    !cfg80211_find_ssid_match(ap, request))
-			continue;
-
-		if (!request->n_ssids && ap->multi_bss && !ap->transmitted_bssid)
 			continue;
 
 		cfg80211_scan_req_add_chan(request, chan, true);
@@ -1968,13 +1958,11 @@ cfg80211_inform_single_bss_data(struct wiphy *wiphy,
 		/* this is a nontransmitting bss, we need to add it to
 		 * transmitting bss' list if it is not there
 		 */
-		spin_lock_bh(&rdev->bss_lock);
 		if (cfg80211_add_nontrans_list(non_tx_data->tx_bss,
 					       &res->pub)) {
 			if (__cfg80211_unlink_bss(rdev, res))
 				rdev->bss_generation++;
 		}
-		spin_unlock_bh(&rdev->bss_lock);
 	}
 
 	trace_cfg80211_return_bss(&res->pub);

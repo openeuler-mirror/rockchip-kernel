@@ -158,7 +158,7 @@ void inet_sock_destruct(struct sock *sk)
 
 	kfree(rcu_dereference_protected(inet->inet_opt, 1));
 	dst_release(rcu_dereference_protected(sk->sk_dst_cache, 1));
-	dst_release(rcu_dereference_protected(sk->sk_rx_dst, 1));
+	dst_release(sk->sk_rx_dst);
 	sk_refcnt_debug_dec(sk);
 }
 EXPORT_SYMBOL(inet_sock_destruct);
@@ -450,7 +450,7 @@ int inet_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
 	/* BPF prog is run before any checks are done so that if the prog
 	 * changes context in a wrong way it will be caught.
 	 */
-	err = BPF_CGROUP_RUN_PROG_INET4_BIND_LOCK(sk, uaddr);
+	err = BPF_CGROUP_RUN_PROG_INET4_BIND(sk, uaddr);
 	if (err)
 		return err;
 
@@ -498,6 +498,10 @@ int __inet_bind(struct sock *sk, struct sockaddr *uaddr, int addr_len,
 		goto out;
 
 	snum = ntohs(addr->sin_port);
+	err = -EPERM;
+	if (snum && inet_is_local_unbindable_port(net, snum))
+		goto out;
+
 	err = -EACCES;
 	if (snum && inet_port_requires_bind_service(net, snum) &&
 	    !ns_capable(net->user_ns, CAP_NET_BIND_SERVICE))
@@ -777,19 +781,18 @@ int inet_getname(struct socket *sock, struct sockaddr *uaddr,
 			return -ENOTCONN;
 		sin->sin_port = inet->inet_dport;
 		sin->sin_addr.s_addr = inet->inet_daddr;
-		BPF_CGROUP_RUN_SA_PROG_LOCK(sk, (struct sockaddr *)sin,
-					    CGROUP_INET4_GETPEERNAME,
-					    NULL);
 	} else {
 		__be32 addr = inet->inet_rcv_saddr;
 		if (!addr)
 			addr = inet->inet_saddr;
 		sin->sin_port = inet->inet_sport;
 		sin->sin_addr.s_addr = addr;
-		BPF_CGROUP_RUN_SA_PROG_LOCK(sk, (struct sockaddr *)sin,
-					    CGROUP_INET4_GETSOCKNAME,
-					    NULL);
 	}
+	if (cgroup_bpf_enabled)
+		BPF_CGROUP_RUN_SA_PROG_LOCK(sk, (struct sockaddr *)sin,
+					    peer ? BPF_CGROUP_INET4_GETPEERNAME :
+						   BPF_CGROUP_INET4_GETSOCKNAME,
+					    NULL);
 	memset(sin->sin_zero, 0, sizeof(sin->sin_zero));
 	return sizeof(*sin);
 }
@@ -1375,11 +1378,8 @@ struct sk_buff *inet_gso_segment(struct sk_buff *skb,
 	}
 
 	ops = rcu_dereference(inet_offloads[proto]);
-	if (likely(ops && ops->callbacks.gso_segment)) {
+	if (likely(ops && ops->callbacks.gso_segment))
 		segs = ops->callbacks.gso_segment(skb, features);
-		if (!segs)
-			skb->network_header = skb_mac_header(skb) + nhoff - skb->head;
-	}
 
 	if (IS_ERR_OR_NULL(segs))
 		goto out;
@@ -1668,6 +1668,12 @@ int inet_ctl_sock_create(struct sock **sk, unsigned short family,
 	return rc;
 }
 EXPORT_SYMBOL_GPL(inet_ctl_sock_create);
+
+u64 snmp_get_cpu_field(void __percpu *mib, int cpu, int offt)
+{
+	return  *(((unsigned long *)per_cpu_ptr(mib, cpu)) + offt);
+}
+EXPORT_SYMBOL_GPL(snmp_get_cpu_field);
 
 unsigned long snmp_fold_field(void __percpu *mib, int offt)
 {
@@ -2001,10 +2007,6 @@ static int __init inet_init(void)
 
 	ip_init();
 
-	/* Initialise per-cpu ipv4 mibs */
-	if (init_ipv4_mibs())
-		panic("%s: Cannot init ipv4 mibs\n", __func__);
-
 	/* Setup TCP slab cache for open requests. */
 	tcp_init();
 
@@ -2035,6 +2037,12 @@ static int __init inet_init(void)
 
 	if (init_inet_pernet_ops())
 		pr_crit("%s: Cannot init ipv4 inet pernet ops\n", __func__);
+	/*
+	 *	Initialise per-cpu ipv4 mibs
+	 */
+
+	if (init_ipv4_mibs())
+		pr_crit("%s: Cannot init ipv4 mibs\n", __func__);
 
 	ipv4_proc_init();
 
