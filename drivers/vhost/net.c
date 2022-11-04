@@ -466,25 +466,15 @@ static void vhost_tx_batch(struct vhost_net *net,
 		.num = nvq->batched_xdp,
 		.ptr = nvq->xdp,
 	};
-	int i, err;
+	int err;
 
 	if (nvq->batched_xdp == 0)
 		goto signal_used;
 
 	msghdr->msg_control = &ctl;
-	msghdr->msg_controllen = sizeof(ctl);
 	err = sock->ops->sendmsg(sock, msghdr, 0);
 	if (unlikely(err < 0)) {
 		vq_err(&nvq->vq, "Fail to batch sending packets\n");
-
-		/* free pages owned by XDP; since this is an unlikely error path,
-		 * keep it simple and avoid more complex bulk update for the
-		 * used pages
-		 */
-		for (i = 0; i < nvq->batched_xdp; ++i)
-			put_page(virt_to_head_page(nvq->xdp[i].data));
-		nvq->batched_xdp = 0;
-		nvq->done_idx = 0;
 		return;
 	}
 
@@ -651,6 +641,8 @@ static bool tx_can_batch(struct vhost_virtqueue *vq, size_t total_len)
 	return total_len < VHOST_NET_WEIGHT &&
 	       !vhost_vq_avail_empty(vq->dev, vq);
 }
+
+#define SKB_FRAG_PAGE_ORDER     get_order(32768)
 
 static bool vhost_net_page_frag_refill(struct vhost_net *net, unsigned int sz,
 				       struct page_frag *pfrag, gfp_t gfp)
@@ -835,15 +827,14 @@ static void handle_tx_copy(struct vhost_net *net, struct socket *sock)
 				msg.msg_flags &= ~MSG_MORE;
 		}
 
+		/* TODO: Check specific error and bomb out unless ENOBUFS? */
 		err = sock->ops->sendmsg(sock, &msg, len);
 		if (unlikely(err < 0)) {
-			if (err == -EAGAIN || err == -ENOMEM || err == -ENOBUFS) {
-				vhost_discard_vq_desc(vq, 1);
-				vhost_net_enable_vq(net, vq);
-				break;
-			}
-			pr_debug("Fail to send packet: err %d", err);
-		} else if (unlikely(err != len))
+			vhost_discard_vq_desc(vq, 1);
+			vhost_net_enable_vq(net, vq);
+			break;
+		}
+		if (err != len)
 			pr_debug("Truncated TX packet: len %d != %zd\n",
 				 err, len);
 done:
@@ -931,6 +922,7 @@ static void handle_tx_zerocopy(struct vhost_net *net, struct socket *sock)
 			msg.msg_flags &= ~MSG_MORE;
 		}
 
+		/* TODO: Check specific error and bomb out unless ENOBUFS? */
 		err = sock->ops->sendmsg(sock, &msg, len);
 		if (unlikely(err < 0)) {
 			if (zcopy_used) {
@@ -939,13 +931,11 @@ static void handle_tx_zerocopy(struct vhost_net *net, struct socket *sock)
 				nvq->upend_idx = ((unsigned)nvq->upend_idx - 1)
 					% UIO_MAXIOV;
 			}
-			if (err == -EAGAIN || err == -ENOMEM || err == -ENOBUFS) {
-				vhost_discard_vq_desc(vq, 1);
-				vhost_net_enable_vq(net, vq);
-				break;
-			}
-			pr_debug("Fail to send packet: err %d", err);
-		} else if (unlikely(err != len))
+			vhost_discard_vq_desc(vq, 1);
+			vhost_net_enable_vq(net, vq);
+			break;
+		}
+		if (err != len)
 			pr_debug("Truncated TX packet: "
 				 " len %d != %zd\n", err, len);
 		if (!zcopy_used)
@@ -1450,9 +1440,13 @@ err:
 	return ERR_PTR(r);
 }
 
-static struct ptr_ring *get_tap_ptr_ring(struct file *file)
+static struct ptr_ring *get_tap_ptr_ring(int fd)
 {
 	struct ptr_ring *ring;
+	struct file *file = fget(fd);
+
+	if (!file)
+		return NULL;
 	ring = tun_get_tx_ring(file);
 	if (!IS_ERR(ring))
 		goto out;
@@ -1461,6 +1455,7 @@ static struct ptr_ring *get_tap_ptr_ring(struct file *file)
 		goto out;
 	ring = NULL;
 out:
+	fput(file);
 	return ring;
 }
 
@@ -1547,12 +1542,8 @@ static long vhost_net_set_backend(struct vhost_net *n, unsigned index, int fd)
 		r = vhost_net_enable_vq(n, vq);
 		if (r)
 			goto err_used;
-		if (index == VHOST_NET_VQ_RX) {
-			if (sock)
-				nvq->rx_ring = get_tap_ptr_ring(sock->file);
-			else
-				nvq->rx_ring = NULL;
-		}
+		if (index == VHOST_NET_VQ_RX)
+			nvq->rx_ring = get_tap_ptr_ring(fd);
 
 		oldubufs = nvq->ubufs;
 		nvq->ubufs = ubufs;
