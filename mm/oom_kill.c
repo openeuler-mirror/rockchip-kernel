@@ -51,10 +51,12 @@
 #define CREATE_TRACE_POINTS
 #include <trace/events/oom.h>
 
+#undef CREATE_TRACE_POINTS
+#include <trace/hooks/mm.h>
+
 int sysctl_panic_on_oom;
 int sysctl_oom_kill_allocating_task;
 int sysctl_oom_dump_tasks = 1;
-int sysctl_enable_oom_killer = 1;
 
 /*
  * Serializes oom killer invocations (out_of_memory()) from all contexts to
@@ -306,48 +308,6 @@ static enum oom_constraint constrained_alloc(struct oom_control *oc)
 	return CONSTRAINT_NONE;
 }
 
-#ifdef CONFIG_MEMCG_QOS
-/**
- * We choose the task in low-priority memcg firstly. For the same state, we
- * choose the task with the highest number of 'points'.
- */
-static bool oom_next_task(struct task_struct *task, struct oom_control *oc,
-			long points)
-{
-	struct mem_cgroup *cur_memcg;
-	struct mem_cgroup *oc_memcg;
-
-	if (!static_branch_likely(&memcg_qos_stat_key))
-		return (points == LONG_MIN || points < oc->chosen_points);
-
-	if (points == LONG_MIN)
-		return true;
-
-	if (!oc->chosen)
-		return false;
-
-	oc_memcg = mem_cgroup_from_task(oc->chosen);
-	cur_memcg = mem_cgroup_from_task(task);
-
-	if (cur_memcg->memcg_priority == oc_memcg->memcg_priority) {
-		if (points < oc->chosen_points)
-			return true;
-		return false;
-	}
-	/* if oc is low-priority, so skip the task */
-	if (oc_memcg->memcg_priority)
-		return true;
-
-	return false;
-}
-#else
-static inline bool oom_next_task(struct task_struct *task,
-				struct oom_control *oc, long points)
-{
-	return (points == LONG_MIN || points < oc->chosen_points);
-}
-#endif
-
 static int oom_evaluate_task(struct task_struct *task, void *arg)
 {
 	struct oom_control *oc = arg;
@@ -382,7 +342,24 @@ static int oom_evaluate_task(struct task_struct *task, void *arg)
 	}
 
 	points = oom_badness(task, oc->totalpages);
-	if (oom_next_task(task, oc, points))
+
+	if (points == LONG_MIN)
+		goto next;
+
+	/*
+	 * Check to see if this is the worst task with a non-negative
+	 * ADJ score seen so far
+	 */
+	if (task->signal->oom_score_adj >= 0 &&
+	    points > oc->chosen_non_negative_adj_points) {
+		if (oc->chosen_non_negative_adj)
+			put_task_struct(oc->chosen_non_negative_adj);
+		get_task_struct(task);
+		oc->chosen_non_negative_adj = task;
+		oc->chosen_non_negative_adj_points = points;
+	}
+
+	if (points < oc->chosen_points)
 		goto next;
 
 select:
@@ -394,8 +371,11 @@ select:
 next:
 	return 0;
 abort:
+	if (oc->chosen_non_negative_adj)
+		put_task_struct(oc->chosen_non_negative_adj);
 	if (oc->chosen)
 		put_task_struct(oc->chosen);
+	oc->chosen_non_negative_adj = NULL;
 	oc->chosen = (void *)-1UL;
 	return 1;
 }
@@ -407,21 +387,33 @@ abort:
 static void select_bad_process(struct oom_control *oc)
 {
 	oc->chosen_points = LONG_MIN;
+	oc->chosen_non_negative_adj_points = LONG_MIN;
+	oc->chosen_non_negative_adj = NULL;
 
 	if (is_memcg_oom(oc))
 		mem_cgroup_scan_tasks(oc->memcg, oom_evaluate_task, oc);
 	else {
 		struct task_struct *p;
 
-#ifdef CONFIG_MEMCG_QOS
-		if (memcg_low_priority_scan_tasks(oom_evaluate_task, oc))
-			return;
-#endif
 		rcu_read_lock();
 		for_each_process(p)
 			if (oom_evaluate_task(p, oc))
 				break;
 		rcu_read_unlock();
+	}
+
+	if (oc->chosen_non_negative_adj) {
+		/*
+		 * If oc->chosen has a negative ADJ, and we found a task with
+		 * a postive ADJ to kill, kill the task with the positive ADJ
+		 * instead.
+		 */
+		if (oc->chosen && oc->chosen->signal->oom_score_adj < 0) {
+			put_task_struct(oc->chosen);
+			oc->chosen = oc->chosen_non_negative_adj;
+			oc->chosen_points = oc->chosen_non_negative_adj_points;
+		} else
+			put_task_struct(oc->chosen_non_negative_adj);
 	}
 }
 
@@ -733,6 +725,20 @@ static inline void wake_oom_reaper(struct task_struct *tsk)
 #endif /* CONFIG_MMU */
 
 /**
+ * tsk->mm has to be non NULL and caller has to guarantee it is stable (either
+ * under task_lock or operate on the current).
+ */
+static void __mark_oom_victim(struct task_struct *tsk)
+{
+	struct mm_struct *mm = tsk->mm;
+
+	if (!cmpxchg(&tsk->signal->oom_mm, NULL, mm)) {
+		mmgrab(tsk->signal->oom_mm);
+		set_bit(MMF_OOM_VICTIM, &mm->flags);
+	}
+}
+
+/**
  * mark_oom_victim - mark the given task as OOM victim
  * @tsk: task to mark
  *
@@ -744,18 +750,13 @@ static inline void wake_oom_reaper(struct task_struct *tsk)
  */
 static void mark_oom_victim(struct task_struct *tsk)
 {
-	struct mm_struct *mm = tsk->mm;
-
 	WARN_ON(oom_killer_disabled);
 	/* OOM killer might race with memcg OOM */
 	if (test_and_set_tsk_thread_flag(tsk, TIF_MEMDIE))
 		return;
 
 	/* oom_mm is bound to the signal struct life time. */
-	if (!cmpxchg(&tsk->signal->oom_mm, NULL, mm)) {
-		mmgrab(tsk->signal->oom_mm);
-		set_bit(MMF_OOM_VICTIM, &mm->flags);
-	}
+	__mark_oom_victim(tsk);
 
 	/*
 	 * Make sure that the task is woken up from uninterruptible sleep
@@ -1082,45 +1083,6 @@ int unregister_oom_notifier(struct notifier_block *nb)
 }
 EXPORT_SYMBOL_GPL(unregister_oom_notifier);
 
-#ifdef CONFIG_ASCEND_OOM
-static BLOCKING_NOTIFIER_HEAD(oom_type_notify_list);
-
-int register_hisi_oom_notifier(struct notifier_block *nb)
-{
-	return blocking_notifier_chain_register(&oom_type_notify_list, nb);
-}
-EXPORT_SYMBOL_GPL(register_hisi_oom_notifier);
-
-int unregister_hisi_oom_notifier(struct notifier_block *nb)
-{
-	return blocking_notifier_chain_unregister(&oom_type_notify_list, nb);
-}
-EXPORT_SYMBOL_GPL(unregister_hisi_oom_notifier);
-
-int oom_type_notifier_call(unsigned int type, struct oom_control *oc)
-{
-	struct oom_control oc_tmp = { 0 };
-	static unsigned long caller_jiffies;
-
-	if (sysctl_enable_oom_killer)
-		return -EINVAL;
-
-	if (oc)
-		type = is_memcg_oom(oc) ? OOM_TYPE_CGROUP : OOM_TYPE_NOMEM;
-	else
-		oc = &oc_tmp;
-
-	if (printk_timed_ratelimit(&caller_jiffies, 10000)) {
-		pr_err("OOM_NOTIFIER: oom type %u\n", type);
-		dump_stack();
-		show_mem(SHOW_MEM_FILTER_NODES, NULL);
-		dump_tasks(oc);
-	}
-
-	return blocking_notifier_call_chain(&oom_type_notify_list, type, NULL);
-}
-#endif
-
 /**
  * out_of_memory - kill the "best" process when we run out of memory
  * @oc: pointer to struct oom_control
@@ -1136,11 +1098,6 @@ bool out_of_memory(struct oom_control *oc)
 
 	if (oom_killer_disabled)
 		return false;
-
-	if (!sysctl_enable_oom_killer) {
-		oom_type_notifier_call(0, oc);
-		return false;
-	}
 
 	if (!is_memcg_oom(oc)) {
 		blocking_notifier_call_chain(&oom_notify_list, 0, &freed);
@@ -1192,6 +1149,12 @@ bool out_of_memory(struct oom_control *oc)
 	select_bad_process(oc);
 	/* Found nothing?!?! */
 	if (!oc->chosen) {
+		int ret = false;
+
+		trace_android_vh_oom_check_panic(oc, &ret);
+		if (ret)
+			return true;
+
 		dump_header(oc, NULL);
 		pr_warn("Out of memory and no killable processes...\n");
 		/*
@@ -1209,22 +1172,40 @@ bool out_of_memory(struct oom_control *oc)
 }
 
 /*
- * The pagefault handler calls here because some allocation has failed. We have
- * to take care of the memcg OOM here because this is the only safe context without
- * any locks held but let the oom killer triggered from the allocation context care
- * about the global OOM.
+ * The pagefault handler calls here because it is out of memory, so kill a
+ * memory-hogging task. If oom_lock is held by somebody else, a parallel oom
+ * killing is already in progress so do nothing.
  */
 void pagefault_out_of_memory(void)
 {
-	static DEFINE_RATELIMIT_STATE(pfoom_rs, DEFAULT_RATELIMIT_INTERVAL,
-				      DEFAULT_RATELIMIT_BURST);
+	struct oom_control oc = {
+		.zonelist = NULL,
+		.nodemask = NULL,
+		.memcg = NULL,
+		.gfp_mask = 0,
+		.order = 0,
+	};
 
 	if (mem_cgroup_oom_synchronize(true))
 		return;
 
-	if (fatal_signal_pending(current))
+	if (!mutex_trylock(&oom_lock))
+		return;
+	out_of_memory(&oc);
+	mutex_unlock(&oom_lock);
+}
+
+void add_to_oom_reaper(struct task_struct *p)
+{
+	p = find_lock_task_mm(p);
+	if (!p)
 		return;
 
-	if (__ratelimit(&pfoom_rs))
-		pr_warn("Huh VM_FAULT_OOM leaked out to the #PF handler. Retrying PF\n");
+	get_task_struct(p);
+	if (task_will_free_mem(p)) {
+		__mark_oom_victim(p);
+		wake_oom_reaper(p);
+	}
+	task_unlock(p);
+	put_task_struct(p);
 }

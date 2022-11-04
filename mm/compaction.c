@@ -763,6 +763,31 @@ isolate_freepages_range(struct compact_control *cc,
 	return pfn;
 }
 
+#ifdef CONFIG_COMPACTION
+unsigned long isolate_and_split_free_page(struct page *page,
+						struct list_head *list)
+{
+	unsigned long isolated;
+	unsigned int order;
+
+	if (!PageBuddy(page))
+		return 0;
+
+	order = buddy_order(page);
+	isolated = __isolate_free_page(page, order);
+	if (!isolated)
+		return 0;
+
+	set_page_private(page, order);
+	list_add(&page->lru, list);
+
+	split_map_pages(list);
+
+	return isolated;
+}
+EXPORT_SYMBOL_GPL(isolate_and_split_free_page);
+#endif
+
 /* Similar to reclaim, but different enough that they don't share logic */
 static bool too_many_isolated(pg_data_t *pgdat)
 {
@@ -804,7 +829,7 @@ isolate_migratepages_block(struct compact_control *cc, unsigned long low_pfn,
 	unsigned long nr_scanned = 0, nr_isolated = 0;
 	struct lruvec *lruvec;
 	unsigned long flags = 0;
-	struct lruvec *locked = NULL;
+	bool locked = false;
 	struct page *page = NULL, *valid_page = NULL;
 	unsigned long start_pfn = low_pfn;
 	bool skip_on_failure = false;
@@ -868,20 +893,11 @@ isolate_migratepages_block(struct compact_control *cc, unsigned long low_pfn,
 		 * contention, to give chance to IRQs. Abort completely if
 		 * a fatal signal is pending.
 		 */
-		if (!(low_pfn % SWAP_CLUSTER_MAX)) {
-			if (locked) {
-				unlock_page_lruvec_irqrestore(locked, flags);
-				locked = NULL;
-			}
-
-			if (fatal_signal_pending(current)) {
-				cc->contended = true;
-
-				low_pfn = 0;
-				goto fatal_pending;
-			}
-
-			cond_resched();
+		if (!(low_pfn % SWAP_CLUSTER_MAX)
+		    && compact_unlock_should_abort(&pgdat->lru_lock,
+					    flags, &locked, cc)) {
+			low_pfn = 0;
+			goto fatal_pending;
 		}
 
 		if (!pfn_valid_within(low_pfn))
@@ -899,7 +915,6 @@ isolate_migratepages_block(struct compact_control *cc, unsigned long low_pfn,
 		if (!valid_page && IS_ALIGNED(low_pfn, pageblock_nr_pages)) {
 			if (!cc->ignore_skip_hint && get_pageblock_skip(page)) {
 				low_pfn = end_pfn;
-				page = NULL;
 				goto isolate_abort;
 			}
 			valid_page = page;
@@ -953,8 +968,9 @@ isolate_migratepages_block(struct compact_control *cc, unsigned long low_pfn,
 			if (unlikely(__PageMovable(page)) &&
 					!PageIsolated(page)) {
 				if (locked) {
-					unlock_page_lruvec_irqrestore(locked, flags);
-					locked = NULL;
+					spin_unlock_irqrestore(&pgdat->lru_lock,
+									flags);
+					locked = false;
 				}
 
 				if (!isolate_movable_page(page, isolate_mode))
@@ -980,34 +996,10 @@ isolate_migratepages_block(struct compact_control *cc, unsigned long low_pfn,
 		if (!(cc->gfp_mask & __GFP_FS) && page_mapping(page))
 			goto isolate_fail;
 
-		/*
-		 * Be careful not to clear PageLRU until after we're
-		 * sure the page is not being freed elsewhere -- the
-		 * page release code relies on it.
-		 */
-		if (unlikely(!get_page_unless_zero(page)))
-			goto isolate_fail;
-
-		if (__isolate_lru_page_prepare(page, isolate_mode) != 0)
-			goto isolate_fail_put;
-
-		/* Try isolate the page */
-		if (!TestClearPageLRU(page))
-			goto isolate_fail_put;
-
-		rcu_read_lock();
-		lruvec = mem_cgroup_page_lruvec(page, pgdat);
-
 		/* If we already hold the lock, we can skip some rechecking */
-		if (lruvec != locked) {
-			if (locked)
-				unlock_page_lruvec_irqrestore(locked, flags);
-
-			compact_lock_irqsave(&lruvec->lru_lock, &flags, cc);
-			locked = lruvec;
-			rcu_read_unlock();
-
-			lruvec_memcg_debug(lruvec, page);
+		if (!locked) {
+			locked = compact_lock_irqsave(&pgdat->lru_lock,
+								&flags, cc);
 
 			/* Try get exclusive access under lock */
 			if (!skip_updated) {
@@ -1016,6 +1008,10 @@ isolate_migratepages_block(struct compact_control *cc, unsigned long low_pfn,
 					goto isolate_abort;
 			}
 
+			/* Recheck PageLRU and PageCompound under lock */
+			if (!PageLRU(page))
+				goto isolate_fail;
+
 			/*
 			 * Page become compound since the non-locked check,
 			 * and it's on LRU. It can only be a THP so the order
@@ -1023,11 +1019,15 @@ isolate_migratepages_block(struct compact_control *cc, unsigned long low_pfn,
 			 */
 			if (unlikely(PageCompound(page) && !cc->alloc_contig)) {
 				low_pfn += compound_nr(page) - 1;
-				SetPageLRU(page);
-				goto isolate_fail_put;
+				goto isolate_fail;
 			}
-		} else
-			rcu_read_unlock();
+		}
+
+		lruvec = mem_cgroup_page_lruvec(page, pgdat);
+
+		/* Try isolate the page */
+		if (__isolate_lru_page(page, isolate_mode) != 0)
+			goto isolate_fail;
 
 		/* The whole page is taken off the LRU; skip the tail pages. */
 		if (PageCompound(page))
@@ -1057,15 +1057,6 @@ isolate_success:
 		}
 
 		continue;
-
-isolate_fail_put:
-		/* Avoid potential deadlock in freeing page under lru_lock */
-		if (locked) {
-			unlock_page_lruvec_irqrestore(locked, flags);
-			locked = NULL;
-		}
-		put_page(page);
-
 isolate_fail:
 		if (!skip_on_failure)
 			continue;
@@ -1077,8 +1068,8 @@ isolate_fail:
 		 */
 		if (nr_isolated) {
 			if (locked) {
-				unlock_page_lruvec_irqrestore(locked, flags);
-				locked = NULL;
+				spin_unlock_irqrestore(&pgdat->lru_lock, flags);
+				locked = false;
 			}
 			putback_movable_pages(&cc->migratepages);
 			cc->nr_migratepages = 0;
@@ -1102,15 +1093,9 @@ isolate_fail:
 	if (unlikely(low_pfn > end_pfn))
 		low_pfn = end_pfn;
 
-	page = NULL;
-
 isolate_abort:
 	if (locked)
-		unlock_page_lruvec_irqrestore(locked, flags);
-	if (page) {
-		SetPageLRU(page);
-		put_page(page);
-	}
+		spin_unlock_irqrestore(&pgdat->lru_lock, flags);
 
 	/*
 	 * Updated the cached scanner pfn once the pageblock has been scanned
@@ -1787,8 +1772,6 @@ static unsigned long fast_find_migrateblock(struct compact_control *cc)
 
 				update_fast_start_pfn(cc, free_pfn);
 				pfn = pageblock_start_pfn(free_pfn);
-				if (pfn < cc->zone->zone_start_pfn)
-					pfn = cc->zone->zone_start_pfn;
 				cc->fast_search_fail = 0;
 				found_block = true;
 				set_pageblock_skip(freepage);
@@ -1931,20 +1914,28 @@ static bool kswapd_is_running(pg_data_t *pgdat)
 
 /*
  * A zone's fragmentation score is the external fragmentation wrt to the
- * COMPACTION_HPAGE_ORDER scaled by the zone's size. It returns a value
- * in the range [0, 100].
+ * COMPACTION_HPAGE_ORDER. It returns a value in the range [0, 100].
+ */
+static unsigned int fragmentation_score_zone(struct zone *zone)
+{
+	return extfrag_for_order(zone, COMPACTION_HPAGE_ORDER);
+}
+
+/*
+ * A weighted zone's fragmentation score is the external fragmentation
+ * wrt to the COMPACTION_HPAGE_ORDER scaled by the zone's size. It
+ * returns a value in the range [0, 100].
  *
  * The scaling factor ensures that proactive compaction focuses on larger
  * zones like ZONE_NORMAL, rather than smaller, specialized zones like
  * ZONE_DMA32. For smaller zones, the score value remains close to zero,
  * and thus never exceeds the high threshold for proactive compaction.
  */
-static unsigned int fragmentation_score_zone(struct zone *zone)
+static unsigned int fragmentation_score_zone_weighted(struct zone *zone)
 {
 	unsigned long score;
 
-	score = zone->present_pages *
-			extfrag_for_order(zone, COMPACTION_HPAGE_ORDER);
+	score = zone->present_pages * fragmentation_score_zone(zone);
 	return div64_ul(score, zone->zone_pgdat->node_present_pages + 1);
 }
 
@@ -1964,7 +1955,7 @@ static unsigned int fragmentation_score_node(pg_data_t *pgdat)
 		struct zone *zone;
 
 		zone = &pgdat->node_zones[zoneid];
-		score += fragmentation_score_zone(zone);
+		score += fragmentation_score_zone_weighted(zone);
 	}
 
 	return score;
@@ -2317,7 +2308,8 @@ compact_zone(struct compact_control *cc, struct capture_control *capc)
 	trace_mm_compaction_begin(start_pfn, cc->migrate_pfn,
 				cc->free_pfn, end_pfn, sync);
 
-	migrate_prep_local();
+	/* lru_add_drain_all could be expensive with involving other CPUs */
+	lru_add_drain();
 
 	while ((ret = compact_finished(cc)) == COMPACT_CONTINUE) {
 		int err;
@@ -2666,6 +2658,30 @@ int sysctl_compact_memory;
  */
 unsigned int __read_mostly sysctl_compaction_proactiveness = 20;
 
+int compaction_proactiveness_sysctl_handler(struct ctl_table *table, int write,
+		void *buffer, size_t *length, loff_t *ppos)
+{
+	int rc, nid;
+
+	rc = proc_dointvec_minmax(table, write, buffer, length, ppos);
+	if (rc)
+		return rc;
+
+	if (write && sysctl_compaction_proactiveness) {
+		for_each_online_node(nid) {
+			pg_data_t *pgdat = NODE_DATA(nid);
+
+			if (pgdat->proactive_compact_trigger)
+				continue;
+
+			pgdat->proactive_compact_trigger = true;
+			wake_up_interruptible(&pgdat->kcompactd_wait);
+		}
+	}
+
+	return 0;
+}
+
 /*
  * This is the entry point for compacting all nodes via
  * /proc/sys/vm/compact_memory
@@ -2710,7 +2726,8 @@ void compaction_unregister_node(struct node *node)
 
 static inline bool kcompactd_work_requested(pg_data_t *pgdat)
 {
-	return pgdat->kcompactd_max_order > 0 || kthread_should_stop();
+	return pgdat->kcompactd_max_order > 0 || kthread_should_stop() ||
+		pgdat->proactive_compact_trigger;
 }
 
 static bool kcompactd_node_suitable(pg_data_t *pgdat)
@@ -2859,11 +2876,15 @@ static int kcompactd(void *p)
 
 	while (!kthread_should_stop()) {
 		unsigned long pflags;
+		long timeout;
 
+		timeout = sysctl_compaction_proactiveness ?
+			msecs_to_jiffies(HPAGE_FRAG_CHECK_INTERVAL_MSEC) :
+			MAX_SCHEDULE_TIMEOUT;
 		trace_mm_compaction_kcompactd_sleep(pgdat->node_id);
 		if (wait_event_freezable_timeout(pgdat->kcompactd_wait,
-			kcompactd_work_requested(pgdat),
-			msecs_to_jiffies(HPAGE_FRAG_CHECK_INTERVAL_MSEC))) {
+			kcompactd_work_requested(pgdat), timeout) &&
+			!pgdat->proactive_compact_trigger) {
 
 			psi_memstall_enter(&pflags);
 			kcompactd_do_work(pgdat);
@@ -2875,10 +2896,20 @@ static int kcompactd(void *p)
 		if (should_proactive_compact_node(pgdat)) {
 			unsigned int prev_score, score;
 
-			if (proactive_defer) {
+			/*
+			 * On wakeup of proactive compaction by sysctl
+			 * write, ignore the accumulated defer score.
+			 * Anyway, if the proactive compaction didn't
+			 * make any progress for the new value, it will
+			 * be further deferred by 2^COMPACT_MAX_DEFER_SHIFT
+			 * times.
+			 */
+			if (proactive_defer &&
+				!pgdat->proactive_compact_trigger) {
 				proactive_defer--;
 				continue;
 			}
+
 			prev_score = fragmentation_score_node(pgdat);
 			proactive_compact_node(pgdat);
 			score = fragmentation_score_node(pgdat);
@@ -2889,6 +2920,8 @@ static int kcompactd(void *p)
 			proactive_defer = score < prev_score ?
 					0 : 1 << COMPACT_MAX_DEFER_SHIFT;
 		}
+		if (pgdat->proactive_compact_trigger)
+			pgdat->proactive_compact_trigger = false;
 	}
 
 	return 0;

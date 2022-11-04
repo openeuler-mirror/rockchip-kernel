@@ -13,7 +13,6 @@
 #include <linux/vmalloc.h>
 #include <linux/swap.h>
 #include <linux/swapops.h>
-#include <linux/bootmem_info.h>
 
 #include "internal.h"
 #include <asm/dma.h>
@@ -528,15 +527,14 @@ static void __init sparse_init_nid(int nid, unsigned long pnum_begin,
 	struct mem_section_usage *usage;
 	unsigned long pnum;
 	struct page *map;
-	int fake_nid = cdm_node_to_ddr_node(nid);
 
-	usage = sparse_early_usemaps_alloc_pgdat_section(NODE_DATA(fake_nid),
+	usage = sparse_early_usemaps_alloc_pgdat_section(NODE_DATA(nid),
 			mem_section_usage_size() * map_count);
 	if (!usage) {
 		pr_err("%s: node[%d] usemap allocation failed", __func__, nid);
 		goto failed;
 	}
-	sparse_buffer_init(map_count * section_map_size(), fake_nid);
+	sparse_buffer_init(map_count * section_map_size(), nid);
 	for_each_present_section_nr(pnum_begin, pnum) {
 		unsigned long pfn = section_nr_to_pfn(pnum);
 
@@ -544,7 +542,7 @@ static void __init sparse_init_nid(int nid, unsigned long pnum_begin,
 			break;
 
 		map = __populate_section_memmap(pfn, PAGES_PER_SECTION,
-				fake_nid, NULL);
+				nid, NULL);
 		if (!map) {
 			pr_err("%s: node[%d] memory map backing failed. Some memory will not be available.",
 			       __func__, nid);

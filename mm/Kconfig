@@ -63,6 +63,13 @@ config SPARSEMEM_MANUAL
 
 endchoice
 
+config MEMBLOCK_DEBUGFS
+	bool "Memblock debugfs for reserved memory"
+	depends on DEBUG_FS && ARCH_KEEP_MEMBLOCK
+	help
+	  Extend memblock debugfs to show size of each memblock, and shows the
+	  result of total size by KiB format.
+
 config DISCONTIGMEM
 	def_bool y
 	depends on (!SELECT_MEMORY_MODEL && ARCH_DISCONTIGMEM_ENABLE) || DISCONTIGMEM_MANUAL
@@ -129,9 +136,6 @@ config HAVE_FAST_GUP
 	depends on MMU
 	bool
 
-config HOLES_IN_ZONE
-	bool
-
 # Don't discard allocated memory used to track "memory" and "reserved" memblocks
 # after early boot, so it can still be used to test for validity of memory.
 # Also, memblocks are updated with memory hot(un)plug.
@@ -144,13 +148,6 @@ config NUMA_KEEP_MEMINFO
 
 config MEMORY_ISOLATION
 	bool
-
-config COHERENT_DEVICE
-	bool "coherent device memory"
-	def_bool n
-	depends on CPUSETS && ARM64 && NUMA
-	help
-	  Enable coherent device memory (CDM) support.
 
 #
 # Only be set on architectures that have completely implemented memory hotplug
@@ -283,13 +280,6 @@ config ARCH_ENABLE_HUGEPAGE_MIGRATION
 
 config ARCH_ENABLE_THP_MIGRATION
 	bool
-
-config HUGE_VMALLOC_DEFAULT_ENABLED
-	bool "Enable huge vmalloc mappings by default"
-	depends on HAVE_ARCH_HUGE_VMALLOC
-	help
-	  Enable huge vmalloc mappings by default, this value could be overridden
-	  by hugevmalloc=off|on.
 
 config CONTIG_ALLOC
 	def_bool (MEMORY_ISOLATION && COMPACTION) || CMA
@@ -500,52 +490,6 @@ config FRONTSWAP
 
 	  If unsure, say Y to enable frontswap.
 
-config MEMCG_QOS
-	bool "Enable Memory Cgroup Priority"
-	depends on MEMCG
-	depends on X86 || ARM64
-	default y
-	help
-	  MEMCG_QOS means that we first kill the process from the low priority
-	  memcg if OOM occurs. If the process is not found, then fallback to
-	  normal handle.
-
-	  If unsure, say "n".
-
-config ETMEM_SCAN
-	tristate "module: etmem page scan for etmem support"
-	depends on ETMEM
-	help
-	 etmem page scan feature
-	 used to scan the virtual address of the target process
-
-config ETMEM_SWAP
-	tristate "module: etmem page swap for etmem support"
-	depends on ETMEM
-	help
-	 etmem page swap feature
-
-config ETMEM
-	bool "Enable etmem feature"
-	depends on MMU
-	depends on X86 || ARM64
-	default n
-	help
-	  etmem is a tiered memory extension technology that uses DRAM and memory
-	  compression/high-performance storage media to form tiered memory storage.
-	  Memory data is tiered, and cold data is migrated from memory media to
-	  high-performance storage media to release memory space and reduce
-	  memory costs.
-
-config USERSWAP
-	bool "Enable User Swap"
-	depends on MMU && USERFAULTFD
-	depends on X86 || ARM64
-	default n
-	help
-	  Support for User Swap. This is based on userfaultfd. We can implement
-	  our own swapout and swapin functions in usersapce.
-
 config CMA
 	bool "Contiguous Memory Allocator"
 	depends on MMU
@@ -558,6 +502,15 @@ config CMA
 	  be allocated from it. This way, the kernel can use the memory for
 	  pagecache and when a subsystem requests for contiguous area, the
 	  allocated pages are migrated away to serve the contiguous request.
+
+	  If unsure, say "n".
+
+config CMA_INACTIVE
+	bool "CMA not active to system"
+	depends on CMA
+	help
+	  This forbids the CMA to active its pages to system memory, to keep
+	  page from CMA never be borrowed by system.
 
 	  If unsure, say "n".
 
@@ -575,6 +528,20 @@ config CMA_DEBUGFS
 	depends on CMA && DEBUG_FS
 	help
 	  Turns on the DebugFS interface for CMA.
+
+config CMA_DEBUGFS_BITMAP_HEX
+	bool "CMA debugfs add bitmap_hex node"
+	depends on CMA_DEBUGFS
+	help
+	  Turns on the bitmap_hex node under DEBUGFS, shows the bitmap in hex
+	  format.
+
+config CMA_SYSFS
+	bool "CMA information through sysfs interface"
+	depends on CMA && SYSFS
+	help
+	  This option exposes some sysfs attributes to get information
+	  from CMA.
 
 config CMA_AREAS
 	int "Maximum count of the CMA areas"
@@ -812,18 +779,10 @@ config DEFERRED_STRUCT_PAGE_INIT
 	  lifetime of the system until these kthreads finish the
 	  initialisation.
 
-config PAGE_IDLE_FLAG
-	bool
-	select PAGE_EXTENSION if !64BIT
-	help
-	  This adds PG_idle and PG_young flags to 'struct page'.  PTE Accessed
-	  bit writers can set the state of the bit in the flags so that PTE
-	  Accessed bit readers may avoid disturbance.
-
 config IDLE_PAGE_TRACKING
 	bool "Enable idle page tracking"
 	depends on SYSFS && MMU
-	select PAGE_IDLE_FLAG
+	select PAGE_EXTENSION if !64BIT
 	help
 	  This feature allows to estimate the amount of user pages that have
 	  not been touched during a given period of time. This information can
@@ -892,6 +851,28 @@ config PERCPU_STATS
 	  information includes global and per chunk statistics, which can
 	  be used to help understand percpu memory usage.
 
+config ARCH_SUPPORTS_SPECULATIVE_PAGE_FAULT
+       def_bool n
+
+config SPECULATIVE_PAGE_FAULT
+       bool "Speculative page faults"
+       default y
+       depends on ARCH_SUPPORTS_SPECULATIVE_PAGE_FAULT
+       depends on MMU && SMP
+       help
+         Try to handle user space page faults without holding the mmap_sem.
+
+	 This should allow better concurrency for massively threaded process
+	 since the page fault handler will not wait for other threads memory
+	 layout change to be done, assuming that this change is done in another
+	 part of the process's memory space. This type of page fault is named
+	 speculative page fault.
+
+	 If the speculative page fault fails because of a concurrency is
+	 detected or because underlying PMD or PTE tables are not yet
+	 allocating, it is failing its processing and a classic page fault
+	 is then tried.
+
 config GUP_BENCHMARK
 	bool "Enable infrastructure for get_user_pages() and related calls benchmarking"
 	help
@@ -929,44 +910,5 @@ config ARCH_HAS_HUGEPD
 
 config MAPPING_DIRTY_HELPERS
         bool
-
-config PIN_MEMORY
-	bool "Support for pin memory"
-	depends on MMU && ARM64
-	help
-	  Say y here to enable the pin memory feature for checkpoint
-	  and restore. We can pin the memory data of tasks and collect
-	  the corresponding physical pages mapping info in checkpoint,
-	  and remap the physical pages to restore tasks in restore.
-
-config PID_RESERVE
-	bool "Support for reserve pid"
-	depends on PIN_MEMORY
-	help
-	  Say y here to enable the pid reserved feature for checkpoint.
-	  and restore.
-	  We record the pid of dump task in the reserve memory,
-	  and reserve the pids before init task start. In restore process,
-	  free the reserved pids and realloc them for use.
-
-config MEMORY_RELIABLE
-	bool "Support for memory reliable"
-	depends on NEED_MULTIPLE_NODES
-	depends on ARM64
-	default n
-	help
-	  Memory reliable is based on mirror memory. It has the following
-	  additional features:
-	  a) normal user tasks never alloc memory from mirrored region;
-	  b) special user tasks will allocate memory from mirrored region
-	  by default; c) upper limit of mirrored region allcated for user
-	  tasks, tmpfs and pagecache.
-	  Special user tasks and tmpfs/pagecache can fallback to
-	  non-mirrored region if you enable reliable fallback mechanism.
-
-	  To enable this function, mirrored memory is needed and
-	  "kernelcore=reliable" need to be added in kernel parameters.
-
-source "mm/damon/Kconfig"
 
 endmenu

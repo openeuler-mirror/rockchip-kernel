@@ -203,7 +203,6 @@ static u64 zbud_zpool_total_size(void *pool)
 
 static struct zpool_driver zbud_zpool_driver = {
 	.type =		"zbud",
-	.sleep_mapped = true,
 	.owner =	THIS_MODULE,
 	.create =	zbud_zpool_create,
 	.destroy =	zbud_zpool_destroy,

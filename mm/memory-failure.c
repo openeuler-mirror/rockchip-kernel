@@ -541,7 +541,7 @@ static void collect_procs_file(struct page *page, struct list_head *to_kill,
 /*
  * Collect the processes who have the corrupted page mapped to kill.
  */
-void collect_procs(struct page *page, struct list_head *tokill,
+static void collect_procs(struct page *page, struct list_head *tokill,
 				int force_early)
 {
 	if (!page->mapping)
@@ -552,7 +552,6 @@ void collect_procs(struct page *page, struct list_head *tokill,
 	else
 		collect_procs_file(page, tokill, force_early);
 }
-EXPORT_SYMBOL_GPL(collect_procs);
 
 static const char *action_name[] = {
 	[MF_IGNORED] = "Ignored",
@@ -1158,18 +1157,23 @@ static int memory_failure_hugetlb(unsigned long pfn, int flags)
 	if (TestSetPageHWPoison(head)) {
 		pr_err("Memory failure: %#lx: already hardware poisoned\n",
 		       pfn);
-		return -EHWPOISON;
+		return 0;
 	}
 
 	num_poisoned_pages_inc();
 
 	if (!(flags & MF_COUNT_INCREASED) && !get_hwpoison_page(p)) {
+		/*
+		 * Check "filter hit" and "race with other subpage."
+		 */
 		lock_page(head);
-		if (hwpoison_filter(p)) {
-			if (TestClearPageHWPoison(head))
+		if (PageHWPoison(head)) {
+			if ((hwpoison_filter(p) && TestClearPageHWPoison(p))
+			    || (p != head && TestSetPageHWPoison(head))) {
 				num_poisoned_pages_dec();
-			unlock_page(head);
-			return 0;
+				unlock_page(head);
+				return 0;
+			}
 		}
 		unlock_page(head);
 		dissolve_free_huge_page(p);
@@ -1325,9 +1329,8 @@ int memory_failure(unsigned long pfn, int flags)
 	struct page *hpage;
 	struct page *orig_head;
 	struct dev_pagemap *pgmap;
-	int res = 0;
+	int res;
 	unsigned long page_flags;
-	static DEFINE_MUTEX(mf_mutex);
 
 	if (!sysctl_memory_failure_recovery)
 		panic("Memory failure on page %lx", pfn);
@@ -1345,18 +1348,12 @@ int memory_failure(unsigned long pfn, int flags)
 		return -ENXIO;
 	}
 
-	mutex_lock(&mf_mutex);
-
-	if (PageHuge(p)) {
-		res = memory_failure_hugetlb(pfn, flags);
-		goto unlock_mutex;
-	}
-
+	if (PageHuge(p))
+		return memory_failure_hugetlb(pfn, flags);
 	if (TestSetPageHWPoison(p)) {
 		pr_err("Memory failure: %#lx: already hardware poisoned\n",
 			pfn);
-		res = -EHWPOISON;
-		goto unlock_mutex;
+		return 0;
 	}
 
 	orig_head = hpage = compound_head(p);
@@ -1376,18 +1373,17 @@ int memory_failure(unsigned long pfn, int flags)
 	if (!(flags & MF_COUNT_INCREASED) && !get_hwpoison_page(p)) {
 		if (is_free_buddy_page(p)) {
 			action_result(pfn, MF_MSG_BUDDY, MF_DELAYED);
+			return 0;
 		} else {
 			action_result(pfn, MF_MSG_KERNEL_HIGH_ORDER, MF_IGNORED);
-			res = -EBUSY;
+			return -EBUSY;
 		}
-		goto unlock_mutex;
 	}
 
 	if (PageTransHuge(hpage)) {
 		if (try_to_split_thp_page(p, "Memory Failure") < 0) {
 			action_result(pfn, MF_MSG_UNSPLIT_THP, MF_IGNORED);
-			res = -EBUSY;
-			goto unlock_mutex;
+			return -EBUSY;
 		}
 		VM_BUG_ON_PAGE(!page_count(p), p);
 	}
@@ -1407,7 +1403,7 @@ int memory_failure(unsigned long pfn, int flags)
 			action_result(pfn, MF_MSG_BUDDY, MF_DELAYED);
 		else
 			action_result(pfn, MF_MSG_BUDDY_2ND, MF_DELAYED);
-		goto unlock_mutex;
+		return 0;
 	}
 
 	lock_page(p);
@@ -1419,7 +1415,7 @@ int memory_failure(unsigned long pfn, int flags)
 	if (PageCompound(p) && compound_head(p) != orig_head) {
 		action_result(pfn, MF_MSG_DIFFERENT_COMPOUND, MF_IGNORED);
 		res = -EBUSY;
-		goto unlock_page;
+		goto out;
 	}
 
 	/*
@@ -1439,14 +1435,14 @@ int memory_failure(unsigned long pfn, int flags)
 		num_poisoned_pages_dec();
 		unlock_page(p);
 		put_page(p);
-		goto unlock_mutex;
+		return 0;
 	}
 	if (hwpoison_filter(p)) {
 		if (TestClearPageHWPoison(p))
 			num_poisoned_pages_dec();
 		unlock_page(p);
 		put_page(p);
-		goto unlock_mutex;
+		return 0;
 	}
 
 	/*
@@ -1470,7 +1466,7 @@ int memory_failure(unsigned long pfn, int flags)
 	if (!hwpoison_user_mappings(p, pfn, flags, &p)) {
 		action_result(pfn, MF_MSG_UNMAP_FAILED, MF_IGNORED);
 		res = -EBUSY;
-		goto unlock_page;
+		goto out;
 	}
 
 	/*
@@ -1479,15 +1475,13 @@ int memory_failure(unsigned long pfn, int flags)
 	if (PageLRU(p) && !PageSwapCache(p) && p->mapping == NULL) {
 		action_result(pfn, MF_MSG_TRUNCATED_LRU, MF_IGNORED);
 		res = -EBUSY;
-		goto unlock_page;
+		goto out;
 	}
 
 identify_page_state:
 	res = identify_page_state(pfn, p, page_flags);
-unlock_page:
+out:
 	unlock_page(p);
-unlock_mutex:
-	mutex_unlock(&mf_mutex);
 	return res;
 }
 EXPORT_SYMBOL_GPL(memory_failure);
@@ -1892,12 +1886,6 @@ static int soft_offline_free_page(struct page *page)
 	return rc;
 }
 
-static void put_ref_page(struct page *page)
-{
-	if (page)
-		put_page(page);
-}
-
 /**
  * soft_offline_page - Soft offline a page.
  * @pfn: pfn to soft-offline
@@ -1923,26 +1911,20 @@ static void put_ref_page(struct page *page)
 int soft_offline_page(unsigned long pfn, int flags)
 {
 	int ret;
+	struct page *page;
 	bool try_again = true;
-	struct page *page, *ref_page = NULL;
-
-	WARN_ON_ONCE(!pfn_valid(pfn) && (flags & MF_COUNT_INCREASED));
 
 	if (!pfn_valid(pfn))
 		return -ENXIO;
-	if (flags & MF_COUNT_INCREASED)
-		ref_page = pfn_to_page(pfn);
-
 	/* Only online pages can be soft-offlined (esp., not ZONE_DEVICE). */
 	page = pfn_to_online_page(pfn);
-	if (!page) {
-		put_ref_page(ref_page);
+	if (!page)
 		return -EIO;
-	}
 
 	if (PageHWPoison(page)) {
 		pr_info("soft offline: %#lx page already poisoned\n", pfn);
-		put_ref_page(ref_page);
+		if (flags & MF_COUNT_INCREASED)
+			put_page(page);
 		return 0;
 	}
 
@@ -1956,7 +1938,6 @@ retry:
 	else if (ret == 0)
 		if (soft_offline_free_page(page) && try_again) {
 			try_again = false;
-			flags &= ~MF_COUNT_INCREASED;
 			goto retry;
 		}
 
