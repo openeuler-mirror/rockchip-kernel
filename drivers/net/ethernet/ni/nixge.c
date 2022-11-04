@@ -993,11 +993,8 @@ static void nixge_ethtools_get_drvinfo(struct net_device *ndev,
 	strlcpy(ed->bus_info, "platform", sizeof(ed->bus_info));
 }
 
-static int
-nixge_ethtools_get_coalesce(struct net_device *ndev,
-			    struct ethtool_coalesce *ecoalesce,
-			    struct kernel_ethtool_coalesce *kernel_coal,
-			    struct netlink_ext_ack *extack)
+static int nixge_ethtools_get_coalesce(struct net_device *ndev,
+				       struct ethtool_coalesce *ecoalesce)
 {
 	struct nixge_priv *priv = netdev_priv(ndev);
 	u32 regval = 0;
@@ -1011,11 +1008,8 @@ nixge_ethtools_get_coalesce(struct net_device *ndev,
 	return 0;
 }
 
-static int
-nixge_ethtools_set_coalesce(struct net_device *ndev,
-			    struct ethtool_coalesce *ecoalesce,
-			    struct kernel_ethtool_coalesce *kernel_coal,
-			    struct netlink_ext_ack *extack)
+static int nixge_ethtools_set_coalesce(struct net_device *ndev,
+				       struct ethtool_coalesce *ecoalesce)
 {
 	struct nixge_priv *priv = netdev_priv(ndev);
 

@@ -383,16 +383,12 @@ static void emac_get_drvinfo(struct net_device *ndev,
  * emac_get_coalesce - Get interrupt coalesce settings for this device
  * @ndev : The DaVinci EMAC network adapter
  * @coal : ethtool coalesce settings structure
- * @kernel_coal: ethtool CQE mode setting structure
- * @extack: extack for reporting error messages
  *
  * Fetch the current interrupt coalesce settings
  *
  */
 static int emac_get_coalesce(struct net_device *ndev,
-			     struct ethtool_coalesce *coal,
-			     struct kernel_ethtool_coalesce *kernel_coal,
-			     struct netlink_ext_ack *extack)
+				struct ethtool_coalesce *coal)
 {
 	struct emac_priv *priv = netdev_priv(ndev);
 
@@ -405,35 +401,19 @@ static int emac_get_coalesce(struct net_device *ndev,
  * emac_set_coalesce - Set interrupt coalesce settings for this device
  * @ndev : The DaVinci EMAC network adapter
  * @coal : ethtool coalesce settings structure
- * @kernel_coal: ethtool CQE mode setting structure
- * @extack: extack for reporting error messages
  *
  * Set interrupt coalesce parameters
  *
  */
 static int emac_set_coalesce(struct net_device *ndev,
-			     struct ethtool_coalesce *coal,
-			     struct kernel_ethtool_coalesce *kernel_coal,
-			     struct netlink_ext_ack *extack)
+				struct ethtool_coalesce *coal)
 {
 	struct emac_priv *priv = netdev_priv(ndev);
 	u32 int_ctrl, num_interrupts = 0;
 	u32 prescale = 0, addnl_dvdr = 1, coal_intvl = 0;
 
-	if (!coal->rx_coalesce_usecs) {
-		priv->coal_intvl = 0;
-
-		switch (priv->version) {
-		case EMAC_VERSION_2:
-			emac_ctrl_write(EMAC_DM646X_CMINTCTRL, 0);
-			break;
-		default:
-			emac_ctrl_write(EMAC_CTRL_EWINTTCNT, 0);
-			break;
-		}
-
-		return 0;
-	}
+	if (!coal->rx_coalesce_usecs)
+		return -EINVAL;
 
 	coal_intvl = coal->rx_coalesce_usecs;
 
@@ -1482,7 +1462,7 @@ static int emac_dev_open(struct net_device *ndev)
 		struct ethtool_coalesce coal;
 
 		coal.rx_coalesce_usecs = (priv->coal_intvl << 4);
-		emac_set_coalesce(ndev, &coal, NULL, NULL);
+		emac_set_coalesce(ndev, &coal);
 	}
 
 	cpdma_ctlr_start(priv->dma);

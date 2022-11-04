@@ -1609,10 +1609,8 @@ static void mv643xx_eth_get_drvinfo(struct net_device *dev,
 	strlcpy(drvinfo->bus_info, "platform", sizeof(drvinfo->bus_info));
 }
 
-static int mv643xx_eth_get_coalesce(struct net_device *dev,
-				    struct ethtool_coalesce *ec,
-				    struct kernel_ethtool_coalesce *kernel_coal,
-				    struct netlink_ext_ack *extack)
+static int
+mv643xx_eth_get_coalesce(struct net_device *dev, struct ethtool_coalesce *ec)
 {
 	struct mv643xx_eth_private *mp = netdev_priv(dev);
 
@@ -1622,10 +1620,8 @@ static int mv643xx_eth_get_coalesce(struct net_device *dev,
 	return 0;
 }
 
-static int mv643xx_eth_set_coalesce(struct net_device *dev,
-				    struct ethtool_coalesce *ec,
-				    struct kernel_ethtool_coalesce *kernel_coal,
-				    struct netlink_ext_ack *extack)
+static int
+mv643xx_eth_set_coalesce(struct net_device *dev, struct ethtool_coalesce *ec)
 {
 	struct mv643xx_eth_private *mp = netdev_priv(dev);
 
@@ -1636,9 +1632,7 @@ static int mv643xx_eth_set_coalesce(struct net_device *dev,
 }
 
 static void
-mv643xx_eth_get_ringparam(struct net_device *dev, struct ethtool_ringparam *er,
-			  struct kernel_ethtool_ringparam *kernel_er,
-			  struct netlink_ext_ack *extack)
+mv643xx_eth_get_ringparam(struct net_device *dev, struct ethtool_ringparam *er)
 {
 	struct mv643xx_eth_private *mp = netdev_priv(dev);
 
@@ -1650,9 +1644,7 @@ mv643xx_eth_get_ringparam(struct net_device *dev, struct ethtool_ringparam *er,
 }
 
 static int
-mv643xx_eth_set_ringparam(struct net_device *dev, struct ethtool_ringparam *er,
-			  struct kernel_ethtool_ringparam *kernel_er,
-			  struct netlink_ext_ack *extack)
+mv643xx_eth_set_ringparam(struct net_device *dev, struct ethtool_ringparam *er)
 {
 	struct mv643xx_eth_private *mp = netdev_priv(dev);
 

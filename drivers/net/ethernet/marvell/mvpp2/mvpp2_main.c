@@ -2607,11 +2607,11 @@ static int mvpp2_rxq_init(struct mvpp2_port *port,
 	mvpp2_rxq_status_update(port, rxq->id, 0, rxq->size);
 
 	if (priv->percpu_pools) {
-		err = xdp_rxq_info_reg(&rxq->xdp_rxq_short, port->dev, rxq->logic_rxq);
+		err = xdp_rxq_info_reg(&rxq->xdp_rxq_short, port->dev, rxq->id);
 		if (err < 0)
 			goto err_free_dma;
 
-		err = xdp_rxq_info_reg(&rxq->xdp_rxq_long, port->dev, rxq->logic_rxq);
+		err = xdp_rxq_info_reg(&rxq->xdp_rxq_long, port->dev, rxq->id);
 		if (err < 0)
 			goto err_unregister_rxq_short;
 
@@ -3542,19 +3542,15 @@ static int mvpp2_rx(struct mvpp2_port *port, struct napi_struct *napi,
 		phys_addr_t phys_addr;
 		u32 rx_status, timestamp;
 		int pool, rx_bytes, err, ret;
-		struct page *page;
 		void *data;
-
-		phys_addr = mvpp2_rxdesc_cookie_get(port, rx_desc);
-		data = (void *)phys_to_virt(phys_addr);
-		page = virt_to_page(data);
-		prefetch(page);
 
 		rx_done++;
 		rx_status = mvpp2_rxdesc_status_get(port, rx_desc);
 		rx_bytes = mvpp2_rxdesc_size_get(port, rx_desc);
 		rx_bytes -= MVPP2_MH_SIZE;
 		dma_addr = mvpp2_rxdesc_dma_addr_get(port, rx_desc);
+		phys_addr = mvpp2_rxdesc_cookie_get(port, rx_desc);
+		data = (void *)phys_to_virt(phys_addr);
 
 		pool = (rx_status & MVPP2_RXD_BM_POOL_ID_MASK) >>
 			MVPP2_RXD_BM_POOL_ID_OFFS;
@@ -3584,7 +3580,7 @@ static int mvpp2_rx(struct mvpp2_port *port, struct napi_struct *napi,
 			goto err_drop_frame;
 
 		/* Prefetch header */
-		prefetch(data + MVPP2_MH_SIZE + MVPP2_SKB_HEADROOM);
+		prefetch(data);
 
 		if (bm_pool->frag_size > PAGE_SIZE)
 			frag_size = 0;
@@ -3643,7 +3639,7 @@ static int mvpp2_rx(struct mvpp2_port *port, struct napi_struct *napi,
 		}
 
 		if (pp)
-			skb_mark_for_recycle(skb);
+			page_pool_release_page(pp, virt_to_page(data));
 		else
 			dma_unmap_single_attrs(dev->dev.parent, dma_addr,
 					       bm_pool->buf_size, DMA_FROM_DEVICE,
@@ -3654,8 +3650,8 @@ static int mvpp2_rx(struct mvpp2_port *port, struct napi_struct *napi,
 
 		skb_reserve(skb, MVPP2_MH_SIZE + MVPP2_SKB_HEADROOM);
 		skb_put(skb, rx_bytes);
-		mvpp2_rx_csum(port, rx_status, skb);
 		skb->protocol = eth_type_trans(skb, dev);
+		mvpp2_rx_csum(port, rx_status, skb);
 
 		napi_gro_receive(napi, skb);
 		continue;
@@ -4656,13 +4652,11 @@ static int mvpp2_change_mtu(struct net_device *dev, int mtu)
 		mtu = ALIGN(MVPP2_RX_PKT_SIZE(mtu), 8);
 	}
 
-	if (port->xdp_prog && mtu > MVPP2_MAX_RX_BUF_SIZE) {
-		netdev_err(dev, "Illegal MTU value %d (> %d) for XDP mode\n",
-			   mtu, (int)MVPP2_MAX_RX_BUF_SIZE);
-		return -EINVAL;
-	}
-
 	if (MVPP2_RX_PKT_SIZE(mtu) > MVPP2_BM_LONG_PKT_SIZE) {
+		if (port->xdp_prog) {
+			netdev_err(dev, "Jumbo frames are not supported with XDP\n");
+			return -EINVAL;
+		}
 		if (priv->percpu_pools) {
 			netdev_warn(dev, "mtu %d too high, switching to shared buffers", mtu);
 			mvpp2_bm_switch_buffers(priv, false);
@@ -4948,8 +4942,8 @@ static int mvpp2_xdp_setup(struct mvpp2_port *port, struct netdev_bpf *bpf)
 	bool running = netif_running(port->dev);
 	bool reset = !prog != !port->xdp_prog;
 
-	if (port->dev->mtu > MVPP2_MAX_RX_BUF_SIZE) {
-		NL_SET_ERR_MSG_MOD(bpf->extack, "MTU too large for XDP");
+	if (port->dev->mtu > ETH_DATA_LEN) {
+		NL_SET_ERR_MSG_MOD(bpf->extack, "XDP is not supported with jumbo frames enabled");
 		return -EOPNOTSUPP;
 	}
 
@@ -5010,11 +5004,8 @@ static int mvpp2_ethtool_nway_reset(struct net_device *dev)
 }
 
 /* Set interrupt coalescing for ethtools */
-static int
-mvpp2_ethtool_set_coalesce(struct net_device *dev,
-			   struct ethtool_coalesce *c,
-			   struct kernel_ethtool_coalesce *kernel_coal,
-			   struct netlink_ext_ack *extack)
+static int mvpp2_ethtool_set_coalesce(struct net_device *dev,
+				      struct ethtool_coalesce *c)
 {
 	struct mvpp2_port *port = netdev_priv(dev);
 	int queue;
@@ -5046,11 +5037,8 @@ mvpp2_ethtool_set_coalesce(struct net_device *dev,
 }
 
 /* get coalescing for ethtools */
-static int
-mvpp2_ethtool_get_coalesce(struct net_device *dev,
-			   struct ethtool_coalesce *c,
-			   struct kernel_ethtool_coalesce *kernel_coal,
-			   struct netlink_ext_ack *extack)
+static int mvpp2_ethtool_get_coalesce(struct net_device *dev,
+				      struct ethtool_coalesce *c)
 {
 	struct mvpp2_port *port = netdev_priv(dev);
 
@@ -5072,11 +5060,8 @@ static void mvpp2_ethtool_get_drvinfo(struct net_device *dev,
 		sizeof(drvinfo->bus_info));
 }
 
-static void
-mvpp2_ethtool_get_ringparam(struct net_device *dev,
-			    struct ethtool_ringparam *ring,
-			    struct kernel_ethtool_ringparam *kernel_ring,
-			    struct netlink_ext_ack *extack)
+static void mvpp2_ethtool_get_ringparam(struct net_device *dev,
+					struct ethtool_ringparam *ring)
 {
 	struct mvpp2_port *port = netdev_priv(dev);
 
@@ -5086,11 +5071,8 @@ mvpp2_ethtool_get_ringparam(struct net_device *dev,
 	ring->tx_pending = port->tx_ring_size;
 }
 
-static int
-mvpp2_ethtool_set_ringparam(struct net_device *dev,
-			    struct ethtool_ringparam *ring,
-			    struct kernel_ethtool_ringparam *kernel_ring,
-			    struct netlink_ext_ack *extack)
+static int mvpp2_ethtool_set_ringparam(struct net_device *dev,
+				       struct ethtool_ringparam *ring)
 {
 	struct mvpp2_port *port = netdev_priv(dev);
 	u16 prev_rx_ring_size = port->rx_ring_size;
@@ -6934,7 +6916,7 @@ static int mvpp2_probe(struct platform_device *pdev)
 
 	shared = num_present_cpus() - priv->nthreads;
 	if (shared > 0)
-		bitmap_set(&priv->lock_map, 0,
+		bitmap_fill(&priv->lock_map,
 			    min_t(int, shared, MVPP2_MAX_THREADS));
 
 	for (i = 0; i < MVPP2_MAX_THREADS; i++) {

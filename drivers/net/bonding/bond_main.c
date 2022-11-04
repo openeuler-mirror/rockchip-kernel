@@ -83,7 +83,6 @@
 #include <net/bonding.h>
 #include <net/bond_3ad.h>
 #include <net/bond_alb.h>
-#include <trace/hooks/bonding.h>
 
 #include "bonding_priv.h"
 
@@ -1062,15 +1061,15 @@ static bool bond_should_notify_peers(struct bonding *bond)
 	slave = rcu_dereference(bond->curr_active_slave);
 	rcu_read_unlock();
 
+	netdev_dbg(bond->dev, "bond_should_notify_peers: slave %s\n",
+		   slave ? slave->dev->name : "NULL");
+
 	if (!slave || !bond->send_peer_notif ||
 	    bond->send_peer_notif %
 	    max(1, bond->params.peer_notif_delay) != 0 ||
 	    !netif_carrier_ok(bond->dev) ||
 	    test_bit(__LINK_STATE_LINKWATCH_PENDING, &slave->dev->state))
 		return false;
-
-	netdev_dbg(bond->dev, "bond_should_notify_peers: slave %s\n",
-		   slave ? slave->dev->name : "NULL");
 
 	return true;
 }
@@ -1701,14 +1700,6 @@ int bond_enslave(struct net_device *bond_dev, struct net_device *slave_dev,
 	int link_reporting;
 	int res = 0, i;
 
-	if (slave_dev->flags & IFF_MASTER &&
-	    !netif_is_bond_master(slave_dev)) {
-		NL_SET_ERR_MSG(extack, "Device with IFF_MASTER cannot be enslaved");
-		netdev_err(bond_dev,
-			   "Error: Device with IFF_MASTER cannot be enslaved\n");
-		return -EPERM;
-	}
-
 	if (!bond->params.use_carrier &&
 	    slave_dev->ethtool_ops->get_link == NULL &&
 	    slave_ops->ndo_do_ioctl == NULL) {
@@ -2228,6 +2219,7 @@ static int __bond_release_one(struct net_device *bond_dev,
 	/* recompute stats just before removing the slave */
 	bond_get_stats(bond->dev, &bond->bond_stats);
 
+	bond_upper_dev_unlink(bond, slave);
 	/* unregister rx_handler early so bond_handle_frame wouldn't be called
 	 * for this slave anymore.
 	 */
@@ -2235,8 +2227,6 @@ static int __bond_release_one(struct net_device *bond_dev,
 
 	if (BOND_MODE(bond) == BOND_MODE_8023AD)
 		bond_3ad_unbind_slave(slave);
-
-	bond_upper_dev_unlink(bond, slave);
 
 	if (bond_mode_can_use_xmit_hash(bond))
 		bond_update_slave_arr(bond, slave);
@@ -2281,9 +2271,10 @@ static int __bond_release_one(struct net_device *bond_dev,
 		bond_select_active_slave(bond);
 	}
 
-	bond_set_carrier(bond);
-	if (!bond_has_slaves(bond))
+	if (!bond_has_slaves(bond)) {
+		bond_set_carrier(bond);
 		eth_hw_addr_random(bond_dev);
+	}
 
 	unblock_netpoll_tx();
 	synchronize_rcu();
@@ -2415,10 +2406,6 @@ static int bond_miimon_inspect(struct bonding *bond)
 		bond_propose_link_state(slave, BOND_LINK_NOCHANGE);
 
 		link_state = bond_check_dev_link(bond, slave->dev, 0);
-
-#ifdef CONFIG_VENDOR_BOND_HOOKS
-		trace_vendor_bond_check_dev_link(bond, slave, &link_state);
-#endif
 
 		switch (slave->link) {
 		case BOND_LINK_UP:
@@ -4470,7 +4457,9 @@ int bond_update_slave_arr(struct bonding *bond, struct slave *skipslave)
 	int agg_id = 0;
 	int ret = 0;
 
-	might_sleep();
+#ifdef CONFIG_LOCKDEP
+	WARN_ON(lockdep_is_held(&bond->mode_lock));
+#endif
 
 	usable_slaves = kzalloc(struct_size(usable_slaves, arr,
 					    bond->slave_cnt), GFP_KERNEL);
@@ -4483,9 +4472,7 @@ int bond_update_slave_arr(struct bonding *bond, struct slave *skipslave)
 	if (BOND_MODE(bond) == BOND_MODE_8023AD) {
 		struct ad_info ad_info;
 
-		spin_lock_bh(&bond->mode_lock);
 		if (bond_3ad_get_active_agg_info(bond, &ad_info)) {
-			spin_unlock_bh(&bond->mode_lock);
 			pr_debug("bond_3ad_get_active_agg_info failed\n");
 			/* No active aggragator means it's not safe to use
 			 * the previous array.
@@ -4493,7 +4480,6 @@ int bond_update_slave_arr(struct bonding *bond, struct slave *skipslave)
 			bond_reset_slave_arr(bond);
 			goto out;
 		}
-		spin_unlock_bh(&bond->mode_lock);
 		agg_id = ad_info.aggregator_id;
 	}
 	bond_for_each_slave(bond, slave, iter) {
@@ -4575,39 +4561,25 @@ static netdev_tx_t bond_xmit_broadcast(struct sk_buff *skb,
 	struct bonding *bond = netdev_priv(bond_dev);
 	struct slave *slave = NULL;
 	struct list_head *iter;
-	bool xmit_suc = false;
-	bool skb_used = false;
 
 	bond_for_each_slave_rcu(bond, slave, iter) {
-		struct sk_buff *skb2;
+		if (bond_is_last_slave(bond, slave))
+			break;
+		if (bond_slave_is_up(slave) && slave->link == BOND_LINK_UP) {
+			struct sk_buff *skb2 = skb_clone(skb, GFP_ATOMIC);
 
-		if (!(bond_slave_is_up(slave) && slave->link == BOND_LINK_UP))
-			continue;
-
-		if (bond_is_last_slave(bond, slave)) {
-			skb2 = skb;
-			skb_used = true;
-		} else {
-			skb2 = skb_clone(skb, GFP_ATOMIC);
 			if (!skb2) {
 				net_err_ratelimited("%s: Error: %s: skb_clone() failed\n",
 						    bond_dev->name, __func__);
 				continue;
 			}
+			bond_dev_queue_xmit(bond, skb2, slave->dev);
 		}
-
-		if (bond_dev_queue_xmit(bond, skb2, slave->dev) == NETDEV_TX_OK)
-			xmit_suc = true;
 	}
+	if (slave && bond_slave_is_up(slave) && slave->link == BOND_LINK_UP)
+		return bond_dev_queue_xmit(bond, skb, slave->dev);
 
-	if (!skb_used)
-		dev_kfree_skb_any(skb);
-
-	if (xmit_suc)
-		return NETDEV_TX_OK;
-
-	atomic_long_inc(&bond_dev->tx_dropped);
-	return NET_XMIT_DROP;
+	return bond_tx_drop(bond_dev, skb);
 }
 
 /*------------------------- Device initialization ---------------------------*/

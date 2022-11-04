@@ -438,8 +438,8 @@ static void cpsw_rx_handler(void *token, int len, int status)
 		cpts_rx_timestamp(cpsw->cpts, skb);
 	skb->protocol = eth_type_trans(skb, ndev);
 
-	/* mark skb for recycling */
-	skb_mark_for_recycle(skb);
+	/* unmap page as no netstack skb page recycling */
+	page_pool_release_page(pool, page);
 	netif_receive_skb(skb);
 
 	ndev->stats.rx_bytes += len;
@@ -853,7 +853,7 @@ static int cpsw_ndo_open(struct net_device *ndev)
 		struct ethtool_coalesce coal;
 
 		coal.rx_coalesce_usecs = cpsw->coal_intvl;
-		cpsw_set_coalesce(ndev, &coal, NULL, NULL);
+		cpsw_set_coalesce(ndev, &coal);
 	}
 
 	cpdma_ctlr_start(cpsw->dma);

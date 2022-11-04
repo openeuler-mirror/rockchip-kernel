@@ -2401,10 +2401,8 @@ jme_get_regs(struct net_device *netdev, struct ethtool_regs *regs, void *p)
 	mdio_memcpy(jme, p32, JME_PHY_REG_NR);
 }
 
-static int jme_get_coalesce(struct net_device *netdev,
-			    struct ethtool_coalesce *ecmd,
-			    struct kernel_ethtool_coalesce *kernel_coal,
-			    struct netlink_ext_ack *extack)
+static int
+jme_get_coalesce(struct net_device *netdev, struct ethtool_coalesce *ecmd)
 {
 	struct jme_adapter *jme = netdev_priv(netdev);
 
@@ -2440,10 +2438,8 @@ static int jme_get_coalesce(struct net_device *netdev,
 	return 0;
 }
 
-static int jme_set_coalesce(struct net_device *netdev,
-			    struct ethtool_coalesce *ecmd,
-			    struct kernel_ethtool_coalesce *kernel_coal,
-			    struct netlink_ext_ack *extack)
+static int
+jme_set_coalesce(struct net_device *netdev, struct ethtool_coalesce *ecmd)
 {
 	struct jme_adapter *jme = netdev_priv(netdev);
 	struct dynpcc_info *dpi = &(jme->dpi);

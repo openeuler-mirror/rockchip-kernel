@@ -1152,11 +1152,8 @@ static void ftgmac100_get_drvinfo(struct net_device *netdev,
 	strlcpy(info->bus_info, dev_name(&netdev->dev), sizeof(info->bus_info));
 }
 
-static void
-ftgmac100_get_ringparam(struct net_device *netdev,
-			struct ethtool_ringparam *ering,
-			struct kernel_ethtool_ringparam *kernel_ering,
-			struct netlink_ext_ack *extack)
+static void ftgmac100_get_ringparam(struct net_device *netdev,
+				    struct ethtool_ringparam *ering)
 {
 	struct ftgmac100 *priv = netdev_priv(netdev);
 
@@ -1167,11 +1164,8 @@ ftgmac100_get_ringparam(struct net_device *netdev,
 	ering->tx_pending = priv->tx_q_entries;
 }
 
-static int
-ftgmac100_set_ringparam(struct net_device *netdev,
-			struct ethtool_ringparam *ering,
-			struct kernel_ethtool_ringparam *kernel_ering,
-			struct netlink_ext_ack *extack)
+static int ftgmac100_set_ringparam(struct net_device *netdev,
+				   struct ethtool_ringparam *ering)
 {
 	struct ftgmac100 *priv = netdev_priv(netdev);
 
@@ -1899,11 +1893,6 @@ static int ftgmac100_probe(struct platform_device *pdev)
 	/* AST2400  doesn't have working HW checksum generation */
 	if (np && (of_device_is_compatible(np, "aspeed,ast2400-mac")))
 		netdev->hw_features &= ~NETIF_F_HW_CSUM;
-
-	/* AST2600 tx checksum with NCSI is broken */
-	if (priv->use_ncsi && of_device_is_compatible(np, "aspeed,ast2600-mac"))
-		netdev->hw_features &= ~NETIF_F_HW_CSUM;
-
 	if (np && of_get_property(np, "no-hw-checksum", NULL))
 		netdev->hw_features &= ~(NETIF_F_HW_CSUM | NETIF_F_RXCSUM);
 	netdev->features |= netdev->hw_features;

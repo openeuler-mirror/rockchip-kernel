@@ -45,9 +45,7 @@ static void bnxt_set_msglevel(struct net_device *dev, u32 value)
 }
 
 static int bnxt_get_coalesce(struct net_device *dev,
-			     struct ethtool_coalesce *coal,
-			     struct kernel_ethtool_coalesce *kernel_coal,
-			     struct netlink_ext_ack *extack)
+			     struct ethtool_coalesce *coal)
 {
 	struct bnxt *bp = netdev_priv(dev);
 	struct bnxt_coal *hw_coal;
@@ -77,9 +75,7 @@ static int bnxt_get_coalesce(struct net_device *dev,
 }
 
 static int bnxt_set_coalesce(struct net_device *dev,
-			     struct ethtool_coalesce *coal,
-			     struct kernel_ethtool_coalesce *kernel_coal,
-			     struct netlink_ext_ack *extack)
+			     struct ethtool_coalesce *coal)
 {
 	struct bnxt *bp = netdev_priv(dev);
 	bool update_stats = false;
@@ -764,9 +760,7 @@ skip_tpa_stats:
 }
 
 static void bnxt_get_ringparam(struct net_device *dev,
-			       struct ethtool_ringparam *ering,
-			       struct kernel_ethtool_ringparam *kernel_ering,
-			       struct netlink_ext_ack *extack)
+			       struct ethtool_ringparam *ering)
 {
 	struct bnxt *bp = netdev_priv(dev);
 
@@ -780,15 +774,13 @@ static void bnxt_get_ringparam(struct net_device *dev,
 }
 
 static int bnxt_set_ringparam(struct net_device *dev,
-			      struct ethtool_ringparam *ering,
-			      struct kernel_ethtool_ringparam *kernel_ering,
-			      struct netlink_ext_ack *extack)
+			      struct ethtool_ringparam *ering)
 {
 	struct bnxt *bp = netdev_priv(dev);
 
 	if ((ering->rx_pending > BNXT_MAX_RX_DESC_CNT) ||
 	    (ering->tx_pending > BNXT_MAX_TX_DESC_CNT) ||
-	    (ering->tx_pending < BNXT_MIN_TX_DESC_CNT))
+	    (ering->tx_pending <= MAX_SKB_FRAGS))
 		return -EINVAL;
 
 	if (netif_running(dev))
@@ -1934,9 +1926,6 @@ static int bnxt_get_fecparam(struct net_device *dev,
 	case PORT_PHY_QCFG_RESP_ACTIVE_FEC_FEC_RS272_IEEE_ACTIVE:
 		fec->active_fec |= ETHTOOL_FEC_LLRS;
 		break;
-	case PORT_PHY_QCFG_RESP_ACTIVE_FEC_FEC_NONE_ACTIVE:
-		fec->active_fec |= ETHTOOL_FEC_OFF;
-		break;
 	}
 	return 0;
 }
@@ -2049,7 +2038,9 @@ static int bnxt_set_pauseparam(struct net_device *dev,
 		}
 
 		link_info->autoneg |= BNXT_AUTONEG_FLOW_CTRL;
-		link_info->req_flow_ctrl = 0;
+		if (bp->hwrm_spec_code >= 0x10201)
+			link_info->req_flow_ctrl =
+				PORT_PHY_CFG_REQ_AUTO_PAUSE_AUTONEG_PAUSE;
 	} else {
 		/* when transition from auto pause to force pause,
 		 * force a link change

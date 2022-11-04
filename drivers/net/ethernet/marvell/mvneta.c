@@ -2303,7 +2303,7 @@ mvneta_swbm_add_rx_fragment(struct mvneta_port *pp,
 }
 
 static struct sk_buff *
-mvneta_swbm_build_skb(struct mvneta_port *pp, struct page_pool *pool,
+mvneta_swbm_build_skb(struct mvneta_port *pp, struct mvneta_rx_queue *rxq,
 		      struct xdp_buff *xdp, u32 desc_status)
 {
 	struct skb_shared_info *sinfo = xdp_get_shared_info_from_buff(xdp);
@@ -2314,7 +2314,7 @@ mvneta_swbm_build_skb(struct mvneta_port *pp, struct page_pool *pool,
 	if (!skb)
 		return ERR_PTR(-ENOMEM);
 
-	skb_mark_for_recycle(skb);
+	page_pool_release_page(rxq->page_pool, virt_to_page(xdp->data));
 
 	skb_reserve(skb, xdp->data - xdp->data_hard_start);
 	skb_put(skb, xdp->data_end - xdp->data);
@@ -2326,6 +2326,7 @@ mvneta_swbm_build_skb(struct mvneta_port *pp, struct page_pool *pool,
 		skb_add_rx_frag(skb, skb_shinfo(skb)->nr_frags,
 				skb_frag_page(frag), skb_frag_off(frag),
 				skb_frag_size(frag), PAGE_SIZE);
+		page_pool_release_page(rxq->page_pool, skb_frag_page(frag));
 	}
 
 	return skb;
@@ -2404,7 +2405,7 @@ static int mvneta_rx_swbm(struct napi_struct *napi,
 		    mvneta_run_xdp(pp, rxq, xdp_prog, &xdp_buf, frame_sz, &ps))
 			goto next;
 
-		skb = mvneta_swbm_build_skb(pp, rxq->page_pool, &xdp_buf, desc_status);
+		skb = mvneta_swbm_build_skb(pp, rxq, &xdp_buf, desc_status);
 		if (IS_ERR(skb)) {
 			struct mvneta_pcpu_stats *stats = this_cpu_ptr(pp->stats);
 
@@ -4479,11 +4480,8 @@ static int mvneta_ethtool_nway_reset(struct net_device *dev)
 }
 
 /* Set interrupt coalescing for ethtools */
-static int
-mvneta_ethtool_set_coalesce(struct net_device *dev,
-			    struct ethtool_coalesce *c,
-			    struct kernel_ethtool_coalesce *kernel_coal,
-			    struct netlink_ext_ack *extack)
+static int mvneta_ethtool_set_coalesce(struct net_device *dev,
+				       struct ethtool_coalesce *c)
 {
 	struct mvneta_port *pp = netdev_priv(dev);
 	int queue;
@@ -4506,11 +4504,8 @@ mvneta_ethtool_set_coalesce(struct net_device *dev,
 }
 
 /* get coalescing for ethtools */
-static int
-mvneta_ethtool_get_coalesce(struct net_device *dev,
-			    struct ethtool_coalesce *c,
-			    struct kernel_ethtool_coalesce *kernel_coal,
-			    struct netlink_ext_ack *extack)
+static int mvneta_ethtool_get_coalesce(struct net_device *dev,
+				       struct ethtool_coalesce *c)
 {
 	struct mvneta_port *pp = netdev_priv(dev);
 
@@ -4534,11 +4529,8 @@ static void mvneta_ethtool_get_drvinfo(struct net_device *dev,
 }
 
 
-static void
-mvneta_ethtool_get_ringparam(struct net_device *netdev,
-			     struct ethtool_ringparam *ring,
-			     struct kernel_ethtool_ringparam *kernel_ring,
-			     struct netlink_ext_ack *extack)
+static void mvneta_ethtool_get_ringparam(struct net_device *netdev,
+					 struct ethtool_ringparam *ring)
 {
 	struct mvneta_port *pp = netdev_priv(netdev);
 
@@ -4548,11 +4540,8 @@ mvneta_ethtool_get_ringparam(struct net_device *netdev,
 	ring->tx_pending = pp->tx_ring_size;
 }
 
-static int
-mvneta_ethtool_set_ringparam(struct net_device *dev,
-			     struct ethtool_ringparam *ring,
-			     struct kernel_ethtool_ringparam *kernel_ring,
-			     struct netlink_ext_ack *extack)
+static int mvneta_ethtool_set_ringparam(struct net_device *dev,
+					struct ethtool_ringparam *ring)
 {
 	struct mvneta_port *pp = netdev_priv(dev);
 

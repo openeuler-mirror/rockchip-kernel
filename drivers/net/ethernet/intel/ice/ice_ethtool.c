@@ -1081,7 +1081,7 @@ ice_get_fecparam(struct net_device *netdev, struct ethtool_fecparam *fecparam)
 	if (!caps)
 		return -ENOMEM;
 
-	status = ice_aq_get_phy_caps(pi, false, ICE_AQC_REPORT_TOPO_CAP_MEDIA,
+	status = ice_aq_get_phy_caps(pi, false, ICE_AQC_REPORT_TOPO_CAP,
 				     caps, NULL);
 	if (status) {
 		err = -EAGAIN;
@@ -1976,7 +1976,7 @@ ice_get_link_ksettings(struct net_device *netdev,
 		return -ENOMEM;
 
 	status = ice_aq_get_phy_caps(vsi->port_info, false,
-				     ICE_AQC_REPORT_ACTIVE_CFG, caps, NULL);
+				     ICE_AQC_REPORT_SW_CFG, caps, NULL);
 	if (status) {
 		err = -EIO;
 		goto done;
@@ -2013,7 +2013,7 @@ ice_get_link_ksettings(struct net_device *netdev,
 		ethtool_link_ksettings_add_link_mode(ks, advertising, FEC_RS);
 
 	status = ice_aq_get_phy_caps(vsi->port_info, false,
-				     ICE_AQC_REPORT_TOPO_CAP_MEDIA, caps, NULL);
+				     ICE_AQC_REPORT_TOPO_CAP, caps, NULL);
 	if (status) {
 		err = -EIO;
 		goto done;
@@ -2187,12 +2187,12 @@ ice_set_link_ksettings(struct net_device *netdev,
 {
 	struct ice_netdev_priv *np = netdev_priv(netdev);
 	struct ethtool_link_ksettings safe_ks, copy_ks;
+	struct ice_aqc_get_phy_caps_data *abilities;
 	u8 autoneg, timeout = TEST_SET_BITS_TIMEOUT;
-	struct ice_aqc_get_phy_caps_data *phy_caps;
+	u16 adv_link_speed, curr_link_speed, idx;
 	struct ice_aqc_set_phy_cfg_data config;
-	u16 adv_link_speed, curr_link_speed;
 	struct ice_pf *pf = np->vsi->back;
-	struct ice_port_info *pi;
+	struct ice_port_info *p;
 	u8 autoneg_changed = 0;
 	enum ice_status status;
 	u64 phy_type_high = 0;
@@ -2200,25 +2200,33 @@ ice_set_link_ksettings(struct net_device *netdev,
 	int err = 0;
 	bool linkup;
 
-	pi = np->vsi->port_info;
+	p = np->vsi->port_info;
 
-	if (!pi)
+	if (!p)
 		return -EOPNOTSUPP;
 
-	if (pi->phy.media_type != ICE_MEDIA_BASET &&
-	    pi->phy.media_type != ICE_MEDIA_FIBER &&
-	    pi->phy.media_type != ICE_MEDIA_BACKPLANE &&
-	    pi->phy.media_type != ICE_MEDIA_DA &&
-	    pi->phy.link_info.link_info & ICE_AQ_LINK_UP)
+	/* Check if this is LAN VSI */
+	ice_for_each_vsi(pf, idx)
+		if (pf->vsi[idx]->type == ICE_VSI_PF) {
+			if (np->vsi != pf->vsi[idx])
+				return -EOPNOTSUPP;
+			break;
+		}
+
+	if (p->phy.media_type != ICE_MEDIA_BASET &&
+	    p->phy.media_type != ICE_MEDIA_FIBER &&
+	    p->phy.media_type != ICE_MEDIA_BACKPLANE &&
+	    p->phy.media_type != ICE_MEDIA_DA &&
+	    p->phy.link_info.link_info & ICE_AQ_LINK_UP)
 		return -EOPNOTSUPP;
 
-	phy_caps = kzalloc(sizeof(*phy_caps), GFP_KERNEL);
-	if (!phy_caps)
+	abilities = kzalloc(sizeof(*abilities), GFP_KERNEL);
+	if (!abilities)
 		return -ENOMEM;
 
 	/* Get the PHY capabilities based on media */
-	status = ice_aq_get_phy_caps(pi, false, ICE_AQC_REPORT_TOPO_CAP_MEDIA,
-				     phy_caps, NULL);
+	status = ice_aq_get_phy_caps(p, false, ICE_AQC_REPORT_TOPO_CAP,
+				     abilities, NULL);
 	if (status) {
 		err = -EAGAIN;
 		goto done;
@@ -2280,26 +2288,26 @@ ice_set_link_ksettings(struct net_device *netdev,
 	 * configuration is initialized during probe from PHY capabilities
 	 * software mode, and updated on set PHY configuration.
 	 */
-	memcpy(&config, &pi->phy.curr_user_phy_cfg, sizeof(config));
+	memcpy(&config, &p->phy.curr_user_phy_cfg, sizeof(config));
 
 	config.caps |= ICE_AQ_PHY_ENA_AUTO_LINK_UPDT;
 
 	/* Check autoneg */
-	err = ice_setup_autoneg(pi, &safe_ks, &config, autoneg, &autoneg_changed,
+	err = ice_setup_autoneg(p, &safe_ks, &config, autoneg, &autoneg_changed,
 				netdev);
 
 	if (err)
 		goto done;
 
 	/* Call to get the current link speed */
-	pi->phy.get_link_info = true;
-	status = ice_get_link_status(pi, &linkup);
+	p->phy.get_link_info = true;
+	status = ice_get_link_status(p, &linkup);
 	if (status) {
 		err = -EAGAIN;
 		goto done;
 	}
 
-	curr_link_speed = pi->phy.curr_user_speed_req;
+	curr_link_speed = p->phy.link_info.link_speed;
 	adv_link_speed = ice_ksettings_find_adv_link_speed(ks);
 
 	/* If speed didn't get set, set it to what it currently is.
@@ -2318,7 +2326,7 @@ ice_set_link_ksettings(struct net_device *netdev,
 	}
 
 	/* save the requested speeds */
-	pi->phy.link_info.req_speeds = adv_link_speed;
+	p->phy.link_info.req_speeds = adv_link_speed;
 
 	/* set link and auto negotiation so changes take effect */
 	config.caps |= ICE_AQ_PHY_ENA_LINK;
@@ -2334,9 +2342,9 @@ ice_set_link_ksettings(struct net_device *netdev,
 	 * for set PHY configuration
 	 */
 	config.phy_type_high = cpu_to_le64(phy_type_high) &
-			phy_caps->phy_type_high;
+			abilities->phy_type_high;
 	config.phy_type_low = cpu_to_le64(phy_type_low) &
-			phy_caps->phy_type_low;
+			abilities->phy_type_low;
 
 	if (!(config.phy_type_high || config.phy_type_low)) {
 		/* If there is no intersection and lenient mode is enabled, then
@@ -2356,7 +2364,7 @@ ice_set_link_ksettings(struct net_device *netdev,
 	}
 
 	/* If link is up put link down */
-	if (pi->phy.link_info.link_info & ICE_AQ_LINK_UP) {
+	if (p->phy.link_info.link_info & ICE_AQ_LINK_UP) {
 		/* Tell the OS link is going down, the link will go
 		 * back up when fw says it is ready asynchronously
 		 */
@@ -2366,7 +2374,7 @@ ice_set_link_ksettings(struct net_device *netdev,
 	}
 
 	/* make the aq call */
-	status = ice_aq_set_phy_cfg(&pf->hw, pi, &config, NULL);
+	status = ice_aq_set_phy_cfg(&pf->hw, p, &config, NULL);
 	if (status) {
 		netdev_info(netdev, "Set phy config failed,\n");
 		err = -EAGAIN;
@@ -2374,9 +2382,9 @@ ice_set_link_ksettings(struct net_device *netdev,
 	}
 
 	/* Save speed request */
-	pi->phy.curr_user_speed_req = adv_link_speed;
+	p->phy.curr_user_speed_req = adv_link_speed;
 done:
-	kfree(phy_caps);
+	kfree(abilities);
 	clear_bit(__ICE_CFG_BUSY, pf->state);
 
 	return err;
@@ -2671,9 +2679,7 @@ ice_get_rxnfc(struct net_device *netdev, struct ethtool_rxnfc *cmd,
 }
 
 static void
-ice_get_ringparam(struct net_device *netdev, struct ethtool_ringparam *ring,
-		  struct kernel_ethtool_ringparam *kernel_ring,
-		  struct netlink_ext_ack *extack)
+ice_get_ringparam(struct net_device *netdev, struct ethtool_ringparam *ring)
 {
 	struct ice_netdev_priv *np = netdev_priv(netdev);
 	struct ice_vsi *vsi = np->vsi;
@@ -2691,9 +2697,7 @@ ice_get_ringparam(struct net_device *netdev, struct ethtool_ringparam *ring,
 }
 
 static int
-ice_set_ringparam(struct net_device *netdev, struct ethtool_ringparam *ring,
-		  struct kernel_ethtool_ringparam *kernel_ring,
-		  struct netlink_ext_ack *extack)
+ice_set_ringparam(struct net_device *netdev, struct ethtool_ringparam *ring)
 {
 	struct ice_ring *tx_rings = NULL, *rx_rings = NULL;
 	struct ice_netdev_priv *np = netdev_priv(netdev);
@@ -2950,7 +2954,7 @@ ice_get_pauseparam(struct net_device *netdev, struct ethtool_pauseparam *pause)
 		return;
 
 	/* Get current PHY config */
-	status = ice_aq_get_phy_caps(pi, false, ICE_AQC_REPORT_ACTIVE_CFG, pcaps,
+	status = ice_aq_get_phy_caps(pi, false, ICE_AQC_REPORT_SW_CFG, pcaps,
 				     NULL);
 	if (status)
 		goto out;
@@ -3017,7 +3021,7 @@ ice_set_pauseparam(struct net_device *netdev, struct ethtool_pauseparam *pause)
 		return -ENOMEM;
 
 	/* Get current PHY config */
-	status = ice_aq_get_phy_caps(pi, false, ICE_AQC_REPORT_ACTIVE_CFG, pcaps,
+	status = ice_aq_get_phy_caps(pi, false, ICE_AQC_REPORT_SW_CFG, pcaps,
 				     NULL);
 	if (status) {
 		kfree(pcaps);
@@ -3569,10 +3573,8 @@ __ice_get_coalesce(struct net_device *netdev, struct ethtool_coalesce *ec,
 	return 0;
 }
 
-static int ice_get_coalesce(struct net_device *netdev,
-			    struct ethtool_coalesce *ec,
-			    struct kernel_ethtool_coalesce *kernel_coal,
-			    struct netlink_ext_ack *extack)
+static int
+ice_get_coalesce(struct net_device *netdev, struct ethtool_coalesce *ec)
 {
 	return __ice_get_coalesce(netdev, ec, -1);
 }
@@ -3782,10 +3784,8 @@ set_complete:
 	return 0;
 }
 
-static int ice_set_coalesce(struct net_device *netdev,
-			    struct ethtool_coalesce *ec,
-			    struct kernel_ethtool_coalesce *kernel_coal,
-			    struct netlink_ext_ack *extack)
+static int
+ice_set_coalesce(struct net_device *netdev, struct ethtool_coalesce *ec)
 {
 	return __ice_set_coalesce(netdev, ec, -1);
 }

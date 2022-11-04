@@ -1941,14 +1941,19 @@ static void ixgbe_reuse_rx_page(struct ixgbe_ring *rx_ring,
 	new_buff->pagecnt_bias	= old_buff->pagecnt_bias;
 }
 
+static inline bool ixgbe_page_is_reserved(struct page *page)
+{
+	return (page_to_nid(page) != numa_mem_id()) || page_is_pfmemalloc(page);
+}
+
 static bool ixgbe_can_reuse_rx_page(struct ixgbe_rx_buffer *rx_buffer,
 				    int rx_buffer_pgcnt)
 {
 	unsigned int pagecnt_bias = rx_buffer->pagecnt_bias;
 	struct page *page = rx_buffer->page;
 
-	/* avoid re-using remote and pfmemalloc pages */
-	if (!dev_page_is_reusable(page))
+	/* avoid re-using remote pages */
+	if (unlikely(ixgbe_page_is_reserved(page)))
 		return false;
 
 #if (PAGE_SIZE < 8192)
@@ -5527,10 +5532,6 @@ static int ixgbe_non_sfp_link_config(struct ixgbe_hw *hw)
 	if (!speed && hw->mac.ops.get_link_capabilities) {
 		ret = hw->mac.ops.get_link_capabilities(hw, &speed,
 							&autoneg);
-		/* remove NBASE-T speeds from default autonegotiation
-		 * to accommodate broken network switches in the field
-		 * which cannot cope with advertised NBASE-T speeds
-		 */
 		speed &= ~(IXGBE_LINK_SPEED_5GB_FULL |
 			   IXGBE_LINK_SPEED_2_5GB_FULL);
 	}
@@ -5683,9 +5684,6 @@ static void ixgbe_up_complete(struct ixgbe_adapter *adapter)
 	ctrl_ext = IXGBE_READ_REG(hw, IXGBE_CTRL_EXT);
 	ctrl_ext |= IXGBE_CTRL_EXT_PFRSTD;
 	IXGBE_WRITE_REG(hw, IXGBE_CTRL_EXT, ctrl_ext);
-
-	/* update setting rx tx for all active vfs */
-	ixgbe_set_all_vfs(adapter);
 }
 
 void ixgbe_reinit_locked(struct ixgbe_adapter *adapter)
@@ -6143,8 +6141,11 @@ void ixgbe_down(struct ixgbe_adapter *adapter)
 		for (i = 0 ; i < adapter->num_vfs; i++)
 			adapter->vfinfo[i].clear_to_send = false;
 
-		/* update setting rx tx for all active vfs */
-		ixgbe_set_all_vfs(adapter);
+		/* ping all the active vfs to let them know we are going down */
+		ixgbe_ping_all_vfs(adapter);
+
+		/* Disable all VFTE/VFRE TX/RX */
+		ixgbe_disable_tx_rx(adapter);
 	}
 
 	/* disable transmits in the hardware now that interrupts are off */
@@ -7602,27 +7603,6 @@ static void ixgbe_watchdog_flush_tx(struct ixgbe_adapter *adapter)
 }
 
 #ifdef CONFIG_PCI_IOV
-static void ixgbe_bad_vf_abort(struct ixgbe_adapter *adapter, u32 vf)
-{
-	struct ixgbe_hw *hw = &adapter->hw;
-
-	if (adapter->hw.mac.type == ixgbe_mac_82599EB &&
-	    adapter->flags2 & IXGBE_FLAG2_AUTO_DISABLE_VF) {
-		adapter->vfinfo[vf].primary_abort_count++;
-		if (adapter->vfinfo[vf].primary_abort_count ==
-		    IXGBE_PRIMARY_ABORT_LIMIT) {
-			ixgbe_set_vf_link_state(adapter, vf,
-						IFLA_VF_LINK_STATE_DISABLE);
-			adapter->vfinfo[vf].primary_abort_count = 0;
-
-			e_info(drv,
-			       "Malicious Driver Detection event detected on PF %d VF %d MAC: %pM mdd-disable-vf=on",
-			       hw->bus.func, vf,
-			       adapter->vfinfo[vf].vf_mac_addresses);
-		}
-	}
-}
-
 static void ixgbe_check_for_bad_vf(struct ixgbe_adapter *adapter)
 {
 	struct ixgbe_hw *hw = &adapter->hw;
@@ -7654,10 +7634,8 @@ static void ixgbe_check_for_bad_vf(struct ixgbe_adapter *adapter)
 			continue;
 		pci_read_config_word(vfdev, PCI_STATUS, &status_reg);
 		if (status_reg != IXGBE_FAILED_READ_CFG_WORD &&
-		    status_reg & PCI_STATUS_REC_MASTER_ABORT) {
-			ixgbe_bad_vf_abort(adapter, vf);
+		    status_reg & PCI_STATUS_REC_MASTER_ABORT)
 			pcie_flr(vfdev);
-		}
 	}
 }
 
@@ -8068,6 +8046,15 @@ static int ixgbe_tso(struct ixgbe_ring *tx_ring,
 	return 1;
 }
 
+static inline bool ixgbe_ipv6_csum_is_sctp(struct sk_buff *skb)
+{
+	unsigned int offset = 0;
+
+	ipv6_find_hdr(skb, &offset, IPPROTO_SCTP, NULL, NULL);
+
+	return offset == skb_checksum_start_offset(skb);
+}
+
 static void ixgbe_tx_csum(struct ixgbe_ring *tx_ring,
 			  struct ixgbe_tx_buffer *first,
 			  struct ixgbe_ipsec_tx_data *itd)
@@ -8093,7 +8080,10 @@ csum_failed:
 		break;
 	case offsetof(struct sctphdr, checksum):
 		/* validate that this is actually an SCTP request */
-		if (skb_csum_is_sctp(skb)) {
+		if (((first->protocol == htons(ETH_P_IP)) &&
+		     (ip_hdr(skb)->protocol == IPPROTO_SCTP)) ||
+		    ((first->protocol == htons(ETH_P_IPV6)) &&
+		     ixgbe_ipv6_csum_is_sctp(skb))) {
 			type_tucmd = IXGBE_ADVTXD_TUCMD_L4T_SCTP;
 			break;
 		}
@@ -10133,7 +10123,6 @@ static int ixgbe_xdp_setup(struct net_device *dev, struct bpf_prog *prog)
 	struct ixgbe_adapter *adapter = netdev_priv(dev);
 	struct bpf_prog *old_prog;
 	bool need_reset;
-	int num_queues;
 
 	if (adapter->flags & IXGBE_FLAG_SRIOV_ENABLED)
 		return -EINVAL;
@@ -10183,14 +10172,11 @@ static int ixgbe_xdp_setup(struct net_device *dev, struct bpf_prog *prog)
 	/* Kick start the NAPI context if there is an AF_XDP socket open
 	 * on that queue id. This so that receiving will start.
 	 */
-	if (need_reset && prog) {
-		num_queues = min_t(int, adapter->num_rx_queues,
-				   adapter->num_xdp_queues);
-		for (i = 0; i < num_queues; i++)
+	if (need_reset && prog)
+		for (i = 0; i < adapter->num_rx_queues; i++)
 			if (adapter->xdp_ring[i]->xsk_pool)
 				(void)ixgbe_xsk_wakeup(adapter->netdev, i,
 						       XDP_WAKEUP_RX);
-	}
 
 	return 0;
 }
@@ -10278,7 +10264,6 @@ static const struct net_device_ops ixgbe_netdev_ops = {
 	.ndo_set_vf_vlan	= ixgbe_ndo_set_vf_vlan,
 	.ndo_set_vf_rate	= ixgbe_ndo_set_vf_bw,
 	.ndo_set_vf_spoofchk	= ixgbe_ndo_set_vf_spoofchk,
-	.ndo_set_vf_link_state	= ixgbe_ndo_set_vf_link_state,
 	.ndo_set_vf_rss_query_en = ixgbe_ndo_set_vf_rss_query_en,
 	.ndo_set_vf_trust	= ixgbe_ndo_set_vf_trust,
 	.ndo_get_vf_config	= ixgbe_ndo_get_vf_config,
@@ -10746,9 +10731,6 @@ static int ixgbe_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	err = ixgbe_sw_init(adapter, ii);
 	if (err)
 		goto err_sw_init;
-
-	if (adapter->hw.mac.type == ixgbe_mac_82599EB)
-		adapter->flags2 |= IXGBE_FLAG2_AUTO_DISABLE_VF;
 
 	switch (adapter->hw.mac.type) {
 	case ixgbe_mac_X550:

@@ -953,6 +953,15 @@ static void igc_tx_ctxtdesc(struct igc_ring *tx_ring,
 	}
 }
 
+static inline bool igc_ipv6_csum_is_sctp(struct sk_buff *skb)
+{
+	unsigned int offset = 0;
+
+	ipv6_find_hdr(skb, &offset, IPPROTO_SCTP, NULL, NULL);
+
+	return offset == skb_checksum_start_offset(skb);
+}
+
 static void igc_tx_csum(struct igc_ring *tx_ring, struct igc_tx_buffer *first)
 {
 	struct sk_buff *skb = first->skb;
@@ -975,7 +984,10 @@ csum_failed:
 		break;
 	case offsetof(struct sctphdr, checksum):
 		/* validate that this is actually an SCTP request */
-		if (skb_csum_is_sctp(skb)) {
+		if ((first->protocol == htons(ETH_P_IP) &&
+		     (ip_hdr(skb)->protocol == IPPROTO_SCTP)) ||
+		    (first->protocol == htons(ETH_P_IPV6) &&
+		     igc_ipv6_csum_is_sctp(skb))) {
 			type_tucmd = IGC_ADVTXD_TUCMD_L4T_SCTP;
 			break;
 		}
@@ -1652,13 +1664,18 @@ static void igc_reuse_rx_page(struct igc_ring *rx_ring,
 	new_buff->pagecnt_bias	= old_buff->pagecnt_bias;
 }
 
+static inline bool igc_page_is_reserved(struct page *page)
+{
+	return (page_to_nid(page) != numa_mem_id()) || page_is_pfmemalloc(page);
+}
+
 static bool igc_can_reuse_rx_page(struct igc_rx_buffer *rx_buffer)
 {
 	unsigned int pagecnt_bias = rx_buffer->pagecnt_bias;
 	struct page *page = rx_buffer->page;
 
-	/* avoid re-using remote and pfmemalloc pages */
-	if (!dev_page_is_reusable(page))
+	/* avoid re-using remote pages */
+	if (unlikely(igc_page_is_reserved(page)))
 		return false;
 
 #if (PAGE_SIZE < 8192)
@@ -4066,7 +4083,6 @@ static irqreturn_t igc_msix_ring(int irq, void *data)
  */
 static int igc_request_msix(struct igc_adapter *adapter)
 {
-	unsigned int num_q_vectors = adapter->num_q_vectors;
 	int i = 0, err = 0, vector = 0, free_vector = 0;
 	struct net_device *netdev = adapter->netdev;
 
@@ -4075,13 +4091,7 @@ static int igc_request_msix(struct igc_adapter *adapter)
 	if (err)
 		goto err_out;
 
-	if (num_q_vectors > MAX_Q_VECTORS) {
-		num_q_vectors = MAX_Q_VECTORS;
-		dev_warn(&adapter->pdev->dev,
-			 "The number of queue vectors (%d) is higher than max allowed (%d)\n",
-			 adapter->num_q_vectors, MAX_Q_VECTORS);
-	}
-	for (i = 0; i < num_q_vectors; i++) {
+	for (i = 0; i < adapter->num_q_vectors; i++) {
 		struct igc_q_vector *q_vector = adapter->q_vector[i];
 
 		vector++;
@@ -4160,12 +4170,20 @@ bool igc_has_link(struct igc_adapter *adapter)
 	 * false until the igc_check_for_link establishes link
 	 * for copper adapters ONLY
 	 */
-	if (!hw->mac.get_link_status)
-		return true;
-	hw->mac.ops.check_for_link(hw);
-	link_active = !hw->mac.get_link_status;
+	switch (hw->phy.media_type) {
+	case igc_media_type_copper:
+		if (!hw->mac.get_link_status)
+			return true;
+		hw->mac.ops.check_for_link(hw);
+		link_active = !hw->mac.get_link_status;
+		break;
+	default:
+	case igc_media_type_unknown:
+		break;
+	}
 
-	if (hw->mac.type == igc_i225) {
+	if (hw->mac.type == igc_i225 &&
+	    hw->phy.id == I225_I_PHY_ID) {
 		if (!netif_carrier_ok(adapter->netdev)) {
 			adapter->flags &= ~IGC_FLAG_NEED_LINK_UPDATE;
 		} else if (!(adapter->flags & IGC_FLAG_NEED_LINK_UPDATE)) {
@@ -4397,9 +4415,6 @@ static irqreturn_t igc_intr_msi(int irq, void *data)
 			mod_timer(&adapter->watchdog_timer, jiffies + 1);
 	}
 
-	if (icr & IGC_ICR_TS)
-		igc_tsync_interrupt(adapter);
-
 	napi_schedule(&q_vector->napi);
 
 	return IRQ_HANDLED;
@@ -4442,9 +4457,6 @@ static irqreturn_t igc_intr(int irq, void *data)
 		if (!test_bit(__IGC_DOWN, &adapter->state))
 			mod_timer(&adapter->watchdog_timer, jiffies + 1);
 	}
-
-	if (icr & IGC_ICR_TS)
-		igc_tsync_interrupt(adapter);
 
 	napi_schedule(&q_vector->napi);
 
