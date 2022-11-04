@@ -245,23 +245,20 @@ int __scsi_execute(struct scsi_device *sdev, const unsigned char *cmd,
 {
 	struct request *req;
 	struct scsi_request *rq;
-	int ret;
+	int ret = DRIVER_ERROR << 24;
 
 	req = blk_get_request(sdev->request_queue,
 			data_direction == DMA_TO_DEVICE ?
 			REQ_OP_SCSI_OUT : REQ_OP_SCSI_IN,
 			rq_flags & RQF_PM ? BLK_MQ_REQ_PM : 0);
 	if (IS_ERR(req))
-		return PTR_ERR(req);
-
+		return ret;
 	rq = scsi_req(req);
 
-	if (bufflen) {
-		ret = blk_rq_map_kern(sdev->request_queue, req,
-				      buffer, bufflen, GFP_NOIO);
-		if (ret)
-			goto out;
-	}
+	if (bufflen &&	blk_rq_map_kern(sdev->request_queue, req,
+					buffer, bufflen, GFP_NOIO))
+		goto out;
+
 	rq->cmd_len = COMMAND_SIZE(cmd[0]);
 	memcpy(rq->cmd, cmd, rq->cmd_len);
 	rq->retries = retries;
@@ -1196,6 +1193,8 @@ static blk_status_t scsi_setup_scsi_cmnd(struct scsi_device *sdev,
 	}
 
 	cmd->cmd_len = scsi_req(req)->cmd_len;
+	if (cmd->cmd_len == 0)
+		cmd->cmd_len = scsi_command_size(cmd->cmnd);
 	cmd->cmnd = scsi_req(req)->cmd;
 	cmd->transfersize = blk_rq_bytes(req);
 	cmd->allowed = scsi_req(req)->retries;
@@ -1910,6 +1909,10 @@ int scsi_mq_setup_tags(struct Scsi_Host *shost)
 		tag_set->ops = &scsi_mq_ops_no_commit;
 	tag_set->nr_hw_queues = shost->nr_hw_queues ? : 1;
 	tag_set->queue_depth = shost->can_queue;
+	if (shost->hostt->name && strcmp(shost->hostt->name, "ufshcd") == 0) {
+		tag_set->queue_depth--;
+		tag_set->reserved_tags++;
+	}
 	tag_set->cmd_size = cmd_size;
 	tag_set->numa_node = NUMA_NO_NODE;
 	tag_set->flags = BLK_MQ_F_SHOULD_MERGE;
@@ -2619,48 +2622,6 @@ scsi_target_resume(struct scsi_target *starget)
 }
 EXPORT_SYMBOL(scsi_target_resume);
 
-static int __scsi_internal_device_block_nowait(struct scsi_device *sdev)
-{
-	if (scsi_device_set_state(sdev, SDEV_BLOCK))
-		return scsi_device_set_state(sdev, SDEV_CREATED_BLOCK);
-
-	return 0;
-}
-
-static DEFINE_SPINLOCK(sdev_queue_stop_lock);
-
-void scsi_start_queue(struct scsi_device *sdev)
-{
-	bool need_start;
-	unsigned long flags;
-
-	spin_lock_irqsave(&sdev_queue_stop_lock, flags);
-	need_start = sdev->queue_stopped;
-	sdev->queue_stopped = 0;
-	spin_unlock_irqrestore(&sdev_queue_stop_lock, flags);
-
-	if (need_start)
-		blk_mq_unquiesce_queue(sdev->request_queue);
-}
-
-static void scsi_stop_queue(struct scsi_device *sdev, bool nowait)
-{
-	bool need_stop;
-	unsigned long flags;
-
-	spin_lock_irqsave(&sdev_queue_stop_lock, flags);
-	need_stop = !sdev->queue_stopped;
-	sdev->queue_stopped = 1;
-	spin_unlock_irqrestore(&sdev_queue_stop_lock, flags);
-
-	if (need_stop) {
-		if (nowait)
-			blk_mq_quiesce_queue_nowait(sdev->request_queue);
-		else
-			blk_mq_quiesce_queue(sdev->request_queue);
-	}
-}
-
 /**
  * scsi_internal_device_block_nowait - try to transition to the SDEV_BLOCK state
  * @sdev: device to block
@@ -2677,16 +2638,24 @@ static void scsi_stop_queue(struct scsi_device *sdev, bool nowait)
  */
 int scsi_internal_device_block_nowait(struct scsi_device *sdev)
 {
-	int ret = __scsi_internal_device_block_nowait(sdev);
+	struct request_queue *q = sdev->request_queue;
+	int err = 0;
+
+	err = scsi_device_set_state(sdev, SDEV_BLOCK);
+	if (err) {
+		err = scsi_device_set_state(sdev, SDEV_CREATED_BLOCK);
+
+		if (err)
+			return err;
+	}
 
 	/*
 	 * The device has transitioned to SDEV_BLOCK.  Stop the
 	 * block layer from calling the midlayer with this device's
 	 * request queue.
 	 */
-	if (!ret)
-		scsi_stop_queue(sdev, true);
-	return ret;
+	blk_mq_quiesce_queue_nowait(q);
+	return 0;
 }
 EXPORT_SYMBOL_GPL(scsi_internal_device_block_nowait);
 
@@ -2707,15 +2676,23 @@ EXPORT_SYMBOL_GPL(scsi_internal_device_block_nowait);
  */
 static int scsi_internal_device_block(struct scsi_device *sdev)
 {
+	struct request_queue *q = sdev->request_queue;
 	int err;
 
 	mutex_lock(&sdev->state_mutex);
-	err = __scsi_internal_device_block_nowait(sdev);
+	err = scsi_internal_device_block_nowait(sdev);
 	if (err == 0)
-		scsi_stop_queue(sdev, false);
+		blk_mq_quiesce_queue(q);
 	mutex_unlock(&sdev->state_mutex);
 
 	return err;
+}
+
+void scsi_start_queue(struct scsi_device *sdev)
+{
+	struct request_queue *q = sdev->request_queue;
+
+	blk_mq_unquiesce_queue(q);
 }
 
 /**

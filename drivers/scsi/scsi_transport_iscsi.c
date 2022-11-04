@@ -86,10 +86,16 @@ struct iscsi_internal {
 	struct transport_container session_cont;
 };
 
+/* Worker to perform connection failure on unresponsive connections
+ * completely in kernel space.
+ */
+static void stop_conn_work_fn(struct work_struct *work);
+static DECLARE_WORK(stop_conn_work, stop_conn_work_fn);
+
 static atomic_t iscsi_session_nr; /* sysfs session id for next new session */
 static struct workqueue_struct *iscsi_eh_timer_workq;
 
-static struct workqueue_struct *iscsi_conn_cleanup_workq;
+static struct workqueue_struct *iscsi_destroy_workq;
 
 static DEFINE_IDA(iscsi_sess_ida);
 /*
@@ -262,20 +268,9 @@ void iscsi_destroy_endpoint(struct iscsi_endpoint *ep)
 }
 EXPORT_SYMBOL_GPL(iscsi_destroy_endpoint);
 
-void iscsi_put_endpoint(struct iscsi_endpoint *ep)
-{
-	put_device(&ep->dev);
-}
-EXPORT_SYMBOL_GPL(iscsi_put_endpoint);
-
-/**
- * iscsi_lookup_endpoint - get ep from handle
- * @handle: endpoint handle
- *
- * Caller must do a iscsi_put_endpoint.
- */
 struct iscsi_endpoint *iscsi_lookup_endpoint(u64 handle)
 {
+	struct iscsi_endpoint *ep;
 	struct device *dev;
 
 	dev = class_find_device(&iscsi_endpoint_class, NULL, &handle,
@@ -283,7 +278,13 @@ struct iscsi_endpoint *iscsi_lookup_endpoint(u64 handle)
 	if (!dev)
 		return NULL;
 
-	return iscsi_dev_to_endpoint(dev);
+	ep = iscsi_dev_to_endpoint(dev);
+	/*
+	 * we can drop this now because the interface will prevent
+	 * removals and lookups from racing.
+	 */
+	put_device(dev);
+	return ep;
 }
 EXPORT_SYMBOL_GPL(iscsi_lookup_endpoint);
 
@@ -441,7 +442,9 @@ static umode_t iscsi_iface_attr_is_visible(struct kobject *kobj,
 	struct iscsi_transport *t = iface->transport;
 	int param = -1;
 
-	if (attr == &dev_attr_iface_def_taskmgmt_tmo.attr)
+	if (attr == &dev_attr_iface_enabled.attr)
+		param = ISCSI_NET_PARAM_IFACE_ENABLE;
+	else if (attr == &dev_attr_iface_def_taskmgmt_tmo.attr)
 		param = ISCSI_IFACE_PARAM_DEF_TASKMGMT_TMO;
 	else if (attr == &dev_attr_iface_header_digest.attr)
 		param = ISCSI_IFACE_PARAM_HDRDGST_EN;
@@ -481,9 +484,7 @@ static umode_t iscsi_iface_attr_is_visible(struct kobject *kobj,
 	if (param != -1)
 		return t->attr_is_visible(ISCSI_IFACE_PARAM, param);
 
-	if (attr == &dev_attr_iface_enabled.attr)
-		param = ISCSI_NET_PARAM_IFACE_ENABLE;
-	else if (attr == &dev_attr_iface_vlan_id.attr)
+	if (attr == &dev_attr_iface_vlan_id.attr)
 		param = ISCSI_NET_PARAM_VLAN_ID;
 	else if (attr == &dev_attr_iface_vlan_priority.attr)
 		param = ISCSI_NET_PARAM_VLAN_PRIORITY;
@@ -1597,6 +1598,12 @@ static DECLARE_TRANSPORT_CLASS(iscsi_connection_class,
 static struct sock *nls;
 static DEFINE_MUTEX(rx_queue_mutex);
 
+/*
+ * conn_mutex protects the {start,bind,stop,destroy}_conn from racing
+ * against the kernel stop_connection recovery mechanism
+ */
+static DEFINE_MUTEX(conn_mutex);
+
 static LIST_HEAD(sesslist);
 static DEFINE_SPINLOCK(sesslock);
 static LIST_HEAD(connlist);
@@ -1902,12 +1909,12 @@ static void session_recovery_timedout(struct work_struct *work)
 	}
 	spin_unlock_irqrestore(&session->lock, flags);
 
+	if (session->transport->session_recovery_timedout)
+		session->transport->session_recovery_timedout(session);
+
 	ISCSI_DBG_TRANS_SESSION(session, "Unblocking SCSI target\n");
 	scsi_target_unblock(&session->dev, SDEV_TRANSPORT_OFFLINE);
 	ISCSI_DBG_TRANS_SESSION(session, "Completed unblocking SCSI target\n");
-
-	if (session->transport->session_recovery_timedout)
-		session->transport->session_recovery_timedout(session);
 }
 
 static void __iscsi_unblock_session(struct work_struct *work)
@@ -2168,11 +2175,7 @@ static int iscsi_iter_destroy_conn_fn(struct device *dev, void *data)
 {
 	if (!iscsi_is_conn_dev(dev))
 		return 0;
-
-	iscsi_remove_conn(iscsi_dev_to_conn(dev));
-	iscsi_put_conn(iscsi_dev_to_conn(dev));
-
-	return 0;
+	return iscsi_destroy_conn(iscsi_dev_to_conn(dev));
 }
 
 void iscsi_remove_session(struct iscsi_cls_session *session)
@@ -2222,164 +2225,6 @@ void iscsi_remove_session(struct iscsi_cls_session *session)
 }
 EXPORT_SYMBOL_GPL(iscsi_remove_session);
 
-static void iscsi_stop_conn(struct iscsi_cls_conn *conn, int flag)
-{
-	ISCSI_DBG_TRANS_CONN(conn, "Stopping conn.\n");
-
-	switch (flag) {
-	case STOP_CONN_RECOVER:
-		WRITE_ONCE(conn->state, ISCSI_CONN_FAILED);
-		break;
-	case STOP_CONN_TERM:
-		WRITE_ONCE(conn->state, ISCSI_CONN_DOWN);
-		break;
-	default:
-		iscsi_cls_conn_printk(KERN_ERR, conn, "invalid stop flag %d\n",
-				      flag);
-		return;
-	}
-
-	conn->transport->stop_conn(conn, flag);
-	ISCSI_DBG_TRANS_CONN(conn, "Stopping conn done.\n");
-}
-
-static void iscsi_ep_disconnect(struct iscsi_cls_conn *conn, bool is_active)
-{
-	struct iscsi_cls_session *session = iscsi_conn_to_session(conn);
-	struct iscsi_endpoint *ep;
-
-	ISCSI_DBG_TRANS_CONN(conn, "disconnect ep.\n");
-	WRITE_ONCE(conn->state, ISCSI_CONN_FAILED);
-
-	if (!conn->ep || !session->transport->ep_disconnect)
-		return;
-
-	ep = conn->ep;
-	conn->ep = NULL;
-
-	if (session->transport->caps & CAP_OPS_EXPAND &&
-	    session->transport->ops_expand &&
-	    session->transport->ops_expand->unbind_conn)
-		session->transport->ops_expand->unbind_conn(conn, is_active);
-
-	session->transport->ep_disconnect(ep);
-	ISCSI_DBG_TRANS_CONN(conn, "disconnect ep done.\n");
-}
-
-static void iscsi_if_disconnect_bound_ep(struct iscsi_cls_conn *conn,
-					 struct iscsi_endpoint *ep,
-					 bool is_active)
-{
-	struct iscsi_cls_conn_wrapper *conn_wrapper = conn_to_wrapper(conn);
-	/* Check if this was a conn error and the kernel took ownership */
-	spin_lock_irq(&conn_wrapper->lock);
-	if (!test_bit(ISCSI_CLS_CONN_BIT_CLEANUP, &conn_wrapper->flags)) {
-		spin_unlock_irq(&conn_wrapper->lock);
-		iscsi_ep_disconnect(conn, is_active);
-	} else {
-		spin_unlock_irq(&conn_wrapper->lock);
-		ISCSI_DBG_TRANS_CONN(conn, "flush kernel conn cleanup.\n");
-		mutex_unlock(&conn->ep_mutex);
-
-		flush_work(&conn_wrapper->cleanup_work);
-		/*
-		 * Userspace is now done with the EP so we can release the ref
-		 * iscsi_cleanup_conn_work_fn took.
-		 */
-		iscsi_put_endpoint(ep);
-		mutex_lock(&conn->ep_mutex);
-	}
-}
-
-static int iscsi_if_stop_conn(struct iscsi_transport *transport,
-			      struct iscsi_uevent *ev)
-{
-	int flag = ev->u.stop_conn.flag;
-	struct iscsi_cls_conn *conn;
-	struct iscsi_cls_conn_wrapper *conn_wrapper;
-
-	conn = iscsi_conn_lookup(ev->u.stop_conn.sid, ev->u.stop_conn.cid);
-	if (!conn)
-		return -EINVAL;
-
-	conn_wrapper = conn_to_wrapper(conn);
-	ISCSI_DBG_TRANS_CONN(conn, "iscsi if conn stop.\n");
-	/*
-	 * If this is a termination we have to call stop_conn with that flag
-	 * so the correct states get set. If we haven't run the work yet try to
-	 * avoid the extra run.
-	 */
-	if (flag == STOP_CONN_TERM) {
-		cancel_work_sync(&conn_wrapper->cleanup_work);
-		iscsi_stop_conn(conn, flag);
-	} else {
-		/*
-		 * For offload, when iscsid is restarted it won't know about
-		 * existing endpoints so it can't do a ep_disconnect. We clean
-		 * it up here for userspace.
-		 */
-		mutex_lock(&conn->ep_mutex);
-		if (conn->ep)
-			iscsi_if_disconnect_bound_ep(conn, conn->ep, true);
-		mutex_unlock(&conn->ep_mutex);
-
-		/*
-		 * Figure out if it was the kernel or userspace initiating this.
-		 */
-		spin_lock_irq(&conn_wrapper->lock);
-		if (!test_and_set_bit(ISCSI_CLS_CONN_BIT_CLEANUP, &conn_wrapper->flags)) {
-			spin_unlock_irq(&conn_wrapper->lock);
-			iscsi_stop_conn(conn, flag);
-		} else {
-			spin_unlock_irq(&conn_wrapper->lock);
-			ISCSI_DBG_TRANS_CONN(conn,
-					     "flush kernel conn cleanup.\n");
-			flush_work(&conn_wrapper->cleanup_work);
-		}
-		/*
-		 * Only clear for recovery to avoid extra cleanup runs during
-		 * termination.
-		 */
-		spin_lock_irq(&conn_wrapper->lock);
-		clear_bit(ISCSI_CLS_CONN_BIT_CLEANUP, &conn_wrapper->flags);
-		spin_unlock_irq(&conn_wrapper->lock);
-	}
-	ISCSI_DBG_TRANS_CONN(conn, "iscsi if conn stop done.\n");
-	return 0;
-}
-
-static void iscsi_cleanup_conn_work_fn(struct work_struct *work)
-{
-	struct iscsi_cls_conn_wrapper *conn_wrapper =
-						   container_of(work, struct iscsi_cls_conn_wrapper,
-						   cleanup_work);
-	struct iscsi_cls_conn *conn = &conn_wrapper->conn;
-	struct iscsi_cls_session *session = iscsi_conn_to_session(conn);
-
-	mutex_lock(&conn->ep_mutex);
-	/*
-	 * Get a ref to the ep, so we don't release its ID until after
-	 * userspace is done referencing it in iscsi_if_disconnect_bound_ep.
-	 */
-	if (conn->ep)
-		get_device(&conn->ep->dev);
-	iscsi_ep_disconnect(conn, false);
-
-	if (system_state != SYSTEM_RUNNING) {
-		/*
-		 * If the user has set up for the session to never timeout
-		 * then hang like they wanted. For all other cases fail right
-		 * away since userspace is not going to relogin.
-		 */
-		if (session->recovery_tmo > 0)
-			session->recovery_tmo = 0;
-	}
-
-	iscsi_stop_conn(conn, STOP_CONN_RECOVER);
-	mutex_unlock(&conn->ep_mutex);
-	ISCSI_DBG_TRANS_CONN(conn, "cleanup done.\n");
-}
-
 void iscsi_free_session(struct iscsi_cls_session *session)
 {
 	ISCSI_DBG_TRANS_SESSION(session, "Freeing session\n");
@@ -2387,107 +2232,6 @@ void iscsi_free_session(struct iscsi_cls_session *session)
 	put_device(&session->dev);
 }
 EXPORT_SYMBOL_GPL(iscsi_free_session);
-
-/**
- * iscsi_alloc_conn - alloc iscsi class connection
- * @session: iscsi cls session
- * @dd_size: private driver data size
- * @cid: connection id
- */
-struct iscsi_cls_conn *
-iscsi_alloc_conn(struct iscsi_cls_session *session, int dd_size, uint32_t cid)
-{
-	struct iscsi_transport *transport = session->transport;
-	struct iscsi_cls_conn *conn;
-	struct iscsi_cls_conn_wrapper *conn_wrapper;
-
-	conn_wrapper = kzalloc(sizeof(*conn_wrapper) + dd_size, GFP_KERNEL);
-	if (!conn_wrapper)
-		return NULL;
-
-	conn = &conn_wrapper->conn;
-	if (dd_size)
-		conn->dd_data = &conn_wrapper[1];
-
-	mutex_init(&conn->ep_mutex);
-	spin_lock_init(&conn_wrapper->lock);
-	INIT_LIST_HEAD(&conn->conn_list);
-	INIT_WORK(&conn_wrapper->cleanup_work, iscsi_cleanup_conn_work_fn);
-	conn->transport = transport;
-	conn->cid = cid;
-	WRITE_ONCE(conn->state, ISCSI_CONN_DOWN);
-
-	/* this is released in the dev's release function */
-	if (!get_device(&session->dev))
-		goto free_conn;
-
-	dev_set_name(&conn->dev, "connection%d:%u", session->sid, cid);
-	device_initialize(&conn->dev);
-	conn->dev.parent = &session->dev;
-	conn->dev.release = iscsi_conn_release;
-
-	return conn;
-
-free_conn:
-	kfree(conn);
-	return NULL;
-}
-EXPORT_SYMBOL_GPL(iscsi_alloc_conn);
-
-/**
- * iscsi_add_conn - add iscsi class connection
- * @conn: iscsi cls connection
- *
- * This will expose iscsi_cls_conn to sysfs so make sure the related
- * resources for sysfs attributes are initialized before calling this.
- */
-int iscsi_add_conn(struct iscsi_cls_conn *conn)
-{
-	int err;
-	unsigned long flags;
-	struct iscsi_cls_session *session = iscsi_dev_to_session(conn->dev.parent);
-
-	err = device_add(&conn->dev);
-	if (err) {
-		iscsi_cls_session_printk(KERN_ERR, session, "could not "
-					 "register connection's dev\n");
-		return err;
-	}
-	err = transport_register_device(&conn->dev);
-	if (err) {
-		iscsi_cls_session_printk(KERN_ERR, session, "could not "
-					 "register transport's dev\n");
-		device_del(&conn->dev);
-		return err;
-	}
-
-	spin_lock_irqsave(&connlock, flags);
-	list_add(&conn->conn_list, &connlist);
-	spin_unlock_irqrestore(&connlock, flags);
-
-	return 0;
-}
-EXPORT_SYMBOL_GPL(iscsi_add_conn);
-
-/**
- * iscsi_remove_conn - remove iscsi class connection from sysfs
- * @conn: iscsi cls connection
- *
- * Remove iscsi_cls_conn from sysfs, and wait for previous
- * read/write of iscsi_cls_conn's attributes in sysfs to finish.
- */
-void iscsi_remove_conn(struct iscsi_cls_conn *conn)
-{
-	unsigned long flags;
-
-	spin_lock_irqsave(&connlock, flags);
-	list_del(&conn->conn_list);
-	spin_unlock_irqrestore(&connlock, flags);
-
-	transport_unregister_device(&conn->dev);
-	device_del(&conn->dev);
-}
-EXPORT_SYMBOL_GPL(iscsi_remove_conn);
 
 /**
  * iscsi_create_conn - create iscsi class connection
@@ -2509,25 +2253,21 @@ iscsi_create_conn(struct iscsi_cls_session *session, int dd_size, uint32_t cid)
 {
 	struct iscsi_transport *transport = session->transport;
 	struct iscsi_cls_conn *conn;
-	struct iscsi_cls_conn_wrapper *conn_wrapper;
 	unsigned long flags;
 	int err;
 
-	conn_wrapper = kzalloc(sizeof(*conn_wrapper) + dd_size, GFP_KERNEL);
-	if (!conn_wrapper)
+	conn = kzalloc(sizeof(*conn) + dd_size, GFP_KERNEL);
+	if (!conn)
 		return NULL;
-
-	conn = &conn_wrapper->conn;
 	if (dd_size)
-		conn->dd_data = &conn_wrapper[1];
+		conn->dd_data = &conn[1];
 
 	mutex_init(&conn->ep_mutex);
-	spin_lock_init(&conn_wrapper->lock);
 	INIT_LIST_HEAD(&conn->conn_list);
-	INIT_WORK(&conn_wrapper->cleanup_work, iscsi_cleanup_conn_work_fn);
+	INIT_LIST_HEAD(&conn->conn_list_err);
 	conn->transport = transport;
 	conn->cid = cid;
-	WRITE_ONCE(conn->state, ISCSI_CONN_DOWN);
+	conn->state = ISCSI_CONN_DOWN;
 
 	/* this is released in the dev's release function */
 	if (!get_device(&session->dev))
@@ -2581,6 +2321,7 @@ int iscsi_destroy_conn(struct iscsi_cls_conn *conn)
 
 	spin_lock_irqsave(&connlock, flags);
 	list_del(&conn->conn_list);
+	list_del(&conn->conn_list_err);
 	spin_unlock_irqrestore(&connlock, flags);
 
 	transport_unregister_device(&conn->dev);
@@ -2707,6 +2448,77 @@ int iscsi_offload_mesg(struct Scsi_Host *shost,
 }
 EXPORT_SYMBOL_GPL(iscsi_offload_mesg);
 
+/*
+ * This can be called without the rx_queue_mutex, if invoked by the kernel
+ * stop work. But, in that case, it is guaranteed not to race with
+ * iscsi_destroy by conn_mutex.
+ */
+static void iscsi_if_stop_conn(struct iscsi_cls_conn *conn, int flag)
+{
+	/*
+	 * It is important that this path doesn't rely on
+	 * rx_queue_mutex, otherwise, a thread doing allocation on a
+	 * start_session/start_connection could sleep waiting on a
+	 * writeback to a failed iscsi device, that cannot be recovered
+	 * because the lock is held.  If we don't hold it here, the
+	 * kernel stop_conn_work_fn has a chance to stop the broken
+	 * session and resolve the allocation.
+	 *
+	 * Still, the user invoked .stop_conn() needs to be serialized
+	 * with stop_conn_work_fn by a private mutex.  Not pretty, but
+	 * it works.
+	 */
+	mutex_lock(&conn_mutex);
+	switch (flag) {
+	case STOP_CONN_RECOVER:
+		conn->state = ISCSI_CONN_FAILED;
+		break;
+	case STOP_CONN_TERM:
+		conn->state = ISCSI_CONN_DOWN;
+		break;
+	default:
+		iscsi_cls_conn_printk(KERN_ERR, conn,
+				      "invalid stop flag %d\n", flag);
+		goto unlock;
+	}
+
+	conn->transport->stop_conn(conn, flag);
+unlock:
+	mutex_unlock(&conn_mutex);
+}
+
+static void stop_conn_work_fn(struct work_struct *work)
+{
+	struct iscsi_cls_conn *conn, *tmp;
+	unsigned long flags;
+	LIST_HEAD(recovery_list);
+
+	spin_lock_irqsave(&connlock, flags);
+	if (list_empty(&connlist_err)) {
+		spin_unlock_irqrestore(&connlock, flags);
+		return;
+	}
+	list_splice_init(&connlist_err, &recovery_list);
+	spin_unlock_irqrestore(&connlock, flags);
+
+	list_for_each_entry_safe(conn, tmp, &recovery_list, conn_list_err) {
+		uint32_t sid = iscsi_conn_get_sid(conn);
+		struct iscsi_cls_session *session;
+
+		session = iscsi_session_lookup(sid);
+		if (session) {
+			if (system_state != SYSTEM_RUNNING) {
+				session->recovery_tmo = 0;
+				iscsi_if_stop_conn(conn, STOP_CONN_TERM);
+			} else {
+				iscsi_if_stop_conn(conn, STOP_CONN_RECOVER);
+			}
+		}
+
+		list_del_init(&conn->conn_list_err);
+	}
+}
+
 void iscsi_conn_error_event(struct iscsi_cls_conn *conn, enum iscsi_err error)
 {
 	struct nlmsghdr	*nlh;
@@ -2714,33 +2526,12 @@ void iscsi_conn_error_event(struct iscsi_cls_conn *conn, enum iscsi_err error)
 	struct iscsi_uevent *ev;
 	struct iscsi_internal *priv;
 	int len = nlmsg_total_size(sizeof(*ev));
-	struct iscsi_cls_conn_wrapper *conn_wrapper = conn_to_wrapper(conn);
 	unsigned long flags;
-	int state;
 
-	spin_lock_irqsave(&conn_wrapper->lock, flags);
-	/*
-	 * Userspace will only do a stop call if we are at least bound. And, we
-	 * only need to do the in kernel cleanup if in the UP state so cmds can
-	 * be released to upper layers. If in other states just wait for
-	 * userspace to avoid races that can leave the cleanup_work queued.
-	 */
-	state = READ_ONCE(conn->state);
-	switch (state) {
-	case ISCSI_CONN_BOUND:
-	case ISCSI_CONN_UP:
-		if (!test_and_set_bit(ISCSI_CLS_CONN_BIT_CLEANUP,
-				      &conn_wrapper->flags)) {
-			queue_work(iscsi_conn_cleanup_workq,
-				   &conn_wrapper->cleanup_work);
-		}
-		break;
-	default:
-		ISCSI_DBG_TRANS_CONN(conn, "Got conn error in state %d\n",
-				     state);
-		break;
-	}
-	spin_unlock_irqrestore(&conn_wrapper->lock, flags);
+	spin_lock_irqsave(&connlock, flags);
+	list_add(&conn->conn_list_err, &connlist_err);
+	spin_unlock_irqrestore(&connlock, flags);
+	queue_work(system_unbound_wq, &stop_conn_work);
 
 	priv = iscsi_if_transport_lookup(conn->transport);
 	if (!priv)
@@ -3070,19 +2861,26 @@ static int
 iscsi_if_destroy_conn(struct iscsi_transport *transport, struct iscsi_uevent *ev)
 {
 	struct iscsi_cls_conn *conn;
-	struct iscsi_cls_conn_wrapper *conn_wrapper;
+	unsigned long flags;
 
 	conn = iscsi_conn_lookup(ev->u.d_conn.sid, ev->u.d_conn.cid);
 	if (!conn)
 		return -EINVAL;
 
-	conn_wrapper = conn_to_wrapper(conn);
-	ISCSI_DBG_TRANS_CONN(conn, "Flushing cleanup during destruction\n");
-	flush_work(&conn_wrapper->cleanup_work);
+	spin_lock_irqsave(&connlock, flags);
+	if (!list_empty(&conn->conn_list_err)) {
+		spin_unlock_irqrestore(&connlock, flags);
+		return -EAGAIN;
+	}
+	spin_unlock_irqrestore(&connlock, flags);
+
 	ISCSI_DBG_TRANS_CONN(conn, "Destroying transport conn\n");
 
+	mutex_lock(&conn_mutex);
 	if (transport->destroy_conn)
 		transport->destroy_conn(conn);
+	mutex_unlock(&conn_mutex);
+
 	return 0;
 }
 
@@ -3092,7 +2890,7 @@ iscsi_set_param(struct iscsi_transport *transport, struct iscsi_uevent *ev)
 	char *data = (char*)ev + sizeof(*ev);
 	struct iscsi_cls_conn *conn;
 	struct iscsi_cls_session *session;
-	int err = 0, value = 0, state;
+	int err = 0, value = 0;
 
 	if (ev->u.set_param.len > PAGE_SIZE)
 		return -EINVAL;
@@ -3109,8 +2907,10 @@ iscsi_set_param(struct iscsi_transport *transport, struct iscsi_uevent *ev)
 			session->recovery_tmo = value;
 		break;
 	default:
-		state = READ_ONCE(conn->state);
-		if (state == ISCSI_CONN_BOUND || state == ISCSI_CONN_UP) {
+		err = transport->set_param(conn, ev->u.set_param.param,
+					   data, ev->u.set_param.len);
+		if ((conn->state == ISCSI_CONN_BOUND) ||
+			(conn->state == ISCSI_CONN_UP)) {
 			err = transport->set_param(conn, ev->u.set_param.param,
 					data, ev->u.set_param.len);
 		} else {
@@ -3170,22 +2970,15 @@ static int iscsi_if_ep_disconnect(struct iscsi_transport *transport,
 	ep = iscsi_lookup_endpoint(ep_handle);
 	if (!ep)
 		return -EINVAL;
-
 	conn = ep->conn;
-	if (!conn) {
-		/*
-		 * conn was not even bound yet, so we can't get iscsi conn
-		 * failures yet.
-		 */
-		transport->ep_disconnect(ep);
-		goto put_ep;
+	if (conn) {
+		mutex_lock(&conn->ep_mutex);
+		conn->ep = NULL;
+		mutex_unlock(&conn->ep_mutex);
+		conn->state = ISCSI_CONN_FAILED;
 	}
 
-	mutex_lock(&conn->ep_mutex);
-	iscsi_if_disconnect_bound_ep(conn, ep, false);
-	mutex_unlock(&conn->ep_mutex);
-put_ep:
-	iscsi_put_endpoint(ep);
+	transport->ep_disconnect(ep);
 	return 0;
 }
 
@@ -3211,7 +3004,6 @@ iscsi_if_transport_ep(struct iscsi_transport *transport,
 
 		ev->r.retcode = transport->ep_poll(ep,
 						   ev->u.ep_poll.timeout_ms);
-		iscsi_put_endpoint(ep);
 		break;
 	case ISCSI_UEVENT_TRANSPORT_EP_DISCONNECT:
 		rc = iscsi_if_ep_disconnect(transport,
@@ -3228,19 +3020,10 @@ iscsi_tgt_dscvr(struct iscsi_transport *transport,
 	struct Scsi_Host *shost;
 	struct sockaddr *dst_addr;
 	int err;
-	int (*tgt_dscvr)(struct Scsi_Host *shost, enum iscsi_tgt_dscvr type,
-			  uint32_t enable, struct sockaddr *dst_addr);
 
-	if (transport->caps & CAP_OPS_EXPAND) {
-		if (!transport->ops_expand || !transport->ops_expand->tgt_dscvr)
-			return -EINVAL;
-		tgt_dscvr = transport->ops_expand->tgt_dscvr;
-	} else {
-		if (!transport->ops_expand)
-			return -EINVAL;
-		tgt_dscvr = (int (*)(struct Scsi_Host *, enum iscsi_tgt_dscvr, uint32_t,
-			     struct sockaddr *))(transport->ops_expand);
-	}
+	if (!transport->tgt_dscvr)
+		return -EINVAL;
+
 	shost = scsi_host_lookup(ev->u.tgt_dscvr.host_no);
 	if (!shost) {
 		printk(KERN_ERR "target discovery could not find host no %u\n",
@@ -3250,8 +3033,8 @@ iscsi_tgt_dscvr(struct iscsi_transport *transport,
 
 
 	dst_addr = (struct sockaddr *)((char*)ev + sizeof(*ev));
-	err = tgt_dscvr(shost, ev->u.tgt_dscvr.type,
-			ev->u.tgt_dscvr.enable, dst_addr);
+	err = transport->tgt_dscvr(shost, ev->u.tgt_dscvr.type,
+				   ev->u.tgt_dscvr.enable, dst_addr);
 	scsi_host_put(shost);
 	return err;
 }
@@ -3851,125 +3634,18 @@ exit_host_stats:
 	return err;
 }
 
-static int iscsi_if_transport_conn(struct iscsi_transport *transport,
-				   struct nlmsghdr *nlh)
-{
-	struct iscsi_uevent *ev = nlmsg_data(nlh);
-	struct iscsi_cls_session *session;
-	struct iscsi_cls_conn *conn = NULL;
-	struct iscsi_cls_conn_wrapper *conn_wrapper;
-	struct iscsi_endpoint *ep;
-	uint32_t pdu_len;
-	int err = 0;
-
-	switch (nlh->nlmsg_type) {
-	case ISCSI_UEVENT_CREATE_CONN:
-		return iscsi_if_create_conn(transport, ev);
-	case ISCSI_UEVENT_DESTROY_CONN:
-		return iscsi_if_destroy_conn(transport, ev);
-	case ISCSI_UEVENT_STOP_CONN:
-		return iscsi_if_stop_conn(transport, ev);
-	}
-
-	/*
-	 * The following cmds need to be run under the ep_mutex so in kernel
-	 * conn cleanup (ep_disconnect + unbind and conn) is not done while
-	 * these are running. They also must not run if we have just run a conn
-	 * cleanup because they would set the state in a way that might allow
-	 * IO or send IO themselves.
-	 */
-	switch (nlh->nlmsg_type) {
-	case ISCSI_UEVENT_START_CONN:
-		conn = iscsi_conn_lookup(ev->u.start_conn.sid,
-					 ev->u.start_conn.cid);
-		break;
-	case ISCSI_UEVENT_BIND_CONN:
-		conn = iscsi_conn_lookup(ev->u.b_conn.sid, ev->u.b_conn.cid);
-		break;
-	case ISCSI_UEVENT_SEND_PDU:
-		conn = iscsi_conn_lookup(ev->u.send_pdu.sid, ev->u.send_pdu.cid);
-		break;
-	}
-
-	if (!conn)
-		return -EINVAL;
-
-	conn_wrapper = conn_to_wrapper(conn);
-	mutex_lock(&conn->ep_mutex);
-	spin_lock_irq(&conn_wrapper->lock);
-	if (test_bit(ISCSI_CLS_CONN_BIT_CLEANUP, &conn_wrapper->flags)) {
-		spin_unlock_irq(&conn_wrapper->lock);
-		mutex_unlock(&conn->ep_mutex);
-		ev->r.retcode = -ENOTCONN;
-		return 0;
-	}
-	spin_unlock_irq(&conn_wrapper->lock);
-
-	switch (nlh->nlmsg_type) {
-	case ISCSI_UEVENT_BIND_CONN:
-		session = iscsi_session_lookup(ev->u.b_conn.sid);
-		if (!session) {
-			err = -EINVAL;
-			break;
-		}
-
-		ev->r.retcode =	transport->bind_conn(session, conn,
-						ev->u.b_conn.transport_eph,
-						ev->u.b_conn.is_leading);
-		if (!ev->r.retcode)
-			WRITE_ONCE(conn->state, ISCSI_CONN_BOUND);
-
-		if (ev->r.retcode || !transport->ep_connect)
-			break;
-
-		ep = iscsi_lookup_endpoint(ev->u.b_conn.transport_eph);
-		if (ep) {
-			ep->conn = conn;
-			conn->ep = ep;
-			iscsi_put_endpoint(ep);
-		} else {
-			err = -ENOTCONN;
-			iscsi_cls_conn_printk(KERN_ERR, conn,
-					      "Could not set ep conn binding\n");
-		}
-		break;
-	case ISCSI_UEVENT_START_CONN:
-		ev->r.retcode = transport->start_conn(conn);
-		if (!ev->r.retcode)
-			WRITE_ONCE(conn->state, ISCSI_CONN_UP);
-
-		break;
-	case ISCSI_UEVENT_SEND_PDU:
-		pdu_len = nlh->nlmsg_len - sizeof(*nlh) - sizeof(*ev);
-
-		if ((ev->u.send_pdu.hdr_size > pdu_len) ||
-		    (ev->u.send_pdu.data_size > (pdu_len - ev->u.send_pdu.hdr_size))) {
-			err = -EINVAL;
-			break;
-		}
-
-		ev->r.retcode =	transport->send_pdu(conn,
-				(struct iscsi_hdr *)((char *)ev + sizeof(*ev)),
-				(char *)ev + sizeof(*ev) + ev->u.send_pdu.hdr_size,
-				ev->u.send_pdu.data_size);
-		break;
-	default:
-		err = -ENOSYS;
-	}
-
-	mutex_unlock(&conn->ep_mutex);
-	return err;
-}
 
 static int
 iscsi_if_recv_msg(struct sk_buff *skb, struct nlmsghdr *nlh, uint32_t *group)
 {
 	int err = 0;
 	u32 portid;
+	u32 pdu_len;
 	struct iscsi_uevent *ev = nlmsg_data(nlh);
 	struct iscsi_transport *transport = NULL;
 	struct iscsi_internal *priv;
 	struct iscsi_cls_session *session;
+	struct iscsi_cls_conn *conn;
 	struct iscsi_endpoint *ep = NULL;
 
 	if (!netlink_capable(skb, CAP_SYS_ADMIN))
@@ -4010,7 +3686,6 @@ iscsi_if_recv_msg(struct sk_buff *skb, struct nlmsghdr *nlh, uint32_t *group)
 					ev->u.c_bound_session.initial_cmdsn,
 					ev->u.c_bound_session.cmds_max,
 					ev->u.c_bound_session.queue_depth);
-		iscsi_put_endpoint(ep);
 		break;
 	case ISCSI_UEVENT_DESTROY_SESSION:
 		session = iscsi_session_lookup(ev->u.d_session.sid);
@@ -4035,7 +3710,7 @@ iscsi_if_recv_msg(struct sk_buff *skb, struct nlmsghdr *nlh, uint32_t *group)
 			list_del_init(&session->sess_list);
 			spin_unlock_irqrestore(&sesslock, flags);
 
-			queue_work(system_unbound_wq, &session->destroy_work);
+			queue_work(iscsi_destroy_workq, &session->destroy_work);
 		}
 		break;
 	case ISCSI_UEVENT_UNBIND_SESSION:
@@ -4046,16 +3721,89 @@ iscsi_if_recv_msg(struct sk_buff *skb, struct nlmsghdr *nlh, uint32_t *group)
 		else
 			err = -EINVAL;
 		break;
+	case ISCSI_UEVENT_CREATE_CONN:
+		err = iscsi_if_create_conn(transport, ev);
+		break;
+	case ISCSI_UEVENT_DESTROY_CONN:
+		err = iscsi_if_destroy_conn(transport, ev);
+		break;
+	case ISCSI_UEVENT_BIND_CONN:
+		session = iscsi_session_lookup(ev->u.b_conn.sid);
+		conn = iscsi_conn_lookup(ev->u.b_conn.sid, ev->u.b_conn.cid);
+
+		if (conn && conn->ep)
+			iscsi_if_ep_disconnect(transport, conn->ep->id);
+
+		if (!session || !conn) {
+			err = -EINVAL;
+			break;
+		}
+
+		mutex_lock(&conn_mutex);
+		ev->r.retcode =	transport->bind_conn(session, conn,
+						ev->u.b_conn.transport_eph,
+						ev->u.b_conn.is_leading);
+		if (!ev->r.retcode)
+			conn->state = ISCSI_CONN_BOUND;
+		mutex_unlock(&conn_mutex);
+
+		if (ev->r.retcode || !transport->ep_connect)
+			break;
+
+		ep = iscsi_lookup_endpoint(ev->u.b_conn.transport_eph);
+		if (ep) {
+			ep->conn = conn;
+
+			mutex_lock(&conn->ep_mutex);
+			conn->ep = ep;
+			mutex_unlock(&conn->ep_mutex);
+		} else
+			iscsi_cls_conn_printk(KERN_ERR, conn,
+					      "Could not set ep conn "
+					      "binding\n");
+		break;
 	case ISCSI_UEVENT_SET_PARAM:
 		err = iscsi_set_param(transport, ev);
 		break;
-	case ISCSI_UEVENT_CREATE_CONN:
-	case ISCSI_UEVENT_DESTROY_CONN:
-	case ISCSI_UEVENT_STOP_CONN:
 	case ISCSI_UEVENT_START_CONN:
-	case ISCSI_UEVENT_BIND_CONN:
+		conn = iscsi_conn_lookup(ev->u.start_conn.sid, ev->u.start_conn.cid);
+		if (conn) {
+			mutex_lock(&conn_mutex);
+			ev->r.retcode = transport->start_conn(conn);
+			if (!ev->r.retcode)
+				conn->state = ISCSI_CONN_UP;
+			mutex_unlock(&conn_mutex);
+		}
+		else
+			err = -EINVAL;
+		break;
+	case ISCSI_UEVENT_STOP_CONN:
+		conn = iscsi_conn_lookup(ev->u.stop_conn.sid, ev->u.stop_conn.cid);
+		if (conn)
+			iscsi_if_stop_conn(conn, ev->u.stop_conn.flag);
+		else
+			err = -EINVAL;
+		break;
 	case ISCSI_UEVENT_SEND_PDU:
-		err = iscsi_if_transport_conn(transport, nlh);
+		pdu_len = nlh->nlmsg_len - sizeof(*nlh) - sizeof(*ev);
+
+		if ((ev->u.send_pdu.hdr_size > pdu_len) ||
+		    (ev->u.send_pdu.data_size > (pdu_len - ev->u.send_pdu.hdr_size))) {
+			err = -EINVAL;
+			break;
+		}
+
+		conn = iscsi_conn_lookup(ev->u.send_pdu.sid, ev->u.send_pdu.cid);
+		if (conn) {
+			mutex_lock(&conn_mutex);
+			ev->r.retcode =	transport->send_pdu(conn,
+				(struct iscsi_hdr*)((char*)ev + sizeof(*ev)),
+				(char*)ev + sizeof(*ev) + ev->u.send_pdu.hdr_size,
+				ev->u.send_pdu.data_size);
+			mutex_unlock(&conn_mutex);
+		}
+		else
+			err = -EINVAL;
 		break;
 	case ISCSI_UEVENT_GET_STATS:
 		err = iscsi_if_get_stats(transport, nlh);
@@ -4245,11 +3993,10 @@ static ssize_t show_conn_state(struct device *dev,
 {
 	struct iscsi_cls_conn *conn = iscsi_dev_to_conn(dev->parent);
 	const char *state = "unknown";
-	int conn_state = READ_ONCE(conn->state);
 
-	if (conn_state >= 0 &&
-	    conn_state < ARRAY_SIZE(connection_state_names))
-		state = connection_state_names[conn_state];
+	if (conn->state >= 0 &&
+	    conn->state < ARRAY_SIZE(connection_state_names))
+		state = connection_state_names[conn->state];
 
 	return sysfs_emit(buf, "%s\n", state);
 }
@@ -4904,10 +4651,7 @@ iscsi_register_transport(struct iscsi_transport *tt)
 	int err;
 
 	BUG_ON(!tt);
-	if (tt->caps & CAP_OPS_EXPAND) {
-		BUG_ON(!tt->ops_expand);
-		WARN_ON(tt->ep_disconnect && !tt->ops_expand->unbind_conn);
-	}
+
 	priv = iscsi_if_transport_lookup(tt);
 	if (priv)
 		return NULL;
@@ -5061,10 +4805,10 @@ static __init int iscsi_transport_init(void)
 		goto release_nls;
 	}
 
-	iscsi_conn_cleanup_workq = alloc_workqueue("%s",
-			WQ_SYSFS | WQ_MEM_RECLAIM | WQ_UNBOUND, 0,
-			"iscsi_conn_cleanup");
-	if (!iscsi_conn_cleanup_workq) {
+	iscsi_destroy_workq = alloc_workqueue("%s",
+			WQ_SYSFS | __WQ_LEGACY | WQ_MEM_RECLAIM | WQ_UNBOUND,
+			1, "iscsi_destroy");
+	if (!iscsi_destroy_workq) {
 		err = -ENOMEM;
 		goto destroy_wq;
 	}
@@ -5094,7 +4838,7 @@ unregister_transport_class:
 
 static void __exit iscsi_transport_exit(void)
 {
-	destroy_workqueue(iscsi_conn_cleanup_workq);
+	destroy_workqueue(iscsi_destroy_workq);
 	destroy_workqueue(iscsi_eh_timer_workq);
 	netlink_kernel_release(nls);
 	bus_unregister(&iscsi_flashnode_bus);

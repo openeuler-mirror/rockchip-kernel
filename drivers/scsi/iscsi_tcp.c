@@ -127,7 +127,6 @@ static void iscsi_sw_tcp_data_ready(struct sock *sk)
 	struct iscsi_conn *conn;
 	struct iscsi_tcp_conn *tcp_conn;
 	read_descriptor_t rd_desc;
-	int current_cpu;
 
 	read_lock_bh(&sk->sk_callback_lock);
 	conn = sk->sk_user_data;
@@ -136,13 +135,6 @@ static void iscsi_sw_tcp_data_ready(struct sock *sk)
 		return;
 	}
 	tcp_conn = conn->dd_data;
-
-	/* save intimate cpu when in softirq */
-	if (!sock_owned_by_user_nocheck(sk)) {
-		current_cpu = smp_processor_id();
-		if (conn->intimate_cpu != current_cpu)
-			conn->intimate_cpu = current_cpu;
-	}
 
 	/*
 	 * Use rd_desc to pass 'conn' to iscsi_tcp_recv.
@@ -855,7 +847,6 @@ iscsi_sw_tcp_session_create(struct iscsi_endpoint *ep, uint16_t cmds_max,
 	struct iscsi_session *session;
 	struct iscsi_sw_tcp_host *tcp_sw_host;
 	struct Scsi_Host *shost;
-	int rc;
 
 	if (ep) {
 		printk(KERN_ERR "iscsi_tcp: invalid ep %p.\n", ep);
@@ -873,11 +864,6 @@ iscsi_sw_tcp_session_create(struct iscsi_endpoint *ep, uint16_t cmds_max,
 	shost->max_channel = 0;
 	shost->max_cmd_len = SCSI_MAX_VARLEN_CDB_SIZE;
 
-	rc = iscsi_host_get_max_scsi_cmds(shost, cmds_max);
-	if (rc < 0)
-		goto free_host;
-	shost->can_queue = rc;
-
 	if (iscsi_host_add(shost, NULL))
 		goto free_host;
 
@@ -892,6 +878,7 @@ iscsi_sw_tcp_session_create(struct iscsi_endpoint *ep, uint16_t cmds_max,
 	tcp_sw_host = iscsi_host_priv(shost);
 	tcp_sw_host->session = session;
 
+	shost->can_queue = session->scsi_cmds_max;
 	if (iscsi_tcp_r2tpool_alloc(session))
 		goto remove_session;
 	return cls_session;
@@ -994,7 +981,7 @@ static struct scsi_host_template iscsi_sw_tcp_sht = {
 	.name			= "iSCSI Initiator over TCP/IP",
 	.queuecommand           = iscsi_queuecommand,
 	.change_queue_depth	= scsi_change_queue_depth,
-	.can_queue		= ISCSI_TOTAL_CMDS_MAX,
+	.can_queue		= ISCSI_DEF_XMIT_CMDS_MAX - 1,
 	.sg_tablesize		= 4096,
 	.max_sectors		= 0xFFFF,
 	.cmd_per_lun		= ISCSI_DEF_CMD_PER_LUN,

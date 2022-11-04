@@ -1832,10 +1832,9 @@ mpt3sas_base_sync_reply_irqs(struct MPT3SAS_ADAPTER *ioc, u8 poll)
 				enable_irq(reply_q->os_irq);
 			}
 		}
-
-		if (poll)
-			_base_process_reply_queue(reply_q);
 	}
+	if (poll)
+		_base_process_reply_queue(reply_q);
 }
 
 /**
@@ -2900,13 +2899,13 @@ _base_check_enable_msix(struct MPT3SAS_ADAPTER *ioc)
 }
 
 /**
- * mpt3sas_base_free_irq - free irq
+ * _base_free_irq - free irq
  * @ioc: per adapter object
  *
  * Freeing respective reply_queue from the list.
  */
-void
-mpt3sas_base_free_irq(struct MPT3SAS_ADAPTER *ioc)
+static void
+_base_free_irq(struct MPT3SAS_ADAPTER *ioc)
 {
 	struct adapter_reply_queue *reply_q, *next;
 
@@ -3108,12 +3107,12 @@ _base_check_and_enable_high_iops_queues(struct MPT3SAS_ADAPTER *ioc,
 }
 
 /**
- * mpt3sas_base_disable_msix - disables msix
+ * _base_disable_msix - disables msix
  * @ioc: per adapter object
  *
  */
-void
-mpt3sas_base_disable_msix(struct MPT3SAS_ADAPTER *ioc)
+static void
+_base_disable_msix(struct MPT3SAS_ADAPTER *ioc)
 {
 	if (!ioc->msix_enable)
 		return;
@@ -3221,8 +3220,8 @@ _base_enable_msix(struct MPT3SAS_ADAPTER *ioc)
 	for (i = 0; i < ioc->reply_queue_count; i++) {
 		r = _base_request_irq(ioc, i);
 		if (r) {
-			mpt3sas_base_free_irq(ioc);
-			mpt3sas_base_disable_msix(ioc);
+			_base_free_irq(ioc);
+			_base_disable_msix(ioc);
 			goto try_ioapic;
 		}
 	}
@@ -3259,8 +3258,8 @@ mpt3sas_base_unmap_resources(struct MPT3SAS_ADAPTER *ioc)
 
 	dexitprintk(ioc, ioc_info(ioc, "%s\n", __func__));
 
-	mpt3sas_base_free_irq(ioc);
-	mpt3sas_base_disable_msix(ioc);
+	_base_free_irq(ioc);
+	_base_disable_msix(ioc);
 
 	kfree(ioc->replyPostRegisterIndex);
 	ioc->replyPostRegisterIndex = NULL;
@@ -6908,14 +6907,14 @@ _base_diag_reset(struct MPT3SAS_ADAPTER *ioc)
 }
 
 /**
- * mpt3sas_base_make_ioc_ready - put controller in READY state
+ * _base_make_ioc_ready - put controller in READY state
  * @ioc: per adapter object
  * @type: FORCE_BIG_HAMMER or SOFT_RESET
  *
  * Return: 0 for success, non-zero for failure.
  */
-int
-mpt3sas_base_make_ioc_ready(struct MPT3SAS_ADAPTER *ioc, enum reset_type type)
+static int
+_base_make_ioc_ready(struct MPT3SAS_ADAPTER *ioc, enum reset_type type)
 {
 	u32 ioc_state;
 	int rc;
@@ -7189,7 +7188,7 @@ mpt3sas_base_free_resources(struct MPT3SAS_ADAPTER *ioc)
 	if (ioc->chip_phys && ioc->chip) {
 		mpt3sas_base_mask_interrupts(ioc);
 		ioc->shost_recovery = 1;
-		mpt3sas_base_make_ioc_ready(ioc, SOFT_RESET);
+		_base_make_ioc_ready(ioc, SOFT_RESET);
 		ioc->shost_recovery = 0;
 	}
 
@@ -7308,7 +7307,7 @@ mpt3sas_base_attach(struct MPT3SAS_ADAPTER *ioc)
 	ioc->build_sg_mpi = &_base_build_sg;
 	ioc->build_zero_len_sge_mpi = &_base_build_zero_len_sge;
 
-	r = mpt3sas_base_make_ioc_ready(ioc, SOFT_RESET);
+	r = _base_make_ioc_ready(ioc, SOFT_RESET);
 	if (r)
 		goto out_free_resources;
 
@@ -7758,7 +7757,7 @@ mpt3sas_base_hard_reset_handler(struct MPT3SAS_ADAPTER *ioc,
 	_base_pre_reset_handler(ioc);
 	mpt3sas_wait_for_commands_to_complete(ioc);
 	mpt3sas_base_mask_interrupts(ioc);
-	r = mpt3sas_base_make_ioc_ready(ioc, type);
+	r = _base_make_ioc_ready(ioc, type);
 	if (r)
 		goto out;
 	_base_clear_outstanding_commands(ioc);

@@ -3675,7 +3675,7 @@ _scsih_ublock_io_device(struct MPT3SAS_ADAPTER *ioc, u64 sas_address)
 
 	shost_for_each_device(sdev, ioc->shost) {
 		sas_device_priv_data = sdev->hostdata;
-		if (!sas_device_priv_data || !sas_device_priv_data->sas_target)
+		if (!sas_device_priv_data)
 			continue;
 		if (sas_device_priv_data->sas_target->sas_address
 		    != sas_address)
@@ -10275,13 +10275,7 @@ scsih_shutdown(struct pci_dev *pdev)
 
 	_scsih_ir_shutdown(ioc);
 	_scsih_nvme_shutdown(ioc);
-	mpt3sas_base_mask_interrupts(ioc);
-	mpt3sas_base_stop_watchdog(ioc);
-	ioc->shost_recovery = 1;
-	mpt3sas_base_make_ioc_ready(ioc, SOFT_RESET);
-	ioc->shost_recovery = 0;
-	mpt3sas_base_free_irq(ioc);
-	mpt3sas_base_disable_msix(ioc);
+	mpt3sas_base_detach(ioc);
 }
 
 

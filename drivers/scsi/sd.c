@@ -1673,7 +1673,7 @@ static unsigned int sd_check_events(struct gendisk *disk, unsigned int clearing)
 					      &sshdr);
 
 		/* failed to execute TUR, assume media not present */
-		if (retval < 0 || host_byte(retval)) {
+		if (host_byte(retval)) {
 			set_media_not_present(sdkp);
 			goto out;
 		}
@@ -1733,9 +1733,6 @@ static int sd_sync_cache(struct scsi_disk *sdkp, struct scsi_sense_hdr *sshdr)
 
 	if (res) {
 		sd_print_result(sdkp, "Synchronize Cache(10) failed", res);
-
-		if (res < 0)
-			return res;
 
 		if (driver_byte(res) == DRIVER_SENSE)
 			sd_print_sense_hdr(sdkp, sshdr);
@@ -1845,7 +1842,7 @@ static int sd_pr_command(struct block_device *bdev, u8 sa,
 	result = scsi_execute_req(sdev, cmd, DMA_TO_DEVICE, &data, sizeof(data),
 			&sshdr, SD_TIMEOUT, sdkp->max_retries, NULL);
 
-	if (result > 0 && driver_byte(result) == DRIVER_SENSE &&
+	if (driver_byte(result) == DRIVER_SENSE &&
 	    scsi_sense_valid(&sshdr)) {
 		sdev_printk(KERN_INFO, sdev, "PR command failed: %d\n", result);
 		scsi_print_sense_hdr(sdev, NULL, &sshdr);
@@ -2197,7 +2194,7 @@ sd_spinup_disk(struct scsi_disk *sdkp)
 			  ((driver_byte(the_result) == DRIVER_SENSE) &&
 			  sense_valid && sshdr.sense_key == UNIT_ATTENTION)));
 
-		if (the_result < 0 || driver_byte(the_result) != DRIVER_SENSE) {
+		if (driver_byte(the_result) != DRIVER_SENSE) {
 			/* no sense, TUR either succeeded or failed
 			 * with a status error */
 			if(!spintime && !scsi_status_is_good(the_result)) {
@@ -2382,7 +2379,7 @@ static int read_capacity_16(struct scsi_disk *sdkp, struct scsi_device *sdp,
 		if (media_not_present(sdkp, &sshdr))
 			return -ENODEV;
 
-		if (the_result > 0) {
+		if (the_result) {
 			sense_valid = scsi_sense_valid(&sshdr);
 			if (sense_valid &&
 			    sshdr.sense_key == ILLEGAL_REQUEST &&
@@ -2467,7 +2464,7 @@ static int read_capacity_10(struct scsi_disk *sdkp, struct scsi_device *sdp,
 		if (media_not_present(sdkp, &sshdr))
 			return -ENODEV;
 
-		if (the_result > 0) {
+		if (the_result) {
 			sense_valid = scsi_sense_valid(&sshdr);
 			if (sense_valid &&
 			    sshdr.sense_key == UNIT_ATTENTION &&
@@ -3446,17 +3443,17 @@ static int sd_probe(struct device *dev)
 	}
 
 	device_initialize(&sdkp->dev);
-	sdkp->dev.parent = get_device(dev);
+	sdkp->dev.parent = dev;
 	sdkp->dev.class = &sd_disk_class;
 	dev_set_name(&sdkp->dev, "%s", dev_name(dev));
 
 	error = device_add(&sdkp->dev);
-	if (error) {
-		put_device(&sdkp->dev);
-		goto out;
-	}
+	if (error)
+		goto out_free_index;
 
+	get_device(dev);
 	dev_set_drvdata(dev, sdkp);
+	device_init_wakeup(dev, true);
 
 	gd->major = sd_major((index & 0xf0) >> 4);
 	gd->first_minor = ((index & 0xf) << 4) | (index & 0xfff00);
@@ -3492,7 +3489,6 @@ static int sd_probe(struct device *dev)
 			sdp->host->hostt->rpm_autosuspend_delay);
 	}
 	device_add_disk(dev, gd, NULL);
-	blk_delete_region(disk_devt(sdkp->disk), SD_MINORS, sd_default_probe);
 	if (sdkp->capacity)
 		sd_dif_config_host(sdkp);
 
@@ -3617,7 +3613,7 @@ static int sd_start_stop_device(struct scsi_disk *sdkp, int start)
 			SD_TIMEOUT, sdkp->max_retries, 0, RQF_PM, NULL);
 	if (res) {
 		sd_print_result(sdkp, "Start/Stop Unit failed", res);
-		if (res > 0 && driver_byte(res) == DRIVER_SENSE)
+		if (driver_byte(res) == DRIVER_SENSE)
 			sd_print_sense_hdr(sdkp, &sshdr);
 		if (scsi_sense_valid(&sshdr) &&
 			/* 0x3a is medium not present */
@@ -3721,10 +3717,16 @@ static int sd_resume(struct device *dev)
 	if (!sdkp->device->manage_start_stop)
 		return 0;
 
+	/* The wake-up process cannot allow the PM to enter sleep */
+	pm_stay_awake(dev);
+
 	sd_printk(KERN_NOTICE, sdkp, "Starting disk\n");
 	ret = sd_start_stop_device(sdkp, 1);
 	if (!ret)
 		opal_unlock_from_suspend(sdkp->opal_dev);
+
+	pm_relax(dev);
+
 	return ret;
 }
 

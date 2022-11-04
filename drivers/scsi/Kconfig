@@ -484,7 +484,6 @@ source "drivers/scsi/megaraid/Kconfig.megaraid"
 source "drivers/scsi/mpt3sas/Kconfig"
 source "drivers/scsi/smartpqi/Kconfig"
 source "drivers/scsi/ufs/Kconfig"
-source "drivers/scsi/spraid/Kconfig"
 
 config SCSI_HPTIOP
 	tristate "HighPoint RocketRAID 3xxx/4xxx Controller support"
@@ -1151,7 +1150,6 @@ source "drivers/scsi/qla2xxx/Kconfig"
 source "drivers/scsi/qla4xxx/Kconfig"
 source "drivers/scsi/qedi/Kconfig"
 source "drivers/scsi/qedf/Kconfig"
-source "drivers/scsi/huawei/Kconfig"
 
 config SCSI_LPFC
 	tristate "Emulex LightPulse Fibre Channel Support"
