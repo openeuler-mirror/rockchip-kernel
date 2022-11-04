@@ -8,7 +8,6 @@
 #ifndef _CRYPTO_AKCIPHER_H
 #define _CRYPTO_AKCIPHER_H
 #include <linux/crypto.h>
-#include <linux/kabi.h>
 
 /**
  * struct akcipher_request - public key request
@@ -102,7 +101,6 @@ struct akcipher_alg {
 	unsigned int (*max_size)(struct crypto_akcipher *tfm);
 	int (*init)(struct crypto_akcipher *tfm);
 	void (*exit)(struct crypto_akcipher *tfm);
-	KABI_RESERVE(1)
 
 	unsigned int reqsize;
 	struct crypto_alg base;
