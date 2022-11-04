@@ -18,16 +18,10 @@
 #include <linux/klist.h>
 #include <linux/pm.h>
 #include <linux/device/bus.h>
-#include <linux/kabi.h>
+#include <linux/android_kabi.h>
 
 struct device;
 struct fwnode_handle;
-
-/**
- * struct class_resvd - KABI extension struct
- */
-struct class_resvd {
-};
 
 /**
  * struct class - device classes
@@ -83,11 +77,10 @@ struct class {
 
 	struct subsys_private *p;
 
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
-	KABI_RESERVE(3)
-	KABI_RESERVE(4)
-	KABI_AUX_PTR(class)
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
+	ANDROID_KABI_RESERVE(3);
+	ANDROID_KABI_RESERVE(4);
 };
 
 struct class_dev_iter {
