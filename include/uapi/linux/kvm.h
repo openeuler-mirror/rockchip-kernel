@@ -250,7 +250,6 @@ struct kvm_hyperv_exit {
 #define KVM_EXIT_ARM_NISV         28
 #define KVM_EXIT_X86_RDMSR        29
 #define KVM_EXIT_X86_WRMSR        30
-#define KVM_EXIT_RISCV_SBI        31
 
 /* For KVM_EXIT_INTERNAL_ERROR */
 /* Emulate instruction failed. */
@@ -427,13 +426,6 @@ struct kvm_run {
 			__u32 index; /* kernel -> user */
 			__u64 data; /* kernel <-> user */
 		} msr;
-		/* KVM_EXIT_RISCV_SBI */
-		struct {
-			unsigned long extension_id;
-			unsigned long function_id;
-			unsigned long args[6];
-			unsigned long ret[2];
-		} riscv_sbi;
 		/* Fix the size of the union. */
 		char padding[256];
 	};
@@ -1062,8 +1054,6 @@ struct kvm_ppc_resize_hpt {
 #define KVM_CAP_X86_MSR_FILTER 189
 #define KVM_CAP_ENFORCE_PV_FEATURE_CPUID 190
 
-#define KVM_CAP_ARM_CPU_FEATURE 555
-
 #ifdef KVM_CAP_IRQ_ROUTING
 
 struct kvm_irq_routing_irqchip {
@@ -1300,17 +1290,6 @@ struct kvm_vfio_spapr_tce {
 	__s32	tablefd;
 };
 
-#define ID_REG_MAX_NUMS 64
-struct id_reg_info {
-	__u64 sys_id;
-	__u64 sys_val;
-};
-
-struct id_registers {
-	struct id_reg_info regs[ID_REG_MAX_NUMS];
-	__u64 num;
-};
-
 /*
  * ioctls for VM fds
  */
@@ -1414,11 +1393,6 @@ struct kvm_s390_ucas_mapping {
 /* Available with KVM_CAP_PMU_EVENT_FILTER */
 #define KVM_SET_PMU_EVENT_FILTER  _IOW(KVMIO,  0xb2, struct kvm_pmu_event_filter)
 #define KVM_PPC_SVM_OFF		  _IO(KVMIO,  0xb3)
-
-/* ioctl for SW vcpu init */
-#define KVM_SW64_VCPU_INIT	  _IO(KVMIO,  0xba)
-#define KVM_SW64_GET_VCB          _IO(KVMIO,  0xbc)
-#define KVM_SW64_SET_VCB          _IO(KVMIO,  0xbd)
 
 /* ioctl for vm fd */
 #define KVM_CREATE_DEVICE	  _IOWR(KVMIO,  0xe0, struct kvm_create_device)
