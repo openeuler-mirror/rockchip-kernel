@@ -12,7 +12,6 @@
 #include <rdma/ib_addr.h>
 #include <rdma/ib_sa.h>
 #include <uapi/rdma/rdma_user_cm.h>
-#include <linux/kabi.h>
 
 /*
  * Upon receiving a device removal event, users must destroy the associated
@@ -68,9 +67,6 @@ struct rdma_conn_param {
 	u8 srq;
 	u32 qp_num;
 	u32 qkey;
-
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
 };
 
 struct rdma_ud_param {
@@ -89,8 +85,6 @@ struct rdma_cm_event {
 		struct rdma_ud_param	ud;
 	} param;
 	struct rdma_ucm_ece ece;
-
-	KABI_RESERVE(1)
 };
 
 struct rdma_cm_id;
@@ -114,8 +108,6 @@ struct rdma_cm_id {
 	enum rdma_ucm_port_space ps;
 	enum ib_qp_type		 qp_type;
 	u8			 port_num;
-
-	KABI_RESERVE(1)
 };
 
 struct rdma_cm_id *
