@@ -170,8 +170,8 @@ static int padzero(unsigned long elf_bss)
 
 static int
 create_elf_tables(struct linux_binprm *bprm, const struct elfhdr *exec,
-		unsigned long interp_load_addr,
-		unsigned long e_entry, unsigned long phdr_addr)
+		unsigned long load_addr, unsigned long interp_load_addr,
+		unsigned long e_entry)
 {
 	struct mm_struct *mm = current->mm;
 	unsigned long p = bprm->p;
@@ -256,7 +256,7 @@ create_elf_tables(struct linux_binprm *bprm, const struct elfhdr *exec,
 	NEW_AUX_ENT(AT_HWCAP, ELF_HWCAP);
 	NEW_AUX_ENT(AT_PAGESZ, ELF_EXEC_PAGESIZE);
 	NEW_AUX_ENT(AT_CLKTCK, CLOCKS_PER_SEC);
-	NEW_AUX_ENT(AT_PHDR, phdr_addr);
+	NEW_AUX_ENT(AT_PHDR, load_addr + exec->e_phoff);
 	NEW_AUX_ENT(AT_PHENT, sizeof(struct elf_phdr));
 	NEW_AUX_ENT(AT_PHNUM, exec->e_phnum);
 	NEW_AUX_ENT(AT_BASE, interp_load_addr);
@@ -627,7 +627,7 @@ static unsigned long load_elf_interp(struct elfhdr *interp_elf_ex,
 
 			vaddr = eppnt->p_vaddr;
 			if (interp_elf_ex->e_type == ET_EXEC || load_addr_set)
-				elf_type |= MAP_FIXED;
+				elf_type |= MAP_FIXED_NOREPLACE;
 			else if (no_base && interp_elf_ex->e_type == ET_DYN)
 				load_addr = -vaddr;
 
@@ -820,7 +820,7 @@ static int parse_elf_properties(struct file *f, const struct elf_phdr *phdr,
 static int load_elf_binary(struct linux_binprm *bprm)
 {
 	struct file *interpreter = NULL; /* to shut gcc up */
-	unsigned long load_addr, load_bias = 0, phdr_addr = 0;
+ 	unsigned long load_addr = 0, load_bias = 0;
 	int load_addr_set = 0;
 	unsigned long error;
 	struct elf_phdr *elf_ppnt, *elf_phdata, *interp_elf_phdata = NULL;
@@ -1153,17 +1153,6 @@ out_free_interp:
 				reloc_func_desc = load_bias;
 			}
 		}
-
-		/*
-		 * Figure out which segment in the file contains the Program
-		 * Header table, and map to the associated memory address.
-		 */
-		if (elf_ppnt->p_offset <= elf_ex->e_phoff &&
-		    elf_ex->e_phoff < elf_ppnt->p_offset + elf_ppnt->p_filesz) {
-			phdr_addr = elf_ex->e_phoff - elf_ppnt->p_offset +
-				    elf_ppnt->p_vaddr;
-		}
-
 		k = elf_ppnt->p_vaddr;
 		if ((elf_ppnt->p_flags & PF_X) && k < start_code)
 			start_code = k;
@@ -1199,7 +1188,6 @@ out_free_interp:
 	}
 
 	e_entry = elf_ex->e_entry + load_bias;
-	phdr_addr += load_bias;
 	elf_bss += load_bias;
 	elf_brk += load_bias;
 	start_code += load_bias;
@@ -1263,8 +1251,8 @@ out_free_interp:
 		goto out;
 #endif /* ARCH_HAS_SETUP_ADDITIONAL_PAGES */
 
-	retval = create_elf_tables(bprm, elf_ex, interp_load_addr,
-				   e_entry, phdr_addr);
+	retval = create_elf_tables(bprm, elf_ex,
+			  load_addr, interp_load_addr, e_entry);
 	if (retval < 0)
 		goto out;
 

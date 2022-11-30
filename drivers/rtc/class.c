@@ -26,15 +26,6 @@ struct class *rtc_class;
 static void rtc_device_release(struct device *dev)
 {
 	struct rtc_device *rtc = to_rtc_device(dev);
-	struct timerqueue_head *head = &rtc->timerqueue;
-	struct timerqueue_node *node;
-
-	mutex_lock(&rtc->ops_lock);
-	while ((node = timerqueue_getnext(head)))
-		timerqueue_del(head, node);
-	mutex_unlock(&rtc->ops_lock);
-
-	cancel_work_sync(&rtc->irqwork);
 
 	ida_simple_remove(&rtc_ida, rtc->id);
 	kfree(rtc);
@@ -150,8 +141,8 @@ static int rtc_resume(struct device *dev)
 	struct timespec64	sleep_time;
 	int err;
 
-	if (timekeeping_rtc_skipresume())
-		return 0;
+	//if (timekeeping_rtc_skipresume())
+	//	return 0;
 
 	rtc_hctosys_ret = -ENODEV;
 	if (strcmp(dev_name(&rtc->dev), CONFIG_RTC_HCTOSYS_DEVICE) != 0)

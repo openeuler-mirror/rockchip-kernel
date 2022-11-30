@@ -25,21 +25,9 @@ struct blk_flush_queue {
 	struct list_head	flush_data_in_flight;
 	struct request		*flush_rq;
 
+	struct lock_class_key	key;
 	spinlock_t		mq_flush_lock;
 };
-
-/*
- * The wrapper of request_queue to fix kabi while adding members.
- */
-struct request_queue_wrapper {
-	struct request_queue q;
-
-	struct sbitmap_queue	sched_bitmap_tags;
-	struct sbitmap_queue	sched_breserved_tags;
-};
-
-#define queue_to_wrapper(queue) \
-	container_of(queue, struct request_queue_wrapper, q)
 
 extern struct kmem_cache *blk_requestq_cachep;
 extern struct kobj_type blk_queue_ktype;
@@ -201,12 +189,6 @@ void blk_account_io_start(struct request *req);
 void blk_account_io_done(struct request *req, u64 now);
 
 /*
- * Plug flush limits
- */
-#define BLK_MAX_REQUEST_COUNT	32
-#define BLK_PLUG_FLUSH_SIZE	(128 * 1024)
-
-/*
  * Internal elevator interface
  */
 #define ELV_ON_HASH(rq) ((rq)->rq_flags & RQF_HASHED)
@@ -248,7 +230,7 @@ ssize_t part_timeout_store(struct device *, struct device_attribute *,
 void __blk_queue_split(struct bio **bio, unsigned int *nr_segs);
 int ll_back_merge_fn(struct request *req, struct bio *bio,
 		unsigned int nr_segs);
-bool blk_attempt_req_merge(struct request_queue *q, struct request *rq,
+int blk_attempt_req_merge(struct request_queue *q, struct request *rq,
 				struct request *next);
 unsigned int blk_recalc_rq_segments(struct request *rq);
 void blk_rq_set_mixed_merge(struct request *rq);
@@ -267,8 +249,6 @@ static inline bool blk_do_io_stat(struct request *rq)
 {
 	return rq->rq_disk && (rq->rq_flags & RQF_IO_STAT);
 }
-
-void update_io_ticks(struct hd_struct *part, unsigned long now, bool end);
 
 static inline void req_set_nomerge(struct request_queue *q, struct request *req)
 {

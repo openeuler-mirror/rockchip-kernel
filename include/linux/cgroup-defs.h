@@ -21,7 +21,6 @@
 #include <linux/workqueue.h>
 #include <linux/bpf-cgroup.h>
 #include <linux/psi_types.h>
-#include <linux/kabi.h>
 
 #ifdef CONFIG_CGROUPS
 
@@ -72,9 +71,6 @@ enum {
 
 	/* Cgroup is frozen. */
 	CGRP_FROZEN,
-
-	/* Control group has to be killed. */
-	CGRP_KILL,
 };
 
 /* cgroup_root->flags */
@@ -114,6 +110,7 @@ enum {
 	CFTYPE_NO_PREFIX	= (1 << 3),	/* (DON'T USE FOR NEW FILES) no subsys prefix */
 	CFTYPE_WORLD_WRITABLE	= (1 << 4),	/* (DON'T USE FOR NEW FILES) S_IWUGO */
 	CFTYPE_DEBUG		= (1 << 5),	/* create when cgroup_debug */
+	CFTYPE_PRESSURE		= (1 << 6),	/* only if pressure feature is enabled */
 
 	/* internal flags, do not use outside cgroup core proper */
 	__CFTYPE_ONLY_ON_DFL	= (1 << 16),	/* only on default hierarchy */
@@ -130,9 +127,6 @@ struct cgroup_file {
 	struct kernfs_node *kn;
 	unsigned long notified_at;
 	struct timer_list notify_timer;
-
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
 };
 
 /*
@@ -190,11 +184,6 @@ struct cgroup_subsys_state {
 	 * fields of the containing structure.
 	 */
 	struct cgroup_subsys_state *parent;
-
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
-	KABI_RESERVE(3)
-	KABI_RESERVE(4)
 };
 
 /*
@@ -291,11 +280,6 @@ struct css_set {
 
 	/* For RCU-protected deletion */
 	struct rcu_head rcu_head;
-
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
-	KABI_RESERVE(3)
-	KABI_RESERVE(4)
 };
 
 struct cgroup_base_stat {
@@ -487,12 +471,7 @@ struct cgroup {
 	/* used to schedule release agent */
 	struct work_struct release_agent_work;
 
-	/* used to track pressure stalls. */
-
-	/*
-	 * It is accessed only the cgroup core code and so changes made to
-	 * the cgroup structure should not affect third-party kernel modules.
-	 */
+	/* used to track pressure stalls */
 	struct psi_group psi;
 
 	/* used to store eBPF programs */
@@ -503,10 +482,6 @@ struct cgroup {
 
 	/* Used to store internal freezer state */
 	struct cgroup_freezer_state freezer;
-
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
-	KABI_RESERVE(3)
 
 	/* ids of the ancestors at each level including self */
 	u64 ancestor_ids[];
@@ -535,9 +510,6 @@ struct cgroup_root {
 	/* Number of cgroups in the hierarchy, used only for /proc/cgroups */
 	atomic_t nr_cgrps;
 
-	/* Wait while cgroups are being destroyed */
-	wait_queue_head_t wait;
-
 	/* A list running through the active hierarchies */
 	struct list_head root_list;
 
@@ -549,11 +521,6 @@ struct cgroup_root {
 
 	/* The name for this hierarchy - may be empty */
 	char name[MAX_CGROUP_ROOT_NAMELEN];
-
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
-	KABI_RESERVE(3)
-	KABI_RESERVE(4)
 };
 
 /*
@@ -640,16 +607,8 @@ struct cftype {
 	ssize_t (*write)(struct kernfs_open_file *of,
 			 char *buf, size_t nbytes, loff_t off);
 
-	int (*read_seq_string)(struct cgroup *cont, struct cftype *cft,
-			       struct seq_file *m);
-
-	int (*write_string)(struct cgroup *cgrp, struct cftype *cft,
-			    const char *buffer);
-
 	__poll_t (*poll)(struct kernfs_open_file *of,
 			 struct poll_table_struct *pt);
-
-	KABI_RESERVE(1)
 
 #ifdef CONFIG_DEBUG_LOCK_ALLOC
 	struct lock_class_key	lockdep_key;
@@ -683,10 +642,6 @@ struct cgroup_subsys {
 	void (*release)(struct task_struct *task);
 	void (*bind)(struct cgroup_subsys_state *root_css);
 
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
-	KABI_RESERVE(3)
-	KABI_RESERVE(4)
 	bool early_init:1;
 
 	/*
@@ -754,7 +709,7 @@ struct cgroup_subsys {
 	 */
 	struct cftype *dfl_cftypes;	/* for the default hierarchy */
 	struct cftype *legacy_cftypes;	/* for the legacy hierarchies */
-	struct cftype *base_cftypes;
+
 	/*
 	 * A subsystem may depend on other subsystems.  When such subsystem
 	 * is enabled on a cgroup, the depended-upon subsystems are enabled
@@ -809,54 +764,107 @@ static inline void cgroup_threadgroup_change_end(struct task_struct *tsk) {}
  * sock_cgroup_data is embedded at sock->sk_cgrp_data and contains
  * per-socket cgroup information except for memcg association.
  *
- * On legacy hierarchies, net_prio and net_cls controllers directly
- * set attributes on each sock which can then be tested by the network
- * layer. On the default hierarchy, each sock is associated with the
- * cgroup it was created in and the networking layer can match the
- * cgroup directly.
+ * On legacy hierarchies, net_prio and net_cls controllers directly set
+ * attributes on each sock which can then be tested by the network layer.
+ * On the default hierarchy, each sock is associated with the cgroup it was
+ * created in and the networking layer can match the cgroup directly.
+ *
+ * To avoid carrying all three cgroup related fields separately in sock,
+ * sock_cgroup_data overloads (prioidx, classid) and the cgroup pointer.
+ * On boot, sock_cgroup_data records the cgroup that the sock was created
+ * in so that cgroup2 matches can be made; however, once either net_prio or
+ * net_cls starts being used, the area is overriden to carry prioidx and/or
+ * classid.  The two modes are distinguished by whether the lowest bit is
+ * set.  Clear bit indicates cgroup pointer while set bit prioidx and
+ * classid.
+ *
+ * While userland may start using net_prio or net_cls at any time, once
+ * either is used, cgroup2 matching no longer works.  There is no reason to
+ * mix the two and this is in line with how legacy and v2 compatibility is
+ * handled.  On mode switch, cgroup references which are already being
+ * pointed to by socks may be leaked.  While this can be remedied by adding
+ * synchronization around sock_cgroup_data, given that the number of leaked
+ * cgroups is bound and highly unlikely to be high, this seems to be the
+ * better trade-off.
  */
 struct sock_cgroup_data {
-	struct cgroup	*cgroup; /* v2 */
-#ifdef CONFIG_CGROUP_NET_CLASSID
-	u32		classid; /* v1 */
+	union {
+#ifdef __LITTLE_ENDIAN
+		struct {
+			u8	is_data : 1;
+			u8	no_refcnt : 1;
+			u8	unused : 6;
+			u8	padding;
+			u16	prioidx;
+			u32	classid;
+		} __packed;
+#else
+		struct {
+			u32	classid;
+			u16	prioidx;
+			u8	padding;
+			u8	unused : 6;
+			u8	no_refcnt : 1;
+			u8	is_data : 1;
+		} __packed;
 #endif
-#ifdef CONFIG_CGROUP_NET_PRIO
-	u16		prioidx; /* v1 */
-#endif
+		u64		val;
+	};
 };
 
+/*
+ * There's a theoretical window where the following accessors race with
+ * updaters and return part of the previous pointer as the prioidx or
+ * classid.  Such races are short-lived and the result isn't critical.
+ */
 static inline u16 sock_cgroup_prioidx(const struct sock_cgroup_data *skcd)
 {
-#ifdef CONFIG_CGROUP_NET_PRIO
-	return READ_ONCE(skcd->prioidx);
-#else
-	return 1;
-#endif
+	/* fallback to 1 which is always the ID of the root cgroup */
+	return (skcd->is_data & 1) ? skcd->prioidx : 1;
 }
 
 static inline u32 sock_cgroup_classid(const struct sock_cgroup_data *skcd)
 {
-#ifdef CONFIG_CGROUP_NET_CLASSID
-	return READ_ONCE(skcd->classid);
-#else
-	return 0;
-#endif
+	/* fallback to 0 which is the unconfigured default classid */
+	return (skcd->is_data & 1) ? skcd->classid : 0;
 }
 
+/*
+ * If invoked concurrently, the updaters may clobber each other.  The
+ * caller is responsible for synchronization.
+ */
 static inline void sock_cgroup_set_prioidx(struct sock_cgroup_data *skcd,
 					   u16 prioidx)
 {
-#ifdef CONFIG_CGROUP_NET_PRIO
-	WRITE_ONCE(skcd->prioidx, prioidx);
-#endif
+	struct sock_cgroup_data skcd_buf = {{ .val = READ_ONCE(skcd->val) }};
+
+	if (sock_cgroup_prioidx(&skcd_buf) == prioidx)
+		return;
+
+	if (!(skcd_buf.is_data & 1)) {
+		skcd_buf.val = 0;
+		skcd_buf.is_data = 1;
+	}
+
+	skcd_buf.prioidx = prioidx;
+	WRITE_ONCE(skcd->val, skcd_buf.val);	/* see sock_cgroup_ptr() */
 }
 
 static inline void sock_cgroup_set_classid(struct sock_cgroup_data *skcd,
 					   u32 classid)
 {
-#ifdef CONFIG_CGROUP_NET_CLASSID
-	WRITE_ONCE(skcd->classid, classid);
-#endif
+	struct sock_cgroup_data skcd_buf = {{ .val = READ_ONCE(skcd->val) }};
+
+	if (sock_cgroup_classid(&skcd_buf) == classid)
+		return;
+
+	if (!(skcd_buf.is_data & 1)) {
+		skcd_buf.val = 0;
+		skcd_buf.is_data = 1;
+	}
+
+	skcd_buf.classid = classid;
+	WRITE_ONCE(skcd->val, skcd_buf.val);	/* see sock_cgroup_ptr() */
 }
 
 #else	/* CONFIG_SOCK_CGROUP_DATA */

@@ -710,11 +710,11 @@ static int vxlan_fdb_append(struct vxlan_fdb *f,
 
 	rd = kmalloc(sizeof(*rd), GFP_ATOMIC);
 	if (rd == NULL)
-		return -ENOMEM;
+		return -ENOBUFS;
 
 	if (dst_cache_init(&rd->dst_cache, GFP_ATOMIC)) {
 		kfree(rd);
-		return -ENOMEM;
+		return -ENOBUFS;
 	}
 
 	rd->remote_ip = *ip;
@@ -3743,7 +3743,7 @@ static int vxlan_config_validate(struct net *src_net, struct vxlan_config *conf,
 
 	if (!conf->dst_port) {
 		if (conf->flags & VXLAN_F_GPE)
-			conf->dst_port = htons(IANA_VXLAN_GPE_UDP_PORT);
+			conf->dst_port = htons(4790); /* IANA VXLAN-GPE port */
 		else
 			conf->dst_port = htons(vxlan_port);
 	}

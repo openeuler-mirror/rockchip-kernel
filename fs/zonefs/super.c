@@ -32,17 +32,6 @@ static inline int zonefs_zone_mgmt(struct inode *inode,
 
 	lockdep_assert_held(&zi->i_truncate_mutex);
 
-	/*
-	 * With ZNS drives, closing an explicitly open zone that has not been
-	 * written will change the zone state to "closed", that is, the zone
-	 * will remain active. Since this can then cause failure of explicit
-	 * open operation on other zones if the drive active zone resources
-	 * are exceeded, make sure that the zone does not remain active by
-	 * resetting it.
-	 */
-	if (op == REQ_OP_ZONE_CLOSE && !zi->i_wpoffset)
-		op = REQ_OP_ZONE_RESET;
-
 	ret = blkdev_zone_mgmt(inode->i_sb->s_bdev, op, zi->i_zsector,
 			       zi->i_zone_size >> SECTOR_SHIFT, GFP_NOFS);
 	if (ret) {
@@ -1163,7 +1152,6 @@ static struct inode *zonefs_alloc_inode(struct super_block *sb)
 	mutex_init(&zi->i_truncate_mutex);
 	init_rwsem(&zi->i_mmap_sem);
 	zi->i_wr_refcnt = 0;
-	zi->i_flags = 0;
 
 	return &zi->i_vnode;
 }
@@ -1181,6 +1169,7 @@ static int zonefs_statfs(struct dentry *dentry, struct kstatfs *buf)
 	struct super_block *sb = dentry->d_sb;
 	struct zonefs_sb_info *sbi = ZONEFS_SB(sb);
 	enum zonefs_ztype t;
+	u64 fsid;
 
 	buf->f_type = ZONEFS_MAGIC;
 	buf->f_bsize = sb->s_blocksize;
@@ -1203,7 +1192,9 @@ static int zonefs_statfs(struct dentry *dentry, struct kstatfs *buf)
 
 	spin_unlock(&sbi->s_lock);
 
-	buf->f_fsid = uuid_to_fsid(sbi->s_uuid.b);
+	fsid = le64_to_cpup((void *)sbi->s_uuid.b) ^
+		le64_to_cpup((void *)sbi->s_uuid.b + sizeof(u64));
+	buf->f_fsid = u64_to_fsid(fsid);
 
 	return 0;
 }
@@ -1315,13 +1306,12 @@ static void zonefs_init_dir_inode(struct inode *parent, struct inode *inode,
 	inc_nlink(parent);
 }
 
-static int zonefs_init_file_inode(struct inode *inode, struct blk_zone *zone,
-				  enum zonefs_ztype type)
+static void zonefs_init_file_inode(struct inode *inode, struct blk_zone *zone,
+				   enum zonefs_ztype type)
 {
 	struct super_block *sb = inode->i_sb;
 	struct zonefs_sb_info *sbi = ZONEFS_SB(sb);
 	struct zonefs_inode_info *zi = ZONEFS_I(inode);
-	int ret = 0;
 
 	inode->i_ino = zone->start >> sbi->s_zone_sectors_shift;
 	inode->i_mode = S_IFREG | sbi->s_perm;
@@ -1346,22 +1336,6 @@ static int zonefs_init_file_inode(struct inode *inode, struct blk_zone *zone,
 	sb->s_maxbytes = max(zi->i_max_size, sb->s_maxbytes);
 	sbi->s_blocks += zi->i_max_size >> sb->s_blocksize_bits;
 	sbi->s_used_blocks += zi->i_wpoffset >> sb->s_blocksize_bits;
-
-	/*
-	 * For sequential zones, make sure that any open zone is closed first
-	 * to ensure that the initial number of open zones is 0, in sync with
-	 * the open zone accounting done when the mount option
-	 * ZONEFS_MNTOPT_EXPLICIT_OPEN is used.
-	 */
-	if (type == ZONEFS_ZTYPE_SEQ &&
-	    (zone->cond == BLK_ZONE_COND_IMP_OPEN ||
-	     zone->cond == BLK_ZONE_COND_EXP_OPEN)) {
-		mutex_lock(&zi->i_truncate_mutex);
-		ret = zonefs_zone_mgmt(inode, REQ_OP_ZONE_CLOSE);
-		mutex_unlock(&zi->i_truncate_mutex);
-	}
-
-	return ret;
 }
 
 static struct dentry *zonefs_create_inode(struct dentry *parent,
@@ -1371,7 +1345,6 @@ static struct dentry *zonefs_create_inode(struct dentry *parent,
 	struct inode *dir = d_inode(parent);
 	struct dentry *dentry;
 	struct inode *inode;
-	int ret;
 
 	dentry = d_alloc_name(parent, name);
 	if (!dentry)
@@ -1382,16 +1355,10 @@ static struct dentry *zonefs_create_inode(struct dentry *parent,
 		goto dput;
 
 	inode->i_ctime = inode->i_mtime = inode->i_atime = dir->i_ctime;
-	if (zone) {
-		ret = zonefs_init_file_inode(inode, zone, type);
-		if (ret) {
-			iput(inode);
-			goto dput;
-		}
-	} else {
+	if (zone)
+		zonefs_init_file_inode(inode, zone, type);
+	else
 		zonefs_init_dir_inode(dir, inode, type);
-	}
-
 	d_add(dentry, inode);
 	dir->i_size++;
 
@@ -1832,6 +1799,5 @@ static void __exit zonefs_exit(void)
 MODULE_AUTHOR("Damien Le Moal");
 MODULE_DESCRIPTION("Zone file system for zoned block devices");
 MODULE_LICENSE("GPL");
-MODULE_ALIAS_FS("zonefs");
 module_init(zonefs_init);
 module_exit(zonefs_exit);

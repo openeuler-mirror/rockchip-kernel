@@ -512,9 +512,6 @@ struct sock *tcp_create_openreq_child(const struct sock *sk,
 	newtp->rcv_ssthresh = req->rsk_rcv_wnd;
 	newtp->rcv_wnd = req->rsk_rcv_wnd;
 	newtp->rx_opt.wscale_ok = ireq->wscale_ok;
-#if IS_ENABLED(CONFIG_TCP_COMP)
-	newtp->rx_opt.comp_ok = ireq->comp_ok;
-#endif
 	if (newtp->rx_opt.wscale_ok) {
 		newtp->rx_opt.snd_wscale = ireq->snd_wscale;
 		newtp->rx_opt.rcv_wscale = ireq->rcv_wscale;
@@ -541,7 +538,7 @@ struct sock *tcp_create_openreq_child(const struct sock *sk,
 	newtp->tsoffset = treq->ts_off;
 #ifdef CONFIG_TCP_MD5SIG
 	newtp->md5sig_info = NULL;	/*XXX*/
-	if (treq->af_specific->req_md5_lookup(sk, req_to_sk(req)))
+	if (newtp->af_specific->md5_lookup(sk, newsk))
 		newtp->tcp_header_len += TCPOLEN_MD5SIG_ALIGNED;
 #endif
 	if (skb->len >= TCP_MSS_DEFAULT + newtp->tcp_header_len)

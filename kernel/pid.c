@@ -43,9 +43,7 @@
 #include <linux/sched/task.h>
 #include <linux/idr.h>
 #include <net/sock.h>
-#include <linux/kmemleak.h>
 #include <uapi/linux/pidfd.h>
-#include <linux/pin_mem.h>
 
 struct pid init_struct_pid = {
 	.count		= REFCOUNT_INIT(1),
@@ -61,10 +59,12 @@ struct pid init_struct_pid = {
 	}, }
 };
 
+int pid_max = PID_MAX_DEFAULT;
+
 #define RESERVED_PIDS		300
 
-static int pid_max_min = RESERVED_PIDS + 1;
-static int pid_max_max = PID_MAX_LIMIT;
+int pid_max_min = RESERVED_PIDS + 1;
+int pid_max_max = PID_MAX_LIMIT;
 
 /*
  * PID-map pages start out as NULL, they get allocated upon
@@ -80,7 +80,6 @@ struct pid_namespace init_pid_ns = {
 	.child_reaper = &init_task,
 	.user_ns = &init_user_ns,
 	.ns.inum = PROC_PID_INIT_INO,
-	.pid_max = PID_MAX_DEFAULT,
 #ifdef CONFIG_PID_NS
 	.ns.ops = &pidns_operations,
 #endif
@@ -192,7 +191,7 @@ struct pid *alloc_pid(struct pid_namespace *ns, pid_t *set_tid,
 			tid = set_tid[ns->level - i];
 
 			retval = -EINVAL;
-			if (tid < 1 || tid >= task_active_pid_ns(current)->pid_max)
+			if (tid < 1 || tid >= pid_max)
 				goto out_free;
 			/*
 			 * Also fail if a PID != 1 is requested and
@@ -210,8 +209,6 @@ struct pid *alloc_pid(struct pid_namespace *ns, pid_t *set_tid,
 		spin_lock_irq(&pidmap_lock);
 
 		if (tid) {
-			free_reserved_pid(&tmp->idr, tid);
-
 			nr = idr_alloc(&tmp->idr, NULL, tid,
 				       tid + 1, GFP_ATOMIC);
 			/*
@@ -234,7 +231,7 @@ struct pid *alloc_pid(struct pid_namespace *ns, pid_t *set_tid,
 			 * a partially initialized PID (see below).
 			 */
 			nr = idr_alloc_cyclic(&tmp->idr, NULL, pid_min,
-					      tmp->pid_max, GFP_ATOMIC);
+					      pid_max, GFP_ATOMIC);
 		}
 		spin_unlock_irq(&pidmap_lock);
 		idr_preload_end();
@@ -424,6 +421,7 @@ struct task_struct *find_task_by_vpid(pid_t vnr)
 {
 	return find_task_by_pid_ns(vnr, task_active_pid_ns(current));
 }
+EXPORT_SYMBOL_GPL(find_task_by_vpid);
 
 struct task_struct *find_get_task_by_vpid(pid_t nr)
 {
@@ -437,7 +435,6 @@ struct task_struct *find_get_task_by_vpid(pid_t nr)
 
 	return task;
 }
-EXPORT_SYMBOL_GPL(find_get_task_by_vpid);
 
 struct pid *get_task_pid(struct task_struct *task, enum pid_type type)
 {
@@ -609,37 +606,8 @@ SYSCALL_DEFINE2(pidfd_open, pid_t, pid, unsigned int, flags)
 	return fd;
 }
 
-static int proc_dointvec_pidmax(struct ctl_table *table, int write,
-				void __user *buffer, size_t *lenp, loff_t *ppos)
-{
-	struct ctl_table tmp;
-
-	tmp = *table;
-	tmp.data = &task_active_pid_ns(current)->pid_max;
-
-	return proc_dointvec_minmax(&tmp, write, buffer, lenp, ppos);
-}
-
-static struct ctl_table pid_ctl_table[] = {
-	{
-		.procname	= "pid_max",
-		.data		= &init_pid_ns.pid_max,
-		.maxlen		= sizeof(int),
-		.mode		= 0644,
-		.proc_handler	= proc_dointvec_pidmax,
-		.extra1		= &pid_max_min,
-		.extra2		= &pid_max_max,
-	},
-	{}
-};
-
-static struct ctl_path pid_kern_path[] = { { .procname = "kernel" }, {} };
-
 void __init pid_idr_init(void)
 {
-	struct ctl_table_header *hdr;
-	int pid_max = init_pid_ns.pid_max;
-
 	/* Verify no one has done anything silly: */
 	BUILD_BUG_ON(PID_MAX_LIMIT >= PIDNS_ADDING);
 
@@ -650,17 +618,10 @@ void __init pid_idr_init(void)
 				PIDS_PER_CPU_MIN * num_possible_cpus());
 	pr_info("pid_max: default: %u minimum: %u\n", pid_max, pid_max_min);
 
-	init_pid_ns.pid_max = pid_max;
-
 	idr_init(&init_pid_ns.idr);
 
 	init_pid_ns.pid_cachep = KMEM_CACHE(pid,
 			SLAB_HWCACHE_ALIGN | SLAB_PANIC | SLAB_ACCOUNT);
-
-	reserve_pids(&init_pid_ns.idr, pid_max);
-
-	hdr = register_sysctl_paths(pid_kern_path, pid_ctl_table);
-	kmemleak_not_leak(hdr);
 }
 
 static struct file *__pidfd_fget(struct task_struct *task, int fd)

@@ -82,7 +82,6 @@ static void tcp_event_new_data_sent(struct sock *sk, struct sk_buff *skb)
 
 	NET_ADD_STATS(sock_net(sk), LINUX_MIB_TCPORIGDATASENT,
 		      tcp_skb_pcount(skb));
-	tcp_check_space(sk);
 }
 
 /* SND.NXT, if window was not shrunk or the amount of shrunk was less than one
@@ -417,7 +416,6 @@ static inline bool tcp_urg_mode(const struct tcp_sock *tp)
 #define OPTION_FAST_OPEN_COOKIE	(1 << 8)
 #define OPTION_SMC		(1 << 9)
 #define OPTION_MPTCP		(1 << 10)
-#define OPTION_COMP		(1 << 11)
 
 static void smc_options_write(__be32 *ptr, u16 *options)
 {
@@ -429,19 +427,6 @@ static void smc_options_write(__be32 *ptr, u16 *options)
 				       (TCPOPT_EXP <<  8) |
 				       (TCPOLEN_EXP_SMC_BASE));
 			*ptr++ = htonl(TCPOPT_SMC_MAGIC);
-		}
-	}
-#endif
-}
-
-static void comp_options_write(__be32 *ptr, u16 *options)
-{
-#if IS_ENABLED(CONFIG_TCP_COMP)
-	if (static_branch_unlikely(&tcp_have_comp)) {
-		if (unlikely(OPTION_COMP & *options)) {
-			*ptr++ = htonl((TCPOPT_EXP  << 24) |
-				       (TCPOLEN_EXP_COMP_BASE  << 16) |
-				       (TCPOPT_COMP_MAGIC));
 		}
 	}
 #endif
@@ -717,8 +702,6 @@ static void tcp_options_write(__be32 *ptr, struct tcp_sock *tp,
 	smc_options_write(ptr, &options);
 
 	mptcp_options_write(ptr, opts);
-
-	comp_options_write(ptr, &options);
 }
 
 static void smc_set_option(const struct tcp_sock *tp,
@@ -731,39 +714,6 @@ static void smc_set_option(const struct tcp_sock *tp,
 			if (*remaining >= TCPOLEN_EXP_SMC_BASE_ALIGNED) {
 				opts->options |= OPTION_SMC;
 				*remaining -= TCPOLEN_EXP_SMC_BASE_ALIGNED;
-			}
-		}
-	}
-#endif
-}
-
-static void comp_set_option(const struct sock *sk,
-			    struct tcp_out_options *opts,
-			    unsigned int *remaining)
-{
-#if IS_ENABLED(CONFIG_TCP_COMP)
-	if (static_branch_unlikely(&tcp_have_comp)) {
-		if (tcp_syn_comp_enabled(sk)) {
-			if (*remaining >= TCPOLEN_EXP_COMP_BASE) {
-				opts->options |= OPTION_COMP;
-				*remaining -= TCPOLEN_EXP_COMP_BASE;
-			}
-		}
-	}
-#endif
-}
-
-static void comp_set_option_cond(const struct sock *sk,
-				 const struct inet_request_sock *ireq,
-				 struct tcp_out_options *opts,
-				 unsigned int *remaining)
-{
-#if IS_ENABLED(CONFIG_TCP_COMP)
-	if (static_branch_unlikely(&tcp_have_comp)) {
-		if (tcp_synack_comp_enabled(sk, ireq)) {
-			if (*remaining >= TCPOLEN_EXP_COMP_BASE) {
-				opts->options |= OPTION_COMP;
-				*remaining -= TCPOLEN_EXP_COMP_BASE;
 			}
 		}
 	}
@@ -871,7 +821,6 @@ static unsigned int tcp_syn_options(struct sock *sk, struct sk_buff *skb,
 	}
 
 	smc_set_option(tp, opts, &remaining);
-	comp_set_option(sk, opts, &remaining);
 
 	if (sk_is_mptcp(sk)) {
 		unsigned int size;
@@ -951,8 +900,6 @@ static unsigned int tcp_synack_options(const struct sock *sk,
 	mptcp_set_option_cond(req, opts, &remaining);
 
 	smc_set_option_cond(tcp_sk(sk), ireq, opts, &remaining);
-
-	comp_set_option_cond(sk, ireq, opts, &remaining);
 
 	bpf_skops_hdr_opt_len((struct sock *)sk, skb, req, syn_skb,
 			      synack_type, opts, &remaining);
@@ -1614,7 +1561,7 @@ int tcp_fragment(struct sock *sk, enum tcp_queue tcp_queue,
 		return -ENOMEM;
 	}
 
-	if (skb_unclone_keeptruesize(skb, gfp))
+	if (skb_unclone(skb, gfp))
 		return -ENOMEM;
 
 	/* Get a new skb... force flag on. */
@@ -1723,7 +1670,7 @@ int tcp_trim_head(struct sock *sk, struct sk_buff *skb, u32 len)
 {
 	u32 delta_truesize;
 
-	if (skb_unclone_keeptruesize(skb, GFP_ATOMIC))
+	if (skb_unclone(skb, GFP_ATOMIC))
 		return -ENOMEM;
 
 	delta_truesize = __pskb_trim_head(skb, len);
@@ -3237,7 +3184,7 @@ int __tcp_retransmit_skb(struct sock *sk, struct sk_buff *skb, int segs)
 				 cur_mss, GFP_ATOMIC))
 			return -ENOMEM; /* We'll try again later. */
 	} else {
-		if (skb_unclone_keeptruesize(skb, GFP_ATOMIC))
+		if (skb_unclone(skb, GFP_ATOMIC))
 			return -ENOMEM;
 
 		diff = tcp_skb_pcount(skb);
@@ -3786,7 +3733,6 @@ static void tcp_connect_queue_skb(struct sock *sk, struct sk_buff *skb)
  */
 static int tcp_send_syn_data(struct sock *sk, struct sk_buff *syn)
 {
-	struct inet_connection_sock *icsk = inet_csk(sk);
 	struct tcp_sock *tp = tcp_sk(sk);
 	struct tcp_fastopen_request *fo = tp->fastopen_req;
 	int space, err = 0;
@@ -3801,10 +3747,8 @@ static int tcp_send_syn_data(struct sock *sk, struct sk_buff *syn)
 	 * private TCP options. The cost is reduced data space in SYN :(
 	 */
 	tp->rx_opt.mss_clamp = tcp_mss_clamp(tp, tp->rx_opt.mss_clamp);
-	/* Sync mss_cache after updating the mss_clamp */
-	tcp_sync_mss(sk, icsk->icsk_pmtu_cookie);
 
-	space = __tcp_mtu_to_mss(sk, icsk->icsk_pmtu_cookie) -
+	space = __tcp_mtu_to_mss(sk, inet_csk(sk)->icsk_pmtu_cookie) -
 		MAX_TCP_OPTION_SPACE;
 
 	space = min_t(size_t, space, fo->size);

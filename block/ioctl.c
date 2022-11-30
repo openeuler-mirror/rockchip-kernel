@@ -405,10 +405,6 @@ static int blkdev_roset(struct block_device *bdev, fmode_t mode,
 		return ret;
 	if (get_user(n, (int __user *)arg))
 		return -EFAULT;
-	if (n)
-		set_bit(bdev->bd_partno, bdev->bd_disk->user_ro_bitmap);
-	else
-		clear_bit(bdev->bd_partno, bdev->bd_disk->user_ro_bitmap);
 	set_device_ro(bdev, n);
 	return 0;
 }
@@ -683,7 +679,7 @@ long compat_blkdev_ioctl(struct file *file, unsigned cmd, unsigned long arg)
 			       (bdev->bd_bdi->ra_pages * PAGE_SIZE) / 512);
 	case BLKGETSIZE:
 		size = i_size_read(bdev->bd_inode);
-		if ((size >> 9) > ~(compat_ulong_t)0)
+		if ((size >> 9) > ~0UL)
 			return -EFBIG;
 		return compat_put_ulong(argp, size >> 9);
 

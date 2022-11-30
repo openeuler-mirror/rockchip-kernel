@@ -523,7 +523,7 @@ static void arm_timer(struct k_itimer *timer, struct task_struct *p)
 	if (CPUCLOCK_PERTHREAD(timer->it_clock))
 		tick_dep_set_task(p, TICK_DEP_BIT_POSIX_TIMER);
 	else
-		tick_dep_set_signal(p, TICK_DEP_BIT_POSIX_TIMER);
+		tick_dep_set_signal(p->signal, TICK_DEP_BIT_POSIX_TIMER);
 }
 
 /*
@@ -1101,28 +1101,13 @@ static void posix_cpu_timers_work(struct callback_head *work)
 }
 
 /*
- * Clear existing posix CPU timers task work.
- */
-void clear_posix_cputimers_work(struct task_struct *p)
-{
-	/*
-	 * A copied work entry from the old task is not meaningful, clear it.
-	 * N.B. init_task_work will not do this.
-	 */
-	memset(&p->posix_cputimers_work.work, 0,
-	       sizeof(p->posix_cputimers_work.work));
-	init_task_work(&p->posix_cputimers_work.work,
-		       posix_cpu_timers_work);
-	p->posix_cputimers_work.scheduled = false;
-}
-
-/*
  * Initialize posix CPU timers task work in init task. Out of line to
  * keep the callback static and to avoid header recursion hell.
  */
 void __init posix_cputimers_init_work(void)
 {
-	clear_posix_cputimers_work(current);
+	init_task_work(&current->posix_cputimers_work.work,
+		       posix_cpu_timers_work);
 }
 
 /*
@@ -1373,7 +1358,7 @@ void set_process_cpu_timer(struct task_struct *tsk, unsigned int clkid,
 	if (*newval < *nextevt)
 		*nextevt = *newval;
 
-	tick_dep_set_signal(tsk, TICK_DEP_BIT_POSIX_TIMER);
+	tick_dep_set_signal(tsk->signal, TICK_DEP_BIT_POSIX_TIMER);
 }
 
 static int do_cpu_nanosleep(const clockid_t which_clock, int flags,

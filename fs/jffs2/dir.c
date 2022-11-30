@@ -156,26 +156,6 @@ static int jffs2_readdir(struct file *file, struct dir_context *ctx)
 
 /***********************************************************************/
 
-static void jffs2_iget_failed(struct jffs2_sb_info *c, struct inode *inode)
-{
-	struct jffs2_inode_info *f = JFFS2_INODE_INFO(inode);
-
-	/*
-	 * Reset pino_nlink to zero, so jffs2_do_clear_inode() will mark
-	 * all flash nodes used by the inode as obsolete and GC procedure
-	 * will reclaim these flash nodes, else these flash spaces will be
-	 * unreclaimable forever.
-	 *
-	 * Update pino_nlink under inocache_lock, because no proceses could
-	 * get the inode due to I_NEW flag, and only GC procedure may try to
-	 * read pino_nlink under inocache_lock.
-	 */
-	spin_lock(&c->inocache_lock);
-	f->inocache->pino_nlink = 0;
-	spin_unlock(&c->inocache_lock);
-
-	iget_failed(inode);
-}
 
 static int jffs2_create(struct inode *dir_i, struct dentry *dentry,
 			umode_t mode, bool excl)
@@ -233,7 +213,7 @@ static int jffs2_create(struct inode *dir_i, struct dentry *dentry,
 	return 0;
 
  fail:
-	jffs2_iget_failed(c, inode);
+	iget_failed(inode);
 	jffs2_free_raw_inode(ri);
 	return ret;
 }
@@ -453,7 +433,7 @@ static int jffs2_symlink (struct inode *dir_i, struct dentry *dentry, const char
 	return 0;
 
  fail:
-	jffs2_iget_failed(c, inode);
+	iget_failed(inode);
 	return ret;
 }
 
@@ -597,7 +577,7 @@ static int jffs2_mkdir (struct inode *dir_i, struct dentry *dentry, umode_t mode
 	return 0;
 
  fail:
-	jffs2_iget_failed(c, inode);
+	iget_failed(inode);
 	return ret;
 }
 
@@ -772,7 +752,7 @@ static int jffs2_mknod (struct inode *dir_i, struct dentry *dentry, umode_t mode
 	return 0;
 
  fail:
-	jffs2_iget_failed(c, inode);
+	iget_failed(inode);
 	return ret;
 }
 

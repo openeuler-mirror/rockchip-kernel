@@ -1651,10 +1651,8 @@ myri10ge_get_drvinfo(struct net_device *netdev, struct ethtool_drvinfo *info)
 	strlcpy(info->bus_info, pci_name(mgp->pdev), sizeof(info->bus_info));
 }
 
-static int myri10ge_get_coalesce(struct net_device *netdev,
-				 struct ethtool_coalesce *coal,
-				 struct kernel_ethtool_coalesce *kernel_coal,
-				 struct netlink_ext_ack *extack)
+static int
+myri10ge_get_coalesce(struct net_device *netdev, struct ethtool_coalesce *coal)
 {
 	struct myri10ge_priv *mgp = netdev_priv(netdev);
 
@@ -1662,10 +1660,8 @@ static int myri10ge_get_coalesce(struct net_device *netdev,
 	return 0;
 }
 
-static int myri10ge_set_coalesce(struct net_device *netdev,
-				 struct ethtool_coalesce *coal,
-				 struct kernel_ethtool_coalesce *kernel_coal,
-				 struct netlink_ext_ack *extack)
+static int
+myri10ge_set_coalesce(struct net_device *netdev, struct ethtool_coalesce *coal)
 {
 	struct myri10ge_priv *mgp = netdev_priv(netdev);
 
@@ -1702,9 +1698,7 @@ myri10ge_set_pauseparam(struct net_device *netdev,
 
 static void
 myri10ge_get_ringparam(struct net_device *netdev,
-		       struct ethtool_ringparam *ring,
-		       struct kernel_ethtool_ringparam *kernel_ring,
-		       struct netlink_ext_ack *extack)
+		       struct ethtool_ringparam *ring)
 {
 	struct myri10ge_priv *mgp = netdev_priv(netdev);
 
@@ -2901,9 +2895,11 @@ static netdev_tx_t myri10ge_sw_tso(struct sk_buff *skb,
 		status = myri10ge_xmit(curr, dev);
 		if (status != 0) {
 			dev_kfree_skb_any(curr);
-			skb_list_walk_safe(next, curr, next) {
+			if (segs != NULL) {
+				curr = segs;
+				segs = next;
 				curr->next = NULL;
-				dev_kfree_skb_any(curr);
+				dev_kfree_skb_any(segs);
 			}
 			goto drop;
 		}

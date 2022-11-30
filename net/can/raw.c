@@ -710,18 +710,10 @@ static int raw_getsockopt(struct socket *sock, int level, int optname,
 		if (ro->count > 0) {
 			int fsize = ro->count * sizeof(struct can_filter);
 
-			/* user space buffer to small for filter list? */
-			if (len < fsize) {
-				/* return -ERANGE and needed space in optlen */
-				err = -ERANGE;
-				if (put_user(fsize, optlen))
-					err = -EFAULT;
-			} else {
-				if (len > fsize)
-					len = fsize;
-				if (copy_to_user(optval, ro->filter, len))
-					err = -EFAULT;
-			}
+			if (len > fsize)
+				len = fsize;
+			if (copy_to_user(optval, ro->filter, len))
+				err = -EFAULT;
 		} else {
 			len = 0;
 		}

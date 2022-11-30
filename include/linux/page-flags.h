@@ -132,29 +132,16 @@ enum pageflags {
 #ifdef CONFIG_MEMORY_FAILURE
 	PG_hwpoison,		/* hardware poisoned page. Don't touch */
 #endif
-#if defined(CONFIG_PAGE_IDLE_FLAG) && defined(CONFIG_64BIT)
+#if defined(CONFIG_IDLE_PAGE_TRACKING) && defined(CONFIG_64BIT)
 	PG_young,
 	PG_idle,
 #endif
 #ifdef CONFIG_64BIT
 	PG_arch_2,
 #endif
-#if defined(CONFIG_X86_64) || defined(CONFIG_ARM64)
-	PG_pool,		/* Used to track page allocated from dynamic hugetlb pool */
+#ifdef CONFIG_KASAN_HW_TAGS
+	PG_skip_kasan_poison,
 #endif
-#ifdef CONFIG_PIN_MEMORY
-	PG_hotreplace,
-#endif
-
-	/* Add reserved page flags for internal extension. For the new page
-	 * flags which backported from kernel upstream, please place them
-	 * behind the reserved page flags.
-	 */
-#if defined(CONFIG_X86_64) || defined(CONFIG_ARM64)
-	PG_reserve_pgflag_0,
-	PG_reserve_pgflag_1,
-#endif
-
 	__NR_PAGEFLAGS,
 
 	/* Filesystems */
@@ -351,7 +338,6 @@ PAGEFLAG(Referenced, referenced, PF_HEAD)
 PAGEFLAG(Dirty, dirty, PF_HEAD) TESTSCFLAG(Dirty, dirty, PF_HEAD)
 	__CLEARPAGEFLAG(Dirty, dirty, PF_HEAD)
 PAGEFLAG(LRU, lru, PF_HEAD) __CLEARPAGEFLAG(LRU, lru, PF_HEAD)
-	TESTCLEARFLAG(LRU, lru, PF_HEAD)
 PAGEFLAG(Active, active, PF_HEAD) __CLEARPAGEFLAG(Active, active, PF_HEAD)
 	TESTCLEARFLAG(Active, active, PF_HEAD)
 PAGEFLAG(Workingset, workingset, PF_HEAD)
@@ -438,12 +424,6 @@ PAGEFLAG_FALSE(Mlocked) __CLEARPAGEFLAG_NOOP(Mlocked)
 	TESTSCFLAG_FALSE(Mlocked)
 #endif
 
-#ifdef CONFIG_PIN_MEMORY
-PAGEFLAG(Hotreplace, hotreplace, PF_ANY)
-#else
-PAGEFLAG_FALSE(Hotreplace)
-#endif
-
 #ifdef CONFIG_ARCH_USES_PG_UNCACHED
 PAGEFLAG(Uncached, uncached, PF_NO_COMPOUND)
 #else
@@ -460,11 +440,17 @@ PAGEFLAG_FALSE(HWPoison)
 #define __PG_HWPOISON 0
 #endif
 
-#if defined(CONFIG_PAGE_IDLE_FLAG) && defined(CONFIG_64BIT)
+#if defined(CONFIG_IDLE_PAGE_TRACKING) && defined(CONFIG_64BIT)
 TESTPAGEFLAG(Young, young, PF_ANY)
 SETPAGEFLAG(Young, young, PF_ANY)
 TESTCLEARFLAG(Young, young, PF_ANY)
 PAGEFLAG(Idle, idle, PF_ANY)
+#endif
+
+#ifdef CONFIG_KASAN_HW_TAGS
+PAGEFLAG(SkipKASanPoison, skip_kasan_poison, PF_HEAD)
+#else
+PAGEFLAG_FALSE(SkipKASanPoison)
 #endif
 
 /*
@@ -474,15 +460,6 @@ PAGEFLAG(Idle, idle, PF_ANY)
  * any possible races on the setting or clearing of the bit.
  */
 __PAGEFLAG(Reported, reported, PF_NO_COMPOUND)
-
-/*
- * PagePool() is used to track page allocated from hpool.
- */
-#if defined(CONFIG_X86_64) || defined(CONFIG_ARM64)
-PAGEFLAG(Pool, pool, PF_NO_TAIL)
-#else
-PAGEFLAG_FALSE(Pool)
-#endif
 
 /*
  * On an anonymous page mapped into a user virtual memory area,
@@ -625,9 +602,15 @@ static inline void ClearPageCompound(struct page *page)
 #ifdef CONFIG_HUGETLB_PAGE
 int PageHuge(struct page *page);
 int PageHeadHuge(struct page *page);
+bool page_huge_active(struct page *page);
 #else
 TESTPAGEFLAG_FALSE(Huge)
 TESTPAGEFLAG_FALSE(HeadHuge)
+
+static inline bool page_huge_active(struct page *page)
+{
+	return 0;
+}
 #endif
 
 
@@ -741,8 +724,9 @@ PAGEFLAG_FALSE(DoubleMap)
 #define PAGE_MAPCOUNT_RESERVE	-128
 #define PG_buddy	0x00000080
 #define PG_offline	0x00000100
-#define PG_table	0x00000200
-#define PG_guard	0x00000400
+#define PG_kmemcg	0x00000200
+#define PG_table	0x00000400
+#define PG_guard	0x00000800
 
 #define PageType(page, flag)						\
 	((page->page_type & (PAGE_TYPE_BASE | flag)) == PAGE_TYPE_BASE)
@@ -792,6 +776,12 @@ PAGE_TYPE_OPS(Buddy, buddy)
  * buddy via online_page_callback_t.
  */
 PAGE_TYPE_OPS(Offline, offline)
+
+/*
+ * If kmemcg is enabled, the buddy allocator will set PageKmemcg() on
+ * pages allocated with __GFP_ACCOUNT. It gets cleared on page free.
+ */
+PAGE_TYPE_OPS(Kmemcg, kmemcg)
 
 /*
  * Marks pages in use as page tables.

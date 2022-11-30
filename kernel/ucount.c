@@ -52,17 +52,14 @@ static struct ctl_table_root set_root = {
 	.permissions = set_permissions,
 };
 
-static long ue_zero = 0;
-static long ue_int_max = INT_MAX;
-
-#define UCOUNT_ENTRY(name)					\
-	{							\
-		.procname	= name,				\
-		.maxlen		= sizeof(long),			\
-		.mode		= 0644,				\
-		.proc_handler	= proc_doulongvec_minmax,	\
-		.extra1		= &ue_zero,			\
-		.extra2		= &ue_int_max,			\
+#define UCOUNT_ENTRY(name)				\
+	{						\
+		.procname	= name,			\
+		.maxlen		= sizeof(int),		\
+		.mode		= 0644,			\
+		.proc_handler	= proc_dointvec_minmax,	\
+		.extra1		= SYSCTL_ZERO,		\
+		.extra2		= SYSCTL_INT_MAX,	\
 	}
 static struct ctl_table user_table[] = {
 	UCOUNT_ENTRY("max_user_namespaces"),
@@ -77,22 +74,6 @@ static struct ctl_table user_table[] = {
 	UCOUNT_ENTRY("max_inotify_instances"),
 	UCOUNT_ENTRY("max_inotify_watches"),
 #endif
-	/* These corresponds to the reservation in enum ucount_type */
-	{ }, // UCOUNT_KABI_RESERVE1
-	{ }, // UCOUNT_KABI_RESERVE2
-	{ }, // UCOUNT_KABI_RESERVE3
-	{ }, // UCOUNT_KABI_RESERVE4
-	{ }, // UCOUNT_KABI_RESERVE5
-	{ }, // UCOUNT_KABI_RESERVE6
-	{ }, // UCOUNT_KABI_RESERVE7
-	{ }, // UCOUNT_KABI_RESERVE8
-	{ }, // UCOUNT_KABI_RESERVE9
-	{ }, // UCOUNT_KABI_RESERVE10
-	{ }, // UCOUNT_KABI_RESERVE11
-	{ }, // UCOUNT_KABI_RESERVE12
-	{ }, // UCOUNT_KABI_RESERVE13
-	{ }, // UCOUNT_KABI_RESERVE14
-	{ }, // UCOUNT_KABI_RESERVE15
 	{ }
 };
 #endif /* CONFIG_SYSCTL */
@@ -194,14 +175,14 @@ static void put_ucounts(struct ucounts *ucounts)
 	kfree(ucounts);
 }
 
-static inline bool atomic_long_inc_below(atomic_long_t *v, int u)
+static inline bool atomic_inc_below(atomic_t *v, int u)
 {
-	long c, old;
-	c = atomic_long_read(v);
+	int c, old;
+	c = atomic_read(v);
 	for (;;) {
 		if (unlikely(c >= u))
 			return false;
-		old = atomic_long_cmpxchg(v, c, c+1);
+		old = atomic_cmpxchg(v, c, c+1);
 		if (likely(old == c))
 			return true;
 		c = old;
@@ -215,17 +196,17 @@ struct ucounts *inc_ucount(struct user_namespace *ns, kuid_t uid,
 	struct user_namespace *tns;
 	ucounts = get_ucounts(ns, uid);
 	for (iter = ucounts; iter; iter = tns->ucounts) {
-		long max;
+		int max;
 		tns = iter->ns;
 		max = READ_ONCE(tns->ucount_max[type]);
-		if (!atomic_long_inc_below(&iter->ucount[type], max))
+		if (!atomic_inc_below(&iter->ucount[type], max))
 			goto fail;
 	}
 	return ucounts;
 fail:
 	bad = iter;
 	for (iter = ucounts; iter != bad; iter = iter->ns->ucounts)
-		atomic_long_dec(&iter->ucount[type]);
+		atomic_dec(&iter->ucount[type]);
 
 	put_ucounts(ucounts);
 	return NULL;
@@ -235,7 +216,7 @@ void dec_ucount(struct ucounts *ucounts, enum ucount_type type)
 {
 	struct ucounts *iter;
 	for (iter = ucounts; iter; iter = iter->ns->ucounts) {
-		long dec = atomic_long_dec_if_positive(&iter->ucount[type]);
+		int dec = atomic_dec_if_positive(&iter->ucount[type]);
 		WARN_ON_ONCE(dec < 0);
 	}
 	put_ucounts(ucounts);

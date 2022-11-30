@@ -55,6 +55,8 @@
 #include <asm/ptrace.h>
 #include <asm/irq_regs.h>
 
+#include <trace/hooks/sysrqcrash.h>
+
 /* Whether we react on sysrq keys or just ignore them */
 static int __read_mostly sysrq_enabled = CONFIG_MAGIC_SYSRQ_DEFAULT_ENABLE;
 static bool __read_mostly sysrq_always_enabled;
@@ -150,6 +152,8 @@ static void sysrq_handle_crash(int key)
 {
 	/* release the RCU read lock before crashing */
 	rcu_read_unlock();
+
+	trace_android_vh_sysrq_crash(current);
 
 	panic("sysrq triggered crash\n");
 }
@@ -1143,9 +1147,6 @@ int unregister_sysrq_key(int key, const struct sysrq_key_op *op_p)
 EXPORT_SYMBOL(unregister_sysrq_key);
 
 #ifdef CONFIG_PROC_FS
-
-static DEFINE_MUTEX(sysrq_mutex);
-
 /*
  * writing 'C' to /proc/sysrq-trigger is like sysrq-C
  */
@@ -1157,10 +1158,7 @@ static ssize_t write_sysrq_trigger(struct file *file, const char __user *buf,
 
 		if (get_user(c, buf))
 			return -EFAULT;
-
-		mutex_lock(&sysrq_mutex);
 		__handle_sysrq(c, false);
-		mutex_unlock(&sysrq_mutex);
 	}
 
 	return count;

@@ -26,6 +26,8 @@
 #include <linux/tracepoint-defs.h>
 #include <linux/srcu.h>
 #include <linux/static_call_types.h>
+#include <linux/cfi.h>
+#include <linux/android_kabi.h>
 
 #include <linux/percpu.h>
 #include <asm/module.h>
@@ -131,13 +133,17 @@ extern void cleanup_module(void);
 #define module_init(initfn)					\
 	static inline initcall_t __maybe_unused __inittest(void)		\
 	{ return initfn; }					\
-	int init_module(void) __copy(initfn) __attribute__((alias(#initfn)));
+	int init_module(void) __copy(initfn) 			\
+		__attribute__((alias(#initfn)));		\
+	__CFI_ADDRESSABLE(init_module)
 
 /* This is only required if you want to be unloadable. */
 #define module_exit(exitfn)					\
 	static inline exitcall_t __maybe_unused __exittest(void)		\
 	{ return exitfn; }					\
-	void cleanup_module(void) __copy(exitfn) __attribute__((alias(#exitfn)));
+	void cleanup_module(void) __copy(exitfn) 		\
+		__attribute__((alias(#exitfn))); 		\
+	__CFI_ADDRESSABLE(cleanup_module)
 
 #endif
 
@@ -350,12 +356,6 @@ struct mod_kallsyms {
 };
 
 #ifdef CONFIG_LIVEPATCH
-enum MODULE_KLP_REL_STATE {
-	MODULE_KLP_REL_NONE = 0,
-	MODULE_KLP_REL_UNDO,
-	MODULE_KLP_REL_DONE,
-};
-
 struct klp_modinfo {
 	Elf_Ehdr hdr;
 	Elf_Shdr *sechdrs;
@@ -378,12 +378,17 @@ struct module {
 	struct module_attribute *modinfo_attrs;
 	const char *version;
 	const char *srcversion;
+	const char *scmversion;
 	struct kobject *holders_dir;
 
 	/* Exported symbols */
 	const struct kernel_symbol *syms;
 	const s32 *crcs;
 	unsigned int num_syms;
+
+#ifdef CONFIG_CFI_CLANG
+	cfi_check_fn cfi_check;
+#endif
 
 	/* Kernel parameters. */
 #ifdef CONFIG_SYSFS
@@ -410,10 +415,12 @@ struct module {
 	const s32 *unused_gpl_crcs;
 #endif
 
-#ifdef CONFIG_MODULE_SIG
-	/* Signature was verified. */
+	/*
+	 * Signature was verified. Unconditionally compiled in Android to
+	 * preserve ABI compatibility between kernels without module
+	 * signing enabled and signed modules.
+	 */
 	bool sig_ok;
-#endif
 
 	bool async_probe_requested;
 
@@ -516,19 +523,6 @@ struct module {
 
 	/* Elf information */
 	struct klp_modinfo *klp_info;
-	/*
-	 * livepatch should relocate the key of jump_label by
-	 * using klp_apply_section_relocs. So it's necessary to
-	 * do jump_label_apply_nops() and jump_label_add_module()
-	 * later after livepatch relocation finised.
-	 *
-	 * for normal module :
-	 *	always MODULE_KLP_REL_DONE.
-	 * for livepatch module :
-	 *	init as MODULE_KLP_REL_UNDO,
-	 *	set to MODULE_KLP_REL_DONE when relocate completed.
-	 */
-	enum MODULE_KLP_REL_STATE klp_rel_state;
 #endif
 
 #ifdef CONFIG_MODULE_UNLOAD
@@ -553,10 +547,10 @@ struct module {
 	struct error_injection_entry *ei_funcs;
 	unsigned int num_ei_funcs;
 #endif
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
-	KABI_RESERVE(3)
-	KABI_RESERVE(4)
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
+	ANDROID_KABI_RESERVE(3);
+	ANDROID_KABI_RESERVE(4);
 } ____cacheline_aligned __randomize_layout;
 #ifndef MODULE_ARCH_INIT
 #define MODULE_ARCH_INIT {}
@@ -703,27 +697,10 @@ static inline bool is_livepatch_module(struct module *mod)
 {
 	return mod->klp;
 }
-
-static inline void set_mod_klp_rel_state(struct module *mod,
-			enum MODULE_KLP_REL_STATE state)
-{
-	mod->klp_rel_state = state;
-}
-
-static inline bool mod_klp_rel_completed(struct module *mod)
-{
-	return mod->klp_rel_state == MODULE_KLP_REL_NONE ||
-		mod->klp_rel_state == MODULE_KLP_REL_DONE;
-}
 #else /* !CONFIG_LIVEPATCH */
 static inline bool is_livepatch_module(struct module *mod)
 {
 	return false;
-}
-
-static inline bool mod_klp_rel_completed(struct module *mod)
-{
-	return true;
 }
 #endif /* CONFIG_LIVEPATCH */
 
@@ -890,14 +867,6 @@ extern int module_sysfs_initialized;
 /* BELOW HERE ALL THESE ARE OBSOLETE AND WILL VANISH */
 
 #define __MODULE_STRING(x) __stringify(x)
-
-#ifdef CONFIG_STRICT_MODULE_RWX
-extern void module_enable_ro(const struct module *mod, bool after_init);
-extern void module_disable_ro(const struct module *mod);
-#else
-static inline void module_enable_ro(const struct module *mod, bool after_init) { }
-static inline void module_disable_ro(const struct module *mod) { }
-#endif
 
 #ifdef CONFIG_GENERIC_BUG
 void module_bug_finalize(const Elf_Ehdr *, const Elf_Shdr *,

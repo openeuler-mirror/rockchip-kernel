@@ -1608,7 +1608,6 @@ static void hdmi_present_sense_via_verbs(struct hdmi_spec_per_pin *per_pin,
 	struct hda_codec *codec = per_pin->codec;
 	struct hdmi_spec *spec = codec->spec;
 	struct hdmi_eld *eld = &spec->temp_eld;
-	struct device *dev = hda_codec_dev(codec);
 	hda_nid_t pin_nid = per_pin->pin_nid;
 	int dev_id = per_pin->dev_id;
 	/*
@@ -1622,13 +1621,8 @@ static void hdmi_present_sense_via_verbs(struct hdmi_spec_per_pin *per_pin,
 	int present;
 	int ret;
 
-#ifdef	CONFIG_PM
-	if (dev->power.runtime_status == RPM_SUSPENDING)
-		return;
-#endif
-
 	ret = snd_hda_power_up_pm(codec);
-	if (ret < 0 && pm_runtime_suspended(dev))
+	if (ret < 0 && pm_runtime_suspended(hda_codec_dev(codec)))
 		goto out;
 
 	present = snd_hda_jack_pin_sense(codec, pin_nid, dev_id);
@@ -4256,20 +4250,6 @@ static int patch_via_hdmi(struct hda_codec *codec)
 	return patch_simple_hdmi(codec, VIAHDMI_CVT_NID, VIAHDMI_PIN_NID);
 }
 
-/* ZHAOXIN HDMI Implementation */
-static int patch_zx_hdmi(struct hda_codec *codec)
-{
-	int err;
-
-	err = patch_generic_hdmi(codec);
-	codec->no_sticky_stream = 1;
-
-	if (err)
-		return err;
-
-	return 0;
-}
-
 /*
  * patch entries
  */
@@ -4363,12 +4343,6 @@ HDA_CODEC_ENTRY(0x11069f80, "VX900 HDMI/DP",	patch_via_hdmi),
 HDA_CODEC_ENTRY(0x11069f81, "VX900 HDMI/DP",	patch_via_hdmi),
 HDA_CODEC_ENTRY(0x11069f84, "VX11 HDMI/DP",	patch_generic_hdmi),
 HDA_CODEC_ENTRY(0x11069f85, "VX11 HDMI/DP",	patch_generic_hdmi),
-HDA_CODEC_ENTRY(0x11069f86, "CND001 HDMI/DP",	patch_generic_hdmi),
-HDA_CODEC_ENTRY(0x11069f87, "CND001 HDMI/DP",	patch_generic_hdmi),
-HDA_CODEC_ENTRY(0x11069f88, "CHX001 HDMI/DP",	patch_zx_hdmi),
-HDA_CODEC_ENTRY(0x11069f89, "CHX001 HDMI/DP",	patch_zx_hdmi),
-HDA_CODEC_ENTRY(0x11069f8a, "CHX002 HDMI/DP",	patch_zx_hdmi),
-HDA_CODEC_ENTRY(0x11069f8b, "CHX002 HDMI/DP",	patch_zx_hdmi),
 HDA_CODEC_ENTRY(0x80860054, "IbexPeak HDMI",	patch_i915_cpt_hdmi),
 HDA_CODEC_ENTRY(0x80862800, "Geminilake HDMI",	patch_i915_glk_hdmi),
 HDA_CODEC_ENTRY(0x80862801, "Bearlake HDMI",	patch_generic_hdmi),
@@ -4388,21 +4362,14 @@ HDA_CODEC_ENTRY(0x8086280f, "Icelake HDMI",	patch_i915_icl_hdmi),
 HDA_CODEC_ENTRY(0x80862812, "Tigerlake HDMI",	patch_i915_tgl_hdmi),
 HDA_CODEC_ENTRY(0x80862814, "DG1 HDMI",	patch_i915_tgl_hdmi),
 HDA_CODEC_ENTRY(0x80862815, "Alderlake HDMI",	patch_i915_tgl_hdmi),
+HDA_CODEC_ENTRY(0x8086281c, "Alderlake-P HDMI", patch_i915_tgl_hdmi),
 HDA_CODEC_ENTRY(0x80862816, "Rocketlake HDMI",	patch_i915_tgl_hdmi),
-HDA_CODEC_ENTRY(0x80862819, "DG2 HDMI",	patch_i915_tgl_hdmi),
 HDA_CODEC_ENTRY(0x8086281a, "Jasperlake HDMI",	patch_i915_icl_hdmi),
 HDA_CODEC_ENTRY(0x8086281b, "Elkhartlake HDMI",	patch_i915_icl_hdmi),
-HDA_CODEC_ENTRY(0x8086281c, "Alderlake-P HDMI", patch_i915_tgl_hdmi),
 HDA_CODEC_ENTRY(0x80862880, "CedarTrail HDMI",	patch_generic_hdmi),
 HDA_CODEC_ENTRY(0x80862882, "Valleyview2 HDMI",	patch_i915_byt_hdmi),
 HDA_CODEC_ENTRY(0x80862883, "Braswell HDMI",	patch_i915_byt_hdmi),
 HDA_CODEC_ENTRY(0x808629fb, "Crestline HDMI",	patch_generic_hdmi),
-HDA_CODEC_ENTRY(0x1d179f86, "CND001 HDMI/DP",	patch_generic_hdmi),
-HDA_CODEC_ENTRY(0x1d179f87, "CND001 HDMI/DP",	patch_generic_hdmi),
-HDA_CODEC_ENTRY(0x1d179f88, "CHX001 HDMI/DP",	patch_zx_hdmi),
-HDA_CODEC_ENTRY(0x1d179f89, "CHX001 HDMI/DP",	patch_zx_hdmi),
-HDA_CODEC_ENTRY(0x1d179f8a, "CHX002 HDMI/DP",	patch_zx_hdmi),
-HDA_CODEC_ENTRY(0x1d179f8b, "CHX002 HDMI/DP",	patch_zx_hdmi),
 /* special ID for generic HDMI */
 HDA_CODEC_ENTRY(HDA_CODEC_ID_GENERIC_HDMI, "Generic HDMI", patch_generic_hdmi),
 {} /* terminator */

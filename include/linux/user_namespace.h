@@ -2,7 +2,6 @@
 #ifndef _LINUX_USER_NAMESPACE_H
 #define _LINUX_USER_NAMESPACE_H
 
-#include <linux/kabi.h>
 #include <linux/kref.h>
 #include <linux/nsproxy.h>
 #include <linux/ns_common.h>
@@ -11,6 +10,7 @@
 #include <linux/rwsem.h>
 #include <linux/sysctl.h>
 #include <linux/err.h>
+#include <linux/android_kabi.h>
 
 #define UID_GID_MAP_MAX_BASE_EXTENTS 5
 #define UID_GID_MAP_MAX_EXTENTS 340
@@ -51,26 +51,6 @@ enum ucount_type {
 	UCOUNT_INOTIFY_INSTANCES,
 	UCOUNT_INOTIFY_WATCHES,
 #endif
-	/* These 15 members are reserved (with extra margin) for the future
-	 * enlargement of enum ucount_type, as how RH8.1 did it. This number
-	 * should be enough, as 6 of them are very likely to be used in the near
-	 * future.
-	 */
-	UCOUNT_KABI_RESERVE1,
-	UCOUNT_KABI_RESERVE2,
-	UCOUNT_KABI_RESERVE3,
-	UCOUNT_KABI_RESERVE4,
-	UCOUNT_KABI_RESERVE5,
-	UCOUNT_KABI_RESERVE6,
-	UCOUNT_KABI_RESERVE7,
-	UCOUNT_KABI_RESERVE8,
-	UCOUNT_KABI_RESERVE9,
-	UCOUNT_KABI_RESERVE10,
-	UCOUNT_KABI_RESERVE11,
-	UCOUNT_KABI_RESERVE12,
-	UCOUNT_KABI_RESERVE13,
-	UCOUNT_KABI_RESERVE14,
-	UCOUNT_KABI_RESERVE15,
 	UCOUNT_COUNTS,
 };
 
@@ -110,18 +90,10 @@ struct user_namespace {
 	struct ctl_table_header *sysctls;
 #endif
 	struct ucounts		*ucounts;
-	long ucount_max[UCOUNT_COUNTS];
+	int ucount_max[UCOUNT_COUNTS];
 
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
-	KABI_RESERVE(3)
-	KABI_RESERVE(4)
-	KABI_RESERVE(5)
-	KABI_RESERVE(6)
-	KABI_RESERVE(7)
-	KABI_RESERVE(8)
-	KABI_RESERVE(9)
-	KABI_RESERVE(10)
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
 } __randomize_layout;
 
 struct ucounts {
@@ -129,7 +101,7 @@ struct ucounts {
 	struct user_namespace *ns;
 	kuid_t uid;
 	int count;
-	atomic_long_t ucount[UCOUNT_COUNTS];
+	atomic_t ucount[UCOUNT_COUNTS];
 };
 
 extern struct user_namespace init_user_ns;

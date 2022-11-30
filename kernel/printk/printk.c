@@ -54,11 +54,32 @@
 #include <trace/events/initcall.h>
 #define CREATE_TRACE_POINTS
 #include <trace/events/printk.h>
+#undef CREATE_TRACE_POINTS
+#include <trace/hooks/printk.h>
+#include <trace/hooks/logbuf.h>
 
 #include "printk_ringbuffer.h"
 #include "console_cmdline.h"
 #include "braille.h"
 #include "internal.h"
+
+#ifdef CONFIG_PRINTK_TIME_FROM_ARM_ARCH_TIMER
+#include <clocksource/arm_arch_timer.h>
+static u64 get_local_clock(void)
+{
+	u64 ns;
+
+	ns = arch_timer_read_counter() * 1000;
+	do_div(ns, 24);
+
+	return ns;
+}
+#else
+static inline u64 get_local_clock(void)
+{
+	return local_clock();
+}
+#endif
 
 int console_printk[4] = {
 	CONSOLE_LOGLEVEL_DEFAULT,	/* console_loglevel */
@@ -146,10 +167,8 @@ static int __control_devkmsg(char *str)
 
 static int __init control_devkmsg(char *str)
 {
-	if (__control_devkmsg(str) < 0) {
-		pr_warn("printk.devkmsg: bad option string '%s'\n", str);
+	if (__control_devkmsg(str) < 0)
 		return 1;
-	}
 
 	/*
 	 * Set sysctl string accordingly:
@@ -168,7 +187,7 @@ static int __init control_devkmsg(char *str)
 	 */
 	devkmsg_log |= DEVKMSG_LOG_MASK_LOCK;
 
-	return 1;
+	return 0;
 }
 __setup("printk.devkmsg=", control_devkmsg);
 
@@ -527,7 +546,7 @@ static int log_store(u32 caller_id, int facility, int level,
 	if (ts_nsec > 0)
 		r.info->ts_nsec = ts_nsec;
 	else
-		r.info->ts_nsec = local_clock();
+		r.info->ts_nsec = get_local_clock();
 	r.info->caller_id = caller_id;
 	if (dev_info)
 		memcpy(&r.info->dev_info, dev_info, sizeof(r.info->dev_info));
@@ -537,6 +556,8 @@ static int log_store(u32 caller_id, int facility, int level,
 		prb_commit(&e);
 	else
 		prb_final_commit(&e);
+
+	trace_android_vh_logbuf(prb, &r);
 
 	return (text_len + trunc_msg_len);
 }
@@ -1746,25 +1767,6 @@ static DEFINE_RAW_SPINLOCK(console_owner_lock);
 static struct task_struct *console_owner;
 static bool console_waiter;
 
-#if defined(CONFIG_X86) || defined(CONFIG_ARM64_PSEUDO_NMI)
-void zap_locks(void)
-{
-	if (raw_spin_is_locked(&logbuf_lock)) {
-		debug_locks_off();
-		raw_spin_lock_init(&logbuf_lock);
-	}
-
-	if (raw_spin_is_locked(&console_owner_lock)) {
-		raw_spin_lock_init(&console_owner_lock);
-	}
-
-	console_owner = NULL;
-	console_waiter = false;
-
-	sema_init(&console_sem, 1);
-}
-#endif
-
 /**
  * console_lock_spinning_enable - mark beginning of code where another
  *	thread might safely busy wait
@@ -1974,6 +1976,8 @@ static size_t log_output(int facility, int level, enum log_flags lflags,
 			} else {
 				prb_commit(&e);
 			}
+
+			trace_android_vh_logbuf_pr_cont(&r, text_len);
 			return text_len;
 		}
 	}
@@ -2236,15 +2240,8 @@ static int __init console_setup(char *str)
 	char *s, *options, *brl_options = NULL;
 	int idx;
 
-	/*
-	 * console="" or console=null have been suggested as a way to
-	 * disable console output. Use ttynull that has been created
-	 * for exacly this purpose.
-	 */
-	if (str[0] == 0 || strcmp(str, "null") == 0) {
-		__add_preferred_console("ttynull", 0, NULL, NULL, true);
+	if (str[0] == 0)
 		return 1;
-	}
 
 	if (_braille_console_setup(&str, &brl_options))
 		return 1;
@@ -2347,6 +2344,12 @@ void resume_console(void)
  */
 static int console_cpu_notify(unsigned int cpu)
 {
+	int flag = 0;
+
+	trace_android_vh_printk_hotplug(&flag);
+	if (flag)
+		return 0;
+
 	if (!cpuhp_tasks_frozen) {
 		/* If trylock fails, someone else is doing the printing */
 		if (console_trylock())
@@ -2651,7 +2654,6 @@ void console_flush_on_panic(enum con_flush_mode mode)
 	}
 	console_unlock();
 }
-EXPORT_SYMBOL(console_flush_on_panic);
 
 /*
  * Return the console tty driver structure and its associated index
@@ -3080,8 +3082,10 @@ static void wake_up_klogd_work_func(struct irq_work *irq_work)
 		wake_up_interruptible(&log_wait);
 }
 
-static DEFINE_PER_CPU(struct irq_work, wake_up_klogd_work) =
-	IRQ_WORK_INIT_LAZY(wake_up_klogd_work_func);
+static DEFINE_PER_CPU(struct irq_work, wake_up_klogd_work) = {
+	.func = wake_up_klogd_work_func,
+	.flags = ATOMIC_INIT(IRQ_WORK_LAZY),
+};
 
 void wake_up_klogd(void)
 {
@@ -3128,6 +3132,7 @@ int printk_deferred(const char *fmt, ...)
 
 	return r;
 }
+EXPORT_SYMBOL_GPL(printk_deferred);
 
 /*
  * printk rate limiting, lifted from the networking subsystem.

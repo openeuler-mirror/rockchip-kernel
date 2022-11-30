@@ -8,22 +8,6 @@
 #include <linux/acpi.h>
 #endif
 
-#ifdef CONFIG_X86
-static inline bool follow_mc146818_divider_reset(void)
-{
-	if ((boot_cpu_data.x86_vendor == X86_VENDOR_CENTAUR ||
-		boot_cpu_data.x86_vendor == X86_VENDOR_ZHAOXIN) &&
-		(boot_cpu_data.x86 <= 7 && boot_cpu_data.x86_model <= 59))
-		return false;
-	return true;
-}
-#else
-static inline bool follow_mc146818_divider_reset(void)
-{
-	return true;
-}
-#endif
-
 /*
  * Returns true if a clock update is in progress
  */
@@ -99,7 +83,7 @@ unsigned int mc146818_get_time(struct rtc_time *time)
 	time->tm_year += real_year - 72;
 #endif
 
-	if (century > 19)
+	if (century > 20)
 		time->tm_year += (century - 19) * 100;
 
 	/*
@@ -114,17 +98,6 @@ unsigned int mc146818_get_time(struct rtc_time *time)
 	return RTC_24H;
 }
 EXPORT_SYMBOL_GPL(mc146818_get_time);
-
-/* AMD systems don't allow access to AltCentury with DV1 */
-static bool apply_amd_register_a_behavior(void)
-{
-#ifdef CONFIG_X86
-	if (boot_cpu_data.x86_vendor == X86_VENDOR_AMD ||
-	    boot_cpu_data.x86_vendor == X86_VENDOR_HYGON)
-		return true;
-#endif
-	return false;
-}
 
 /* Set the current date and time in the real time clock. */
 int mc146818_set_time(struct rtc_time *time)
@@ -198,14 +171,8 @@ int mc146818_set_time(struct rtc_time *time)
 
 	save_control = CMOS_READ(RTC_CONTROL);
 	CMOS_WRITE((save_control|RTC_SET), RTC_CONTROL);
-	if (follow_mc146818_divider_reset()) {
-		save_freq_select = CMOS_READ(RTC_FREQ_SELECT);
-		if (apply_amd_register_a_behavior())
-			CMOS_WRITE((save_freq_select & ~RTC_AMD_BANK_SELECT), RTC_FREQ_SELECT);
-		else
-			CMOS_WRITE((save_freq_select|RTC_DIV_RESET2), RTC_FREQ_SELECT);
-	}
-
+	save_freq_select = CMOS_READ(RTC_FREQ_SELECT);
+	CMOS_WRITE((save_freq_select|RTC_DIV_RESET2), RTC_FREQ_SELECT);
 
 #ifdef CONFIG_MACH_DECSTATION
 	CMOS_WRITE(real_yrs, RTC_DEC_YEAR);
@@ -223,8 +190,7 @@ int mc146818_set_time(struct rtc_time *time)
 #endif
 
 	CMOS_WRITE(save_control, RTC_CONTROL);
-	if (follow_mc146818_divider_reset())
-		CMOS_WRITE(save_freq_select, RTC_FREQ_SELECT);
+	CMOS_WRITE(save_freq_select, RTC_FREQ_SELECT);
 
 	spin_unlock_irqrestore(&rtc_lock, flags);
 

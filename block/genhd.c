@@ -663,14 +663,6 @@ void blk_unregister_region(dev_t devt, unsigned long range)
 
 EXPORT_SYMBOL(blk_unregister_region);
 
-void blk_delete_region(dev_t devt, unsigned long range,
-			struct kobject *(*probe)(dev_t, int *, void *))
-{
-	kobj_delete(bdev_map, devt, range, probe);
-}
-
-EXPORT_SYMBOL(blk_delete_region);
-
 static struct kobject *exact_match(dev_t devt, int *partno, void *data)
 {
 	struct gendisk *p = data;
@@ -687,10 +679,25 @@ static int exact_lock(dev_t devt, void *data)
 	return 0;
 }
 
+static void disk_scan_partitions(struct gendisk *disk)
+{
+	struct block_device *bdev;
+
+	if (!get_capacity(disk) || !disk_part_scan_enabled(disk))
+		return;
+
+	set_bit(GD_NEED_PART_SCAN, &disk->state);
+	bdev = blkdev_get_by_dev(disk_devt(disk), FMODE_READ, NULL);
+	if (!IS_ERR(bdev))
+		blkdev_put(bdev, FMODE_READ);
+}
+
 static void register_disk(struct device *parent, struct gendisk *disk,
 			  const struct attribute_group **groups)
 {
 	struct device *ddev = disk_to_dev(disk);
+	struct disk_part_iter piter;
+	struct hd_struct *part;
 	int err;
 
 	ddev->parent = parent;
@@ -727,6 +734,18 @@ static void register_disk(struct device *parent, struct gendisk *disk,
 
 	if (disk->flags & GENHD_FL_HIDDEN)
 		return;
+
+	disk_scan_partitions(disk);
+
+	/* announce disk after possible partitions are created */
+	dev_set_uevent_suppress(ddev, 0);
+	kobject_uevent(&ddev->kobj, KOBJ_ADD);
+
+	/* announce possible partitions */
+	disk_part_iter_init(&piter, disk, 0);
+	while ((part = disk_part_iter_next(&piter)))
+		kobject_uevent(&part_to_dev(part)->kobj, KOBJ_ADD);
+	disk_part_iter_exit(&piter);
 
 	if (disk->queue->backing_dev_info->dev) {
 		err = sysfs_create_link(&ddev->kobj,
@@ -771,6 +790,8 @@ static void __device_add_disk(struct device *parent, struct gendisk *disk,
 	WARN_ON(disk->minors && !(disk->major || disk->first_minor));
 	WARN_ON(!disk->minors &&
 		!(disk->flags & (GENHD_FL_EXT_DEVT | GENHD_FL_HIDDEN)));
+
+	disk->flags |= GENHD_FL_UP;
 
 	retval = blk_alloc_devt(&disk->part0, &devt);
 	if (retval) {
@@ -1264,55 +1285,19 @@ ssize_t part_size_show(struct device *dev,
 		(unsigned long long)part_nr_sects_read(p));
 }
 
-#ifdef CONFIG_64BIT
-static void part_set_stat_time(struct hd_struct *hd)
-{
-	u64 now = ktime_get_ns();
-
-again:
-	hd->stat_time = now;
-	if (hd->partno) {
-		hd = &part_to_disk(hd)->part0;
-		goto again;
-	}
-}
-#endif
-
-static void part_get_stat_info(struct hd_struct *hd, struct disk_stats *stat,
-			       unsigned int *inflight)
-{
-#ifdef CONFIG_64BIT
-	struct request_queue *q = part_to_disk(hd)->queue;
-	if (queue_is_mq(q)) {
-		mutex_lock(&part_to_dev(hd)->mutex);
-		part_stat_lock();
-		part_set_stat_time(hd);
-		*inflight = blk_mq_in_flight_with_stat(q, hd);
-		part_stat_unlock();
-		mutex_unlock(&part_to_dev(hd)->mutex);
-	} else {
-		*inflight = part_in_flight(hd);
-	}
-#else
-	*inflight = part_in_flight(hd);
-#endif
-	if (*inflight) {
-		part_stat_lock();
-		update_io_ticks(hd, jiffies, true);
-		part_stat_unlock();
-	}
-
-	part_stat_read_all(hd, stat);
-}
-
 ssize_t part_stat_show(struct device *dev,
 		       struct device_attribute *attr, char *buf)
 {
 	struct hd_struct *p = dev_to_part(dev);
+	struct request_queue *q = part_to_disk(p)->queue;
 	struct disk_stats stat;
 	unsigned int inflight;
 
-	part_get_stat_info(p, &stat, &inflight);
+	part_stat_read_all(p, &stat);
+	if (queue_is_mq(q))
+		inflight = blk_mq_in_flight(q, p);
+	else
+		inflight = part_in_flight(p);
 
 	return sprintf(buf,
 		"%8lu %8lu %8llu %8u "
@@ -1630,7 +1615,12 @@ static int diskstats_show(struct seq_file *seqf, void *v)
 
 	disk_part_iter_init(&piter, gp, DISK_PITER_INCL_EMPTY_PART0);
 	while ((hd = disk_part_iter_next(&piter))) {
-		part_get_stat_info(hd, &stat, &inflight);
+		part_stat_read_all(hd, &stat);
+		if (queue_is_mq(gp->queue))
+			inflight = blk_mq_in_flight(gp->queue, hd);
+		else
+			inflight = part_in_flight(hd);
+
 		seq_printf(seqf, "%4d %7d %s "
 			   "%lu %lu %lu %u "
 			   "%lu %lu %lu %u "
@@ -1857,40 +1847,26 @@ static void set_disk_ro_uevent(struct gendisk *gd, int ro)
 	kobject_uevent_env(&disk_to_dev(gd)->kobj, KOBJ_CHANGE, envp);
 }
 
-void set_device_ro(struct block_device *bdev, bool state)
+void set_device_ro(struct block_device *bdev, int flag)
 {
-	bdev->bd_part->read_only = state;
+	bdev->bd_part->policy = flag;
 }
 
 EXPORT_SYMBOL(set_device_ro);
 
-bool get_user_ro(struct gendisk *disk, unsigned int partno)
-{
-	/* Is the user read-only bit set for the whole disk device? */
-	if (test_bit(0, disk->user_ro_bitmap))
-		return true;
-
-	/* Is the user read-only bit set for this particular partition? */
-	if (test_bit(partno, disk->user_ro_bitmap))
-		return true;
-
-	return false;
-}
-
-void set_disk_ro(struct gendisk *disk, bool state)
+void set_disk_ro(struct gendisk *disk, int flag)
 {
 	struct disk_part_iter piter;
 	struct hd_struct *part;
 
-	if (disk->part0.read_only != state)
-		set_disk_ro_uevent(disk, state);
+	if (disk->part0.policy != flag) {
+		set_disk_ro_uevent(disk, flag);
+		disk->part0.policy = flag;
+	}
 
-	disk_part_iter_init(&piter, disk, DISK_PITER_INCL_EMPTY_PART0);
+	disk_part_iter_init(&piter, disk, DISK_PITER_INCL_EMPTY);
 	while ((part = disk_part_iter_next(&piter)))
-		if (get_user_ro(disk, part->partno))
-			part->read_only = true;
-		else
-			part->read_only = state;
+		part->policy = flag;
 	disk_part_iter_exit(&piter);
 }
 
@@ -1900,7 +1876,7 @@ int bdev_read_only(struct block_device *bdev)
 {
 	if (!bdev)
 		return 0;
-	return bdev->bd_part->read_only;
+	return bdev->bd_part->policy;
 }
 
 EXPORT_SYMBOL(bdev_read_only);

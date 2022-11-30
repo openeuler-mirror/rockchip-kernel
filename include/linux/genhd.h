@@ -10,7 +10,6 @@
  *		<drew@colorado.edu>
  */
 
-#include <linux/kabi.h>
 #include <linux/types.h>
 #include <linux/kdev_t.h>
 #include <linux/rcupdate.h>
@@ -18,6 +17,7 @@
 #include <linux/percpu-refcount.h>
 #include <linux/uuid.h>
 #include <linux/blk_types.h>
+#include <linux/android_kabi.h>
 #include <asm/local.h>
 
 #define dev_to_disk(device)	container_of((device), struct gendisk, part0.__dev)
@@ -68,18 +68,17 @@ struct hd_struct {
 
 	struct device __dev;
 	struct kobject *holder_dir;
-	bool read_only;
-	int partno;
+	int policy, partno;
 	struct partition_meta_info *info;
 #ifdef CONFIG_FAIL_MAKE_REQUEST
 	int make_it_fail;
 #endif
 	struct rcu_work rcu_work;
 
-	KABI_USE(1, u64 stat_time)
-	KABI_RESERVE(2)
-	KABI_RESERVE(3)
-	KABI_RESERVE(4)
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
+	ANDROID_KABI_RESERVE(3);
+	ANDROID_KABI_RESERVE(4);
 };
 
 /**
@@ -170,8 +169,8 @@ struct blk_integrity {
 	unsigned char				interval_exp;
 	unsigned char				tag_size;
 
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
 };
 
 struct gendisk {
@@ -195,7 +194,6 @@ struct gendisk {
 	 */
 	struct disk_part_tbl __rcu *part_tbl;
 	struct hd_struct part0;
-	DECLARE_BITMAP(user_ro_bitmap, DISK_MAX_PARTS);
 
 	const struct block_device_operations *fops;
 	struct request_queue *queue;
@@ -208,7 +206,7 @@ struct gendisk {
 	struct kobject *slave_dir;
 
 	struct timer_rand_state *random;
-	atomic64_t sync_io_sectors;     /* RAID */
+	atomic_t sync_io;		/* RAID */
 	struct disk_events *ev;
 #ifdef  CONFIG_BLK_DEV_INTEGRITY
 	struct kobject integrity_kobj;
@@ -220,10 +218,11 @@ struct gendisk {
 	struct badblocks *bb;
 	struct lockdep_map lockdep_map;
 
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
-	KABI_RESERVE(3)
-	KABI_RESERVE(4)
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
+	ANDROID_KABI_RESERVE(3);
+	ANDROID_KABI_RESERVE(4);
+
 };
 
 #if IS_REACHABLE(CONFIG_CDROM)
@@ -320,13 +319,12 @@ extern void del_gendisk(struct gendisk *gp);
 extern struct gendisk *get_gendisk(dev_t dev, int *partno);
 extern struct block_device *bdget_disk(struct gendisk *disk, int partno);
 
-extern void set_device_ro(struct block_device *bdev, bool state);
-extern void set_disk_ro(struct gendisk *disk, bool state);
-extern bool get_user_ro(struct gendisk *disk, unsigned int partno);
+extern void set_device_ro(struct block_device *bdev, int flag);
+extern void set_disk_ro(struct gendisk *disk, int flag);
 
 static inline int get_disk_ro(struct gendisk *disk)
 {
-	return disk->part0.read_only;
+	return disk->part0.policy;
 }
 
 extern void disk_block_events(struct gendisk *disk);
@@ -366,8 +364,6 @@ extern void blk_register_region(dev_t devt, unsigned long range,
 			int (*lock)(dev_t, void *),
 			void *data);
 extern void blk_unregister_region(dev_t devt, unsigned long range);
-extern void blk_delete_region(dev_t devt, unsigned long range,
-			struct kobject *(*probe)(dev_t, int *, void *));
 
 #define alloc_disk_node(minors, node_id)				\
 ({									\

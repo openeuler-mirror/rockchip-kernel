@@ -24,7 +24,6 @@ struct xlog_ticket;
 struct xlog_recover;
 struct xlog_recover_item;
 struct xlog_rec_header;
-struct xlog_in_core;
 struct xfs_buf_log_format;
 struct xfs_inode_log_format;
 struct xfs_bmbt_irec;
@@ -38,7 +37,6 @@ struct xfs_trans_res;
 struct xfs_inobt_rec_incore;
 union xfs_btree_ptr;
 struct xfs_dqtrx;
-struct xfs_icwalk;
 
 #define XFS_ATTR_FILTER_FLAGS \
 	{ XFS_ATTR_ROOT,	"ROOT" }, \
@@ -136,86 +134,12 @@ DEFINE_EVENT(xfs_perag_class, name,	\
 DEFINE_PERAG_REF_EVENT(xfs_perag_get);
 DEFINE_PERAG_REF_EVENT(xfs_perag_get_tag);
 DEFINE_PERAG_REF_EVENT(xfs_perag_put);
-DEFINE_PERAG_REF_EVENT(xfs_perag_set_inode_tag);
-DEFINE_PERAG_REF_EVENT(xfs_perag_clear_inode_tag);
-
-TRACE_EVENT(xfs_inodegc_worker,
-	TP_PROTO(struct xfs_mount *mp, unsigned int shrinker_hits),
-	TP_ARGS(mp, shrinker_hits),
-	TP_STRUCT__entry(
-		__field(dev_t, dev)
-		__field(unsigned int, shrinker_hits)
-	),
-	TP_fast_assign(
-		__entry->dev = mp->m_super->s_dev;
-		__entry->shrinker_hits = shrinker_hits;
-	),
-	TP_printk("dev %d:%d shrinker_hits %u",
-		  MAJOR(__entry->dev), MINOR(__entry->dev),
-		  __entry->shrinker_hits)
-);
-
-DECLARE_EVENT_CLASS(xfs_fs_class,
-	TP_PROTO(struct xfs_mount *mp, void *caller_ip),
-	TP_ARGS(mp, caller_ip),
-	TP_STRUCT__entry(
-		__field(dev_t, dev)
-		__field(unsigned long long, mflags)
-		__field(unsigned long, opstate)
-		__field(unsigned long, sbflags)
-		__field(void *, caller_ip)
-	),
-	TP_fast_assign(
-		if (mp) {
-			__entry->dev = mp->m_super->s_dev;
-			__entry->mflags = mp->m_flags;
-			__entry->opstate = mp->m_opstate;
-			__entry->sbflags = mp->m_super->s_flags;
-		}
-		__entry->caller_ip = caller_ip;
-	),
-	TP_printk("dev %d:%d m_flags 0x%llx opstate (%s) s_flags 0x%lx caller %pS",
-		  MAJOR(__entry->dev), MINOR(__entry->dev),
-		  __entry->mflags,
-		  __print_flags(__entry->opstate, "|", XFS_OPSTATE_STRINGS),
-		  __entry->sbflags,
-		  __entry->caller_ip)
-);
-
-#define DEFINE_FS_EVENT(name)	\
-DEFINE_EVENT(xfs_fs_class, name,					\
-	TP_PROTO(struct xfs_mount *mp, void *caller_ip), \
-	TP_ARGS(mp, caller_ip))
-DEFINE_FS_EVENT(xfs_inodegc_flush);
-DEFINE_FS_EVENT(xfs_inodegc_start);
-DEFINE_FS_EVENT(xfs_inodegc_stop);
-DEFINE_FS_EVENT(xfs_inodegc_queue);
-DEFINE_FS_EVENT(xfs_inodegc_throttle);
-DEFINE_FS_EVENT(xfs_fs_sync_fs);
-DEFINE_FS_EVENT(xfs_blockgc_start);
-DEFINE_FS_EVENT(xfs_blockgc_stop);
-DEFINE_FS_EVENT(xfs_blockgc_worker);
-DEFINE_FS_EVENT(xfs_blockgc_flush_all);
-
-TRACE_EVENT(xfs_inodegc_shrinker_scan,
-	TP_PROTO(struct xfs_mount *mp, struct shrink_control *sc,
-		 void *caller_ip),
-	TP_ARGS(mp, sc, caller_ip),
-	TP_STRUCT__entry(
-		__field(dev_t, dev)
-		__field(unsigned long, nr_to_scan)
-		__field(void *, caller_ip)
-	),
-	TP_fast_assign(
-		__entry->dev = mp->m_super->s_dev;
-		__entry->nr_to_scan = sc->nr_to_scan;
-		__entry->caller_ip = caller_ip;
-	),
-	TP_printk("dev %d:%d nr_to_scan %lu caller %pS",
-		  MAJOR(__entry->dev), MINOR(__entry->dev),
-		  __entry->nr_to_scan,
-		  __entry->caller_ip)
-);
+DEFINE_PERAG_REF_EVENT(xfs_perag_set_reclaim);
+DEFINE_PERAG_REF_EVENT(xfs_perag_clear_reclaim);
+DEFINE_PERAG_REF_EVENT(xfs_perag_set_eofblocks);
+DEFINE_PERAG_REF_EVENT(xfs_perag_clear_eofblocks);
+DEFINE_PERAG_REF_EVENT(xfs_perag_set_cowblocks);
+DEFINE_PERAG_REF_EVENT(xfs_perag_clear_cowblocks);
 
 DECLARE_EVENT_CLASS(xfs_ag_class,
 	TP_PROTO(struct xfs_mount *mp, xfs_agnumber_t agno),
@@ -676,17 +600,14 @@ DECLARE_EVENT_CLASS(xfs_inode_class,
 	TP_STRUCT__entry(
 		__field(dev_t, dev)
 		__field(xfs_ino_t, ino)
-		__field(unsigned long, iflags)
 	),
 	TP_fast_assign(
 		__entry->dev = VFS_I(ip)->i_sb->s_dev;
 		__entry->ino = ip->i_ino;
-		__entry->iflags = ip->i_flags;
 	),
-	TP_printk("dev %d:%d ino 0x%llx iflags 0x%lx",
+	TP_printk("dev %d:%d ino 0x%llx",
 		  MAJOR(__entry->dev), MINOR(__entry->dev),
-		  __entry->ino,
-		  __entry->iflags)
+		  __entry->ino)
 )
 
 #define DEFINE_INODE_EVENT(name) \
@@ -694,8 +615,8 @@ DEFINE_EVENT(xfs_inode_class, name, \
 	TP_PROTO(struct xfs_inode *ip), \
 	TP_ARGS(ip))
 DEFINE_INODE_EVENT(xfs_iget_skip);
-DEFINE_INODE_EVENT(xfs_iget_recycle);
-DEFINE_INODE_EVENT(xfs_iget_recycle_fail);
+DEFINE_INODE_EVENT(xfs_iget_reclaim);
+DEFINE_INODE_EVENT(xfs_iget_reclaim_fail);
 DEFINE_INODE_EVENT(xfs_iget_hit);
 DEFINE_INODE_EVENT(xfs_iget_miss);
 
@@ -730,10 +651,6 @@ DEFINE_INODE_EVENT(xfs_inode_free_eofblocks_invalid);
 DEFINE_INODE_EVENT(xfs_inode_set_cowblocks_tag);
 DEFINE_INODE_EVENT(xfs_inode_clear_cowblocks_tag);
 DEFINE_INODE_EVENT(xfs_inode_free_cowblocks_invalid);
-DEFINE_INODE_EVENT(xfs_inode_set_reclaimable);
-DEFINE_INODE_EVENT(xfs_inode_reclaiming);
-DEFINE_INODE_EVENT(xfs_inode_set_need_inactive);
-DEFINE_INODE_EVENT(xfs_inode_inactivating);
 
 /*
  * ftrace's __print_symbolic requires that all enum values be wrapped in the
@@ -3758,6 +3675,8 @@ DEFINE_EVENT(xfs_kmem_class, name, \
 	TP_PROTO(ssize_t size, int flags, unsigned long caller_ip), \
 	TP_ARGS(size, flags, caller_ip))
 DEFINE_KMEM_EVENT(kmem_alloc);
+DEFINE_KMEM_EVENT(kmem_alloc_io);
+DEFINE_KMEM_EVENT(kmem_alloc_large);
 
 TRACE_EVENT(xfs_check_new_dalign,
 	TP_PROTO(struct xfs_mount *mp, int new_dalign, xfs_ino_t calc_rootino),
@@ -3950,108 +3869,6 @@ DEFINE_EVENT(xfs_timestamp_range_class, name, \
 	TP_ARGS(mp, min, max))
 DEFINE_TIMESTAMP_RANGE_EVENT(xfs_inode_timestamp_range);
 DEFINE_TIMESTAMP_RANGE_EVENT(xfs_quota_expiry_range);
-
-DECLARE_EVENT_CLASS(xfs_icwalk_class,
-	TP_PROTO(struct xfs_mount *mp, struct xfs_icwalk *icw,
-		 unsigned long caller_ip),
-	TP_ARGS(mp, icw, caller_ip),
-	TP_STRUCT__entry(
-		__field(dev_t, dev)
-		__field(__u32, flags)
-		__field(uint32_t, uid)
-		__field(uint32_t, gid)
-		__field(prid_t, prid)
-		__field(__u64, min_file_size)
-		__field(int, scan_limit)
-		__field(unsigned long, caller_ip)
-	),
-	TP_fast_assign(
-		__entry->dev = mp->m_super->s_dev;
-		__entry->flags = icw ? icw->icw_flags : 0;
-		__entry->uid = icw ? from_kuid(mp->m_super->s_user_ns,
-						icw->icw_uid) : 0;
-		__entry->gid = icw ? from_kgid(mp->m_super->s_user_ns,
-						icw->icw_gid) : 0;
-		__entry->prid = icw ? icw->icw_prid : 0;
-		__entry->min_file_size = icw ? icw->icw_min_file_size : 0;
-		__entry->scan_limit = icw ? icw->icw_scan_limit : 0;
-		__entry->caller_ip = caller_ip;
-	),
-	TP_printk("dev %d:%d flags 0x%x uid %u gid %u prid %u minsize %llu scan_limit %d caller %pS",
-		  MAJOR(__entry->dev), MINOR(__entry->dev),
-		  __entry->flags,
-		  __entry->uid,
-		  __entry->gid,
-		  __entry->prid,
-		  __entry->min_file_size,
-		  __entry->scan_limit,
-		  (char *)__entry->caller_ip)
-);
-#define DEFINE_ICWALK_EVENT(name)	\
-DEFINE_EVENT(xfs_icwalk_class, name,	\
-	TP_PROTO(struct xfs_mount *mp, struct xfs_icwalk *icw, \
-		 unsigned long caller_ip), \
-	TP_ARGS(mp, icw, caller_ip))
-DEFINE_ICWALK_EVENT(xfs_ioc_free_eofblocks);
-DEFINE_ICWALK_EVENT(xfs_blockgc_free_space);
-
-TRACE_DEFINE_ENUM(XLOG_STATE_ACTIVE);
-TRACE_DEFINE_ENUM(XLOG_STATE_WANT_SYNC);
-TRACE_DEFINE_ENUM(XLOG_STATE_SYNCING);
-TRACE_DEFINE_ENUM(XLOG_STATE_DONE_SYNC);
-TRACE_DEFINE_ENUM(XLOG_STATE_CALLBACK);
-TRACE_DEFINE_ENUM(XLOG_STATE_DIRTY);
-
-DECLARE_EVENT_CLASS(xlog_iclog_class,
-	TP_PROTO(struct xlog_in_core *iclog, unsigned long caller_ip),
-	TP_ARGS(iclog, caller_ip),
-	TP_STRUCT__entry(
-		__field(dev_t, dev)
-		__field(uint32_t, state)
-		__field(int32_t, refcount)
-		__field(uint32_t, offset)
-		__field(unsigned long long, lsn)
-		__field(unsigned long, caller_ip)
-	),
-	TP_fast_assign(
-		__entry->dev = iclog->ic_log->l_mp->m_super->s_dev;
-		__entry->state = iclog->ic_state;
-		__entry->refcount = atomic_read(&iclog->ic_refcnt);
-		__entry->offset = iclog->ic_offset;
-		__entry->lsn = be64_to_cpu(iclog->ic_header.h_lsn);
-		__entry->caller_ip = caller_ip;
-	),
-	TP_printk("dev %d:%d state %s refcnt %d offset %u lsn 0x%llx caller %pS",
-		  MAJOR(__entry->dev), MINOR(__entry->dev),
-		  __print_symbolic(__entry->state, XLOG_STATE_STRINGS),
-		  __entry->refcount,
-		  __entry->offset,
-		  __entry->lsn,
-		  (char *)__entry->caller_ip)
-
-);
-
-#define DEFINE_ICLOG_EVENT(name)	\
-DEFINE_EVENT(xlog_iclog_class, name,	\
-	TP_PROTO(struct xlog_in_core *iclog, unsigned long caller_ip), \
-	TP_ARGS(iclog, caller_ip))
-
-DEFINE_ICLOG_EVENT(xlog_iclog_activate);
-DEFINE_ICLOG_EVENT(xlog_iclog_clean);
-DEFINE_ICLOG_EVENT(xlog_iclog_callback);
-DEFINE_ICLOG_EVENT(xlog_iclog_callbacks_start);
-DEFINE_ICLOG_EVENT(xlog_iclog_callbacks_done);
-DEFINE_ICLOG_EVENT(xlog_iclog_force);
-DEFINE_ICLOG_EVENT(xlog_iclog_force_lsn);
-DEFINE_ICLOG_EVENT(xlog_iclog_get_space);
-DEFINE_ICLOG_EVENT(xlog_iclog_release);
-DEFINE_ICLOG_EVENT(xlog_iclog_switch);
-DEFINE_ICLOG_EVENT(xlog_iclog_sync);
-DEFINE_ICLOG_EVENT(xlog_iclog_syncing);
-DEFINE_ICLOG_EVENT(xlog_iclog_sync_done);
-DEFINE_ICLOG_EVENT(xlog_iclog_want_sync);
-DEFINE_ICLOG_EVENT(xlog_iclog_wait_on);
-DEFINE_ICLOG_EVENT(xlog_iclog_write);
 
 #endif /* _TRACE_XFS_H */
 

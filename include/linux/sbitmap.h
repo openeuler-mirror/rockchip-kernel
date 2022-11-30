@@ -9,7 +9,6 @@
 #ifndef __LINUX_SCALE_BITMAP_H
 #define __LINUX_SCALE_BITMAP_H
 
-#include <linux/kabi.h>
 #include <linux/kernel.h>
 #include <linux/slab.h>
 
@@ -66,8 +65,6 @@ struct sbitmap {
 	 * @map: Allocated bitmap.
 	 */
 	struct sbitmap_word *map;
-
-	KABI_RESERVE(1)
 };
 
 #define SBQ_WAIT_QUEUES 8

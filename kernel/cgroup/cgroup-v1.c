@@ -17,6 +17,7 @@
 #include <linux/fs_parser.h>
 
 #include <trace/events/cgroup.h>
+#include <trace/hooks/cgroup.h>
 
 /*
  * pidlists linger the following amount before being destroyed.  The goal
@@ -393,7 +394,6 @@ static void *cgroup_pidlist_start(struct seq_file *s, loff_t *pos)
 	 * next pid to display, if any
 	 */
 	struct kernfs_open_file *of = s->private;
-	struct cgroup_file_ctx *ctx = of->priv;
 	struct cgroup *cgrp = seq_css(s)->cgroup;
 	struct cgroup_pidlist *l;
 	enum cgroup_filetype type = seq_cft(s)->private;
@@ -403,24 +403,25 @@ static void *cgroup_pidlist_start(struct seq_file *s, loff_t *pos)
 	mutex_lock(&cgrp->pidlist_mutex);
 
 	/*
-	 * !NULL @ctx->procs1.pidlist indicates that this isn't the first
-	 * start() after open. If the matching pidlist is around, we can use
-	 * that. Look for it. Note that @ctx->procs1.pidlist can't be used
-	 * directly. It could already have been destroyed.
+	 * !NULL @of->priv indicates that this isn't the first start()
+	 * after open.  If the matching pidlist is around, we can use that.
+	 * Look for it.  Note that @of->priv can't be used directly.  It
+	 * could already have been destroyed.
 	 */
-	if (ctx->procs1.pidlist)
-		ctx->procs1.pidlist = cgroup_pidlist_find(cgrp, type);
+	if (of->priv)
+		of->priv = cgroup_pidlist_find(cgrp, type);
 
 	/*
 	 * Either this is the first start() after open or the matching
 	 * pidlist has been destroyed inbetween.  Create a new one.
 	 */
-	if (!ctx->procs1.pidlist) {
-		ret = pidlist_array_load(cgrp, type, &ctx->procs1.pidlist);
+	if (!of->priv) {
+		ret = pidlist_array_load(cgrp, type,
+					 (struct cgroup_pidlist **)&of->priv);
 		if (ret)
 			return ERR_PTR(ret);
 	}
-	l = ctx->procs1.pidlist;
+	l = of->priv;
 
 	if (pid) {
 		int end = l->length;
@@ -448,8 +449,7 @@ static void *cgroup_pidlist_start(struct seq_file *s, loff_t *pos)
 static void cgroup_pidlist_stop(struct seq_file *s, void *v)
 {
 	struct kernfs_open_file *of = s->private;
-	struct cgroup_file_ctx *ctx = of->priv;
-	struct cgroup_pidlist *l = ctx->procs1.pidlist;
+	struct cgroup_pidlist *l = of->priv;
 
 	if (l)
 		mod_delayed_work(cgroup_pidlist_destroy_wq, &l->destroy_dwork,
@@ -460,8 +460,7 @@ static void cgroup_pidlist_stop(struct seq_file *s, void *v)
 static void *cgroup_pidlist_next(struct seq_file *s, void *v, loff_t *pos)
 {
 	struct kernfs_open_file *of = s->private;
-	struct cgroup_file_ctx *ctx = of->priv;
-	struct cgroup_pidlist *l = ctx->procs1.pidlist;
+	struct cgroup_pidlist *l = of->priv;
 	pid_t *p = v;
 	pid_t *end = l->list + l->length;
 	/*
@@ -499,27 +498,28 @@ static ssize_t __cgroup1_procs_write(struct kernfs_open_file *of,
 	if (!cgrp)
 		return -ENODEV;
 
-	task = cgroup_procs_write_start(buf, threadgroup, &locked);
+	task = cgroup_procs_write_start(buf, threadgroup, &locked, cgrp);
 	ret = PTR_ERR_OR_ZERO(task);
 	if (ret)
 		goto out_unlock;
 
 	/*
-	 * Even if we're attaching all tasks in the thread group, we only need
-	 * to check permissions on one of them. Check permissions using the
-	 * credentials from file open to protect against inherited fd attacks.
+	 * Even if we're attaching all tasks in the thread group, we only
+	 * need to check permissions on one of them.
 	 */
-	cred = of->file->f_cred;
+	cred = current_cred();
 	tcred = get_task_cred(task);
 	if (!uid_eq(cred->euid, GLOBAL_ROOT_UID) &&
 	    !uid_eq(cred->euid, tcred->uid) &&
-	    !uid_eq(cred->euid, tcred->suid))
+	    !uid_eq(cred->euid, tcred->suid) &&
+	    !ns_capable(tcred->user_ns, CAP_SYS_NICE))
 		ret = -EACCES;
 	put_cred(tcred);
 	if (ret)
 		goto out_finish;
 
 	ret = cgroup_attach_task(cgrp, task, threadgroup);
+	trace_android_vh_cgroup_set_task(ret, task);
 
 out_finish:
 	cgroup_procs_write_finish(task, locked);
@@ -545,18 +545,8 @@ static ssize_t cgroup_release_agent_write(struct kernfs_open_file *of,
 					  char *buf, size_t nbytes, loff_t off)
 {
 	struct cgroup *cgrp;
-	struct cgroup_file_ctx *ctx;
 
 	BUILD_BUG_ON(sizeof(cgrp->root->release_agent_path) < PATH_MAX);
-
-	/*
-	 * Release agent gets called with all capabilities,
-	 * require capabilities to set release agent.
-	 */
-	ctx = of->priv;
-	if ((ctx->ns->user_ns != &init_user_ns) ||
-	    !file_ns_capable(of->file, &init_user_ns, CAP_SYS_ADMIN))
-		return -EPERM;
 
 	cgrp = cgroup_kn_lock_live(of->kn, false);
 	if (!cgrp)
@@ -660,11 +650,6 @@ struct cftype cgroup1_base_files[] = {
 		.write = cgroup_release_agent_write,
 		.max_write_len = PATH_MAX - 1,
 	},
-	{
-		.name = "cgroup.kill",
-		.flags = CFTYPE_NOT_ON_ROOT,
-		.write = cgroup_kill_write,
-	},
 	{ }	/* terminate */
 };
 
@@ -673,7 +658,6 @@ int proc_cgroupstats_show(struct seq_file *m, void *v)
 {
 	struct cgroup_subsys *ss;
 	int i;
-	bool dead;
 
 	seq_puts(m, "#subsys_name\thierarchy\tnum_cgroups\tenabled\n");
 	/*
@@ -684,13 +668,10 @@ int proc_cgroupstats_show(struct seq_file *m, void *v)
 	mutex_lock(&cgroup_mutex);
 
 	for_each_subsys(ss, i)
-	for_each_subsys(ss, i) {
-		dead = percpu_ref_is_dying(&ss->root->cgrp.self.refcnt);
 		seq_printf(m, "%s\t%d\t%d\t%d\n",
-			   ss->legacy_name, dead ? 0 : ss->root->hierarchy_id,
-			   dead ? 0 : atomic_read(&ss->root->nr_cgrps),
+			   ss->legacy_name, ss->root->hierarchy_id,
+			   atomic_read(&ss->root->nr_cgrps),
 			   cgroup_ssid_enabled(i));
-	}
 
 	mutex_unlock(&cgroup_mutex);
 	return 0;
@@ -933,11 +914,15 @@ int cgroup1_parse_param(struct fs_context *fc, struct fs_parameter *param)
 
 	opt = fs_parse(fc, cgroup1_fs_parameters, param, &result);
 	if (opt == -ENOPARAM) {
-		int ret;
-
-		ret = vfs_parse_fs_param_source(fc, param);
-		if (ret != -ENOPARAM)
-			return ret;
+		if (strcmp(param->key, "source") == 0) {
+			if (param->type != fs_value_is_string)
+				return invalf(fc, "Non-string source");
+			if (fc->source)
+				return invalf(fc, "Multiple sources not supported");
+			fc->source = param->string;
+			param->string = NULL;
+			return 0;
+		}
 		for_each_subsys(ss, i) {
 			if (strcmp(param->key, ss->legacy_name))
 				continue;
@@ -976,12 +961,6 @@ int cgroup1_parse_param(struct fs_context *fc, struct fs_parameter *param)
 		/* Specifying two release agents is forbidden */
 		if (ctx->release_agent)
 			return invalfc(fc, "release_agent respecified");
-		/*
-		 * Release agent gets called with all capabilities,
-		 * require capabilities to set release agent.
-		 */
-		if ((fc->user_ns != &init_user_ns) || !capable(CAP_SYS_ADMIN))
-			return invalfc(fc, "Setting release_agent not allowed");
 		ctx->release_agent = param->string;
 		param->string = NULL;
 		break;

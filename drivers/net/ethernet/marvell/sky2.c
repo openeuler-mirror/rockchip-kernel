@@ -2501,7 +2501,7 @@ static void skb_put_frags(struct sk_buff *skb, unsigned int hdr_space,
 
 		if (length == 0) {
 			/* don't need this page */
-			__skb_frag_unref(frag, false);
+			__skb_frag_unref(frag);
 			--skb_shinfo(skb)->nr_frags;
 		} else {
 			size = min(length, (unsigned) PAGE_SIZE);
@@ -4050,9 +4050,7 @@ static int sky2_set_pauseparam(struct net_device *dev,
 }
 
 static int sky2_get_coalesce(struct net_device *dev,
-			     struct ethtool_coalesce *ecmd,
-			     struct kernel_ethtool_coalesce *kernel_coal,
-			     struct netlink_ext_ack *extack)
+			     struct ethtool_coalesce *ecmd)
 {
 	struct sky2_port *sky2 = netdev_priv(dev);
 	struct sky2_hw *hw = sky2->hw;
@@ -4087,9 +4085,7 @@ static int sky2_get_coalesce(struct net_device *dev,
 
 /* Note: this affect both ports */
 static int sky2_set_coalesce(struct net_device *dev,
-			     struct ethtool_coalesce *ecmd,
-			     struct kernel_ethtool_coalesce *kernel_coal,
-			     struct netlink_ext_ack *extack)
+			     struct ethtool_coalesce *ecmd)
 {
 	struct sky2_port *sky2 = netdev_priv(dev);
 	struct sky2_hw *hw = sky2->hw;
@@ -4147,9 +4143,7 @@ static unsigned long roundup_ring_size(unsigned long pending)
 }
 
 static void sky2_get_ringparam(struct net_device *dev,
-			       struct ethtool_ringparam *ering,
-			       struct kernel_ethtool_ringparam *kernel_ering,
-			       struct netlink_ext_ack *extack)
+			       struct ethtool_ringparam *ering)
 {
 	struct sky2_port *sky2 = netdev_priv(dev);
 
@@ -4161,9 +4155,7 @@ static void sky2_get_ringparam(struct net_device *dev,
 }
 
 static int sky2_set_ringparam(struct net_device *dev,
-			      struct ethtool_ringparam *ering,
-			      struct kernel_ethtool_ringparam *kernel_ering,
-			      struct netlink_ext_ack *extack)
+			      struct ethtool_ringparam *ering)
 {
 	struct sky2_port *sky2 = netdev_priv(dev);
 

@@ -128,8 +128,6 @@ static void __init pte_advanced_tests(struct mm_struct *mm,
 	ptep_test_and_clear_young(vma, vaddr, ptep);
 	pte = ptep_get(ptep);
 	WARN_ON(pte_young(pte));
-
-	ptep_get_and_clear_full(mm, vaddr, ptep, 1);
 }
 
 static void __init pte_savedwrite_tests(unsigned long pfn, pgprot_t prot)
@@ -255,7 +253,7 @@ static void __init pmd_huge_tests(pmd_t *pmdp, unsigned long pfn, pgprot_t prot)
 {
 	pmd_t pmd;
 
-	if (!arch_vmap_pmd_supported(prot))
+	if (!arch_ioremap_pmd_supported())
 		return;
 
 	pr_debug("Validating PMD huge\n");
@@ -403,7 +401,7 @@ static void __init pud_huge_tests(pud_t *pudp, unsigned long pfn, pgprot_t prot)
 {
 	pud_t pud;
 
-	if (!arch_vmap_pud_supported(prot))
+	if (!arch_ioremap_pud_supported())
 		return;
 
 	pr_debug("Validating PUD huge\n");

@@ -80,6 +80,7 @@
 #include <linux/jump_label_ratelimit.h>
 #include <net/busy_poll.h>
 #include <net/mptcp.h>
+#include <trace/hooks/net.h>
 
 int sysctl_tcp_max_orphans __read_mostly = NR_FILE;
 
@@ -1314,7 +1315,7 @@ static u8 tcp_sacktag_one(struct sock *sk,
 	if (dup_sack && (sacked & TCPCB_RETRANS)) {
 		if (tp->undo_marker && tp->undo_retrans > 0 &&
 		    after(end_seq, tp->undo_marker))
-			tp->undo_retrans = max_t(int, 0, tp->undo_retrans - pcount);
+			tp->undo_retrans--;
 		if ((sacked & TCPCB_SACKED_ACKED) &&
 		    before(start_seq, state->reord))
 				state->reord = start_seq;
@@ -1620,8 +1621,6 @@ static struct sk_buff *tcp_shift_skb_data(struct sock *sk, struct sk_buff *skb,
 	    (mss != tcp_skb_seglen(skb)))
 		goto out;
 
-	if (!tcp_skb_can_collapse(prev, skb))
-		goto out;
 	len = skb->len;
 	pcount = tcp_skb_pcount(skb);
 	if (tcp_skb_shift(prev, skb, pcount, len))
@@ -3814,8 +3813,7 @@ static int tcp_ack(struct sock *sk, const struct sk_buff *skb, int flag)
 		tcp_process_tlp_ack(sk, ack, flag);
 
 	if (tcp_ack_is_dubious(sk, flag)) {
-		if (!(flag & (FLAG_SND_UNA_ADVANCED |
-			      FLAG_NOT_DUP | FLAG_DSACKING_ACK))) {
+		if (!(flag & (FLAG_SND_UNA_ADVANCED | FLAG_NOT_DUP))) {
 			num_dupack = 1;
 			/* Consider if pure acks were aggregated in tcp_add_backlog() */
 			if (!(flag & FLAG_DATA))
@@ -3901,24 +3899,6 @@ static bool smc_parse_options(const struct tcphdr *th,
 		    opsize >= TCPOLEN_EXP_SMC_BASE &&
 		    get_unaligned_be32(ptr) == TCPOPT_SMC_MAGIC) {
 			opt_rx->smc_ok = 1;
-			return true;
-		}
-	}
-#endif
-	return false;
-}
-
-static bool tcp_parse_comp_option(const struct tcphdr *th,
-				  struct tcp_options_received *opt_rx,
-				  const unsigned char *ptr,
-				  int opsize)
-{
-#if IS_ENABLED(CONFIG_TCP_COMP)
-	if (static_branch_unlikely(&tcp_have_comp)) {
-		if (th->syn && !(opsize & 1) &&
-		    opsize >= TCPOLEN_EXP_COMP_BASE &&
-		    get_unaligned_be16(ptr) == TCPOPT_COMP_MAGIC) {
-			opt_rx->comp_ok = 1;
 			return true;
 		}
 	}
@@ -4083,10 +4063,6 @@ void tcp_parse_options(const struct net *net,
 				}
 
 				if (smc_parse_options(th, opt_rx, ptr, opsize))
-					break;
-
-				if (tcp_parse_comp_option(th, opt_rx, ptr,
-				    opsize))
 					break;
 
 				opt_rx->saw_unknown = 1;
@@ -4650,6 +4626,7 @@ static bool tcp_ooo_try_coalesce(struct sock *sk,
 
 static void tcp_drop(struct sock *sk, struct sk_buff *skb)
 {
+	trace_android_vh_kfree_skb(skb);
 	sk_drops_add(sk, skb);
 	__kfree_skb(skb);
 }
@@ -5393,17 +5370,7 @@ static void tcp_new_space(struct sock *sk)
 	sk->sk_write_space(sk);
 }
 
-/* Caller made space either from:
- * 1) Freeing skbs in rtx queues (after tp->snd_una has advanced)
- * 2) Sent skbs from output queue (and thus advancing tp->snd_nxt)
- *
- * We might be able to generate EPOLLOUT to the application if:
- * 1) Space consumed in output/rtx queues is below sk->sk_sndbuf/2
- * 2) notsent amount (tp->write_seq - tp->snd_nxt) became
- *    small enough that tcp_stream_memory_free() decides it
- *    is time to generate EPOLLOUT.
- */
-void tcp_check_space(struct sock *sk)
+static void tcp_check_space(struct sock *sk)
 {
 	/* pairs with tcp_poll() */
 	smp_mb();
@@ -5755,7 +5722,7 @@ void tcp_rcv_established(struct sock *sk, struct sk_buff *skb)
 	trace_tcp_probe(sk, skb);
 
 	tcp_mstamp_refresh(tp);
-	if (unlikely(!rcu_access_pointer(sk->sk_rx_dst)))
+	if (unlikely(!sk->sk_rx_dst))
 		inet_csk(sk)->icsk_af_ops->sk_rx_dst_set(sk, skb);
 	/*
 	 *	Header prediction.
@@ -5950,7 +5917,6 @@ void tcp_init_transfer(struct sock *sk, int bpf_op, struct sk_buff *skb)
 	/* Initialize congestion control unless BPF initialized it already: */
 	if (!icsk->icsk_ca_initialized)
 		tcp_init_congestion_control(sk);
-	tcp_init_compression(sk);
 	tcp_init_buffer_space(sk);
 }
 
@@ -6669,9 +6635,6 @@ static void tcp_openreq_init(struct request_sock *req,
 	ireq->ir_mark = inet_request_mark(sk, skb);
 #if IS_ENABLED(CONFIG_SMC)
 	ireq->smc_ok = rx_opt->smc_ok;
-#endif
-#if IS_ENABLED(CONFIG_TCP_COMP)
-	ireq->comp_ok = rx_opt->comp_ok;
 #endif
 }
 

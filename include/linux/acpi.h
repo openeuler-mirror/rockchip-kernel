@@ -55,7 +55,7 @@ static inline struct fwnode_handle *acpi_alloc_fwnode_static(void)
 	if (!fwnode)
 		return NULL;
 
-	fwnode->ops = &acpi_static_fwnode_ops;
+	fwnode_init(fwnode, &acpi_static_fwnode_ops);
 
 	return fwnode;
 }
@@ -703,10 +703,6 @@ static inline u64 acpi_arch_get_root_pointer(void)
 }
 #endif
 
-struct acpi_pptt_cache *
-acpi_pptt_validate_cache_node(struct acpi_table_header *table_hdr,
-						u32 offset);
-
 #else	/* !CONFIG_ACPI */
 
 #define acpi_disabled 1
@@ -956,15 +952,6 @@ static inline struct acpi_device *acpi_resource_consumer(struct resource *res)
 {
 	return NULL;
 }
-
-static inline int acpi_register_wakeup_handler(int wake_irq,
-	bool (*wakeup)(void *context), void *context)
-{
-	return -ENXIO;
-}
-
-static inline void acpi_unregister_wakeup_handler(
-	bool (*wakeup)(void *context), void *context) { }
 
 #endif	/* !CONFIG_ACPI */
 
@@ -1356,10 +1343,8 @@ static inline int lpit_read_residency_count_address(u64 *address)
 #endif
 
 #ifdef CONFIG_ACPI_PPTT
-int acpi_pptt_init(void);
 int acpi_pptt_cpu_is_thread(unsigned int cpu);
 int find_acpi_cpu_topology(unsigned int cpu, int level);
-int find_acpi_cpu_topology_cluster(unsigned int cpu);
 int find_acpi_cpu_topology_package(unsigned int cpu);
 int find_acpi_cpu_topology_hetero_id(unsigned int cpu);
 int find_acpi_cpu_cache_topology(unsigned int cpu, int level);
@@ -1369,10 +1354,6 @@ static inline int acpi_pptt_cpu_is_thread(unsigned int cpu)
 	return -EINVAL;
 }
 static inline int find_acpi_cpu_topology(unsigned int cpu, int level)
-{
-	return -EINVAL;
-}
-static inline int find_acpi_cpu_topology_cluster(unsigned int cpu)
 {
 	return -EINVAL;
 }
@@ -1399,9 +1380,5 @@ acpi_platform_notify(struct device *dev, enum kobject_action action)
 	return 0;
 }
 #endif
-
-struct acpi_pptt_processor *
-acpi_pptt_find_cache_backwards(struct acpi_table_header *table_hdr,
-			       struct acpi_pptt_cache *cache);
 
 #endif	/*_LINUX_ACPI_H*/

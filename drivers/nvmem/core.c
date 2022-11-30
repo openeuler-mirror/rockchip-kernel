@@ -222,8 +222,6 @@ static umode_t nvmem_bin_attr_is_visible(struct kobject *kobj,
 	struct device *dev = kobj_to_dev(kobj);
 	struct nvmem_device *nvmem = to_nvmem_device(dev);
 
-	attr->size = nvmem->size;
-
 	return nvmem_bin_attr_get_umode(nvmem);
 }
 
@@ -1231,8 +1229,7 @@ static void nvmem_shift_read_buffer_in_place(struct nvmem_cell *cell, void *buf)
 		*p-- = 0;
 
 	/* clear msb bits if any leftover in the last byte */
-	if (cell->nbits % BITS_PER_BYTE)
-		*p &= GENMASK((cell->nbits % BITS_PER_BYTE) - 1, 0);
+	*p &= GENMASK((cell->nbits%BITS_PER_BYTE) - 1, 0);
 }
 
 static int __nvmem_cell_read(struct nvmem_device *nvmem,
@@ -1667,7 +1664,11 @@ static void __exit nvmem_exit(void)
 	bus_unregister(&nvmem_bus_type);
 }
 
+#ifdef CONFIG_ROCKCHIP_THUNDER_BOOT
+arch_initcall_sync(nvmem_init);
+#else
 subsys_initcall(nvmem_init);
+#endif
 module_exit(nvmem_exit);
 
 MODULE_AUTHOR("Srinivas Kandagatla <srinivas.kandagatla@linaro.org");

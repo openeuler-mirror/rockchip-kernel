@@ -14,7 +14,6 @@
 
 #include <linux/types.h>
 #include <linux/ioctl.h>
-#include <linux/iommu.h>
 
 #define VFIO_API_VERSION	0
 
@@ -46,16 +45,6 @@
  * code will taint the host kernel and should be used with extreme caution.
  */
 #define VFIO_NOIOMMU_IOMMU		8
-
-/*
- * The vfio_iommu driver may support user clears dirty log manually, which means
- * dirty log can be requested to not cleared automatically after dirty log is
- * copied to userspace, it's user's duty to clear dirty log.
- *
- * Note: please refer to VFIO_IOMMU_DIRTY_PAGES_FLAG_GET_BITMAP_NOCLEAR and
- * VFIO_IOMMU_DIRTY_PAGES_FLAG_CLEAR_BITMAP.
- */
-#define VFIO_DIRTY_LOG_MANUAL_CLEAR	11
 
 /*
  * The IOCTL interface is designed for extensibility by embedding the
@@ -329,7 +318,6 @@ struct vfio_region_info_cap_type {
 #define VFIO_REGION_TYPE_GFX                    (1)
 #define VFIO_REGION_TYPE_CCW			(2)
 #define VFIO_REGION_TYPE_MIGRATION              (3)
-#define VFIO_REGION_TYPE_NESTED			(4)
 
 /* sub-types for VFIO_REGION_TYPE_PCI_* */
 
@@ -353,10 +341,6 @@ struct vfio_region_info_cap_type {
 
 /* sub-types for VFIO_REGION_TYPE_GFX */
 #define VFIO_REGION_SUBTYPE_GFX_EDID            (1)
-
-/* sub-types for VFIO_REGION_TYPE_NESTED */
-#define VFIO_REGION_SUBTYPE_NESTED_DMA_FAULT	(1)
-#define VFIO_REGION_SUBTYPE_NESTED_DMA_FAULT_RESPONSE	(2)
 
 /**
  * struct vfio_region_gfx_edid - EDID region layout.
@@ -713,29 +697,10 @@ struct vfio_irq_info {
 #define VFIO_IRQ_INFO_MASKABLE		(1 << 1)
 #define VFIO_IRQ_INFO_AUTOMASKED	(1 << 2)
 #define VFIO_IRQ_INFO_NORESIZE		(1 << 3)
-#define VFIO_IRQ_INFO_FLAG_CAPS		(1 << 4) /* Info supports caps */
 	__u32	index;		/* IRQ index */
 	__u32	count;		/* Number of IRQs within this index */
-	__u32	cap_offset;	/* Offset within info struct of first cap */
 };
 #define VFIO_DEVICE_GET_IRQ_INFO	_IO(VFIO_TYPE, VFIO_BASE + 9)
-
-/*
- * The irq type capability allows IRQs unique to a specific device or
- * class of devices to be exposed.
- *
- * The structures below define version 1 of this capability.
- */
-#define VFIO_IRQ_INFO_CAP_TYPE      3
-
-struct vfio_irq_info_cap_type {
-	struct vfio_info_cap_header header;
-	__u32 type;     /* global per bus driver */
-	__u32 subtype;  /* type specific */
-};
-
-#define VFIO_IRQ_TYPE_NESTED				(1)
-#define VFIO_IRQ_SUBTYPE_DMA_FAULT			(1)
 
 /**
  * VFIO_DEVICE_SET_IRQS - _IOW(VFIO_TYPE, VFIO_BASE + 10, struct vfio_irq_set)
@@ -838,8 +803,7 @@ enum {
 	VFIO_PCI_MSIX_IRQ_INDEX,
 	VFIO_PCI_ERR_IRQ_INDEX,
 	VFIO_PCI_REQ_IRQ_INDEX,
-	VFIO_PCI_NUM_IRQS = 5	/* Fixed user ABI, IRQ indexes >=5 use   */
-				/* device specific cap to define content */
+	VFIO_PCI_NUM_IRQS
 };
 
 /*
@@ -1023,68 +987,6 @@ struct vfio_device_feature {
  */
 #define VFIO_DEVICE_FEATURE_PCI_VF_TOKEN	(0)
 
-/*
- * Capability exposed by the DMA fault region
- * @version: ABI version
- */
-#define VFIO_REGION_INFO_CAP_DMA_FAULT	6
-
-struct vfio_region_info_cap_fault {
-	struct vfio_info_cap_header header;
-	__u32 version;
-};
-
-/*
- * Capability exposed by the DMA fault response region
- * @version: ABI version
- */
-#define VFIO_REGION_INFO_CAP_DMA_FAULT_RESPONSE	7
-
-struct vfio_region_info_cap_fault_response {
-	struct vfio_info_cap_header header;
-	__u32 version;
-};
-
-/*
- * DMA Fault Region Layout
- * @tail: index relative to the start of the ring buffer at which the
- *        consumer finds the next item in the buffer
- * @entry_size: fault ring buffer entry size in bytes
- * @nb_entries: max capacity of the fault ring buffer
- * @offset: ring buffer offset relative to the start of the region
- * @head: index relative to the start of the ring buffer at which the
- *        producer (kernel) inserts items into the buffers
- */
-struct vfio_region_dma_fault {
-	/* Write-Only */
-	__u32   tail;
-	/* Read-Only */
-	__u32   entry_size;
-	__u32	nb_entries;
-	__u32	offset;
-	__u32   head;
-};
-
-/*
- * DMA Fault Response Region Layout
- * @head: index relative to the start of the ring buffer at which the
- *        producer (userspace) insert responses into the buffer
- * @entry_size: fault ring buffer entry size in bytes
- * @nb_entries: max capacity of the fault ring buffer
- * @offset: ring buffer offset relative to the start of the region
- * @tail: index relative to the start of the ring buffer at which the
- *        consumer (kernel) finds the next item in the buffer
- */
-struct vfio_region_dma_fault_response {
-	/* Write-Only */
-	__u32   head;
-	/* Read-Only */
-	__u32   entry_size;
-	__u32	nb_entries;
-	__u32	offset;
-	__u32   tail;
-};
-
 /* -------- API for Type1 VFIO IOMMU -------- */
 
 /**
@@ -1258,30 +1160,8 @@ struct vfio_iommu_type1_dma_unmap {
  * actual bitmap. If dirty pages logging is not enabled, an error will be
  * returned.
  *
- * The VFIO_IOMMU_DIRTY_PAGES_FLAG_GET_BITMAP_NOCLEAR flag is almost same as
- * VFIO_IOMMU_DIRTY_PAGES_FLAG_GET_BITMAP, except that it requires underlying
- * dirty bitmap is not cleared automatically. The user can clear it manually by
- * calling the IOCTL with VFIO_IOMMU_DIRTY_PAGES_FLAG_CLEAR_BITMAP flag set.
+ * Only one of the flags _START, _STOP and _GET may be specified at a time.
  *
- * Calling the IOCTL with VFIO_IOMMU_DIRTY_PAGES_FLAG_CLEAR_BITMAP flag set,
- * instructs the IOMMU driver to clear the dirty status of pages in a bitmap
- * for IOMMU container for a given IOVA range. The user must specify the IOVA
- * range, the bitmap and the pgsize through the structure
- * vfio_iommu_type1_dirty_bitmap_get in the data[] portion. This interface
- * supports clearing a bitmap of the smallest supported pgsize only and can be
- * modified in future to clear a bitmap of any specified supported pgsize. The
- * user must provide a memory area for the bitmap memory and specify its size
- * in bitmap.size. One bit is used to represent one page consecutively starting
- * from iova offset. The user should provide page size in bitmap.pgsize field.
- * A bit set in the bitmap indicates that the page at that offset from iova is
- * cleared the dirty status, and dirty tracking is re-enabled for that page. The
- * caller must set argsz to a value including the size of structure
- * vfio_iommu_dirty_bitmap_get, but excluing the size of the actual bitmap. If
- * dirty pages logging is not enabled, an error will be returned. Note: user
- * should clear dirty log before handle corresponding dirty pages.
- *
- * Only one of the flags _START, _STOP, _GET, _GET_NOCLEAR_, and _CLEAR may be
- * specified at a time.
  */
 struct vfio_iommu_type1_dirty_bitmap {
 	__u32        argsz;
@@ -1289,8 +1169,6 @@ struct vfio_iommu_type1_dirty_bitmap {
 #define VFIO_IOMMU_DIRTY_PAGES_FLAG_START	(1 << 0)
 #define VFIO_IOMMU_DIRTY_PAGES_FLAG_STOP	(1 << 1)
 #define VFIO_IOMMU_DIRTY_PAGES_FLAG_GET_BITMAP	(1 << 2)
-#define VFIO_IOMMU_DIRTY_PAGES_FLAG_GET_BITMAP_NOCLEAR	(1 << 3)
-#define VFIO_IOMMU_DIRTY_PAGES_FLAG_CLEAR_BITMAP	(1 << 4)
 	__u8         data[];
 };
 
@@ -1301,134 +1179,6 @@ struct vfio_iommu_type1_dirty_bitmap_get {
 };
 
 #define VFIO_IOMMU_DIRTY_PAGES             _IO(VFIO_TYPE, VFIO_BASE + 17)
-
-/*
- * VFIO_IOMMU_BIND_PROCESS
- *
- * Allocate a PASID for a process address space, and use it to attach this
- * process to all devices in the container. Devices can then tag their DMA
- * traffic with the returned @pasid to perform transactions on the associated
- * virtual address space. Mapping and unmapping buffers is performed by standard
- * functions such as mmap and malloc.
- *
- * If flag is VFIO_IOMMU_BIND_PID, @pid contains the pid of a foreign process to
- * bind. Otherwise the current task is bound. Given that the caller owns the
- * device, setting this flag grants the caller read and write permissions on the
- * entire address space of foreign process described by @pid. Therefore,
- * permission to perform the bind operation on a foreign process is governed by
- * the ptrace access mode PTRACE_MODE_ATTACH_REALCREDS check. See man ptrace(2)
- * for more information.
- *
- * On success, VFIO writes a Process Address Space ID (PASID) into @pasid. This
- * ID is unique to a process and can be used on all devices in the container.
- *
- * On fork, the child inherits the device fd and can use the bonds setup by its
- * parent. Consequently, the child has R/W access on the address spaces bound by
- * its parent. After an execv, the device fd is closed and the child doesn't
- * have access to the address space anymore.
- *
- * To remove a bond between process and container, VFIO_IOMMU_UNBIND ioctl is
- * issued with the same parameters. If a pid was specified in VFIO_IOMMU_BIND,
- * it should also be present for VFIO_IOMMU_UNBIND. Otherwise unbind the current
- * task from the container.
- */
-struct vfio_iommu_type1_bind_process {
-	__u32	flags;
-#define VFIO_IOMMU_BIND_PID		(1 << 0)
-	__u32	pasid;
-	__s32	pid;
-};
-
-/*
- * Only mode supported at the moment is VFIO_IOMMU_BIND_PROCESS, which takes
- * vfio_iommu_type1_bind_process in data.
- */
-struct vfio_iommu_type1_bind {
-	__u32	argsz;
-	__u32	flags;
-#define VFIO_IOMMU_BIND_PROCESS		(1 << 0)
-	__u8	data[];
-};
-
-/*
- * VFIO_IOMMU_BIND - _IOWR(VFIO_TYPE, VFIO_BASE + 22, struct vfio_iommu_bind)
- *
- * Manage address spaces of devices in this container. Initially a TYPE1
- * container can only have one address space, managed with
- * VFIO_IOMMU_MAP/UNMAP_DMA.
- *
- * An IOMMU of type VFIO_TYPE1_NESTING_IOMMU can be managed by both MAP/UNMAP
- * and BIND ioctls at the same time. MAP/UNMAP acts on the stage-2 (host) page
- * tables, and BIND manages the stage-1 (guest) page tables. Other types of
- * IOMMU may allow MAP/UNMAP and BIND to coexist, where MAP/UNMAP controls
- * non-PASID traffic and BIND controls PASID traffic. But this depends on the
- * underlying IOMMU architecture and isn't guaranteed.
- *
- * Availability of this feature depends on the device, its bus, the underlying
- * IOMMU and the CPU architecture.
- *
- * returns: 0 on success, -errno on failure.
- */
-#define VFIO_IOMMU_BIND		_IO(VFIO_TYPE, VFIO_BASE + 22)
-
-/*
- * VFIO_IOMMU_UNBIND - _IOWR(VFIO_TYPE, VFIO_BASE + 23, struct vfio_iommu_bind)
- *
- * Undo what was done by the corresponding VFIO_IOMMU_BIND ioctl.
- */
-#define VFIO_IOMMU_UNBIND	_IO(VFIO_TYPE, VFIO_BASE + 23)
-
-/*
- * VFIO_IOMMU_SET_PASID_TABLE - _IOWR(VFIO_TYPE, VFIO_BASE + 18,
- *			struct vfio_iommu_type1_set_pasid_table)
- *
- * The SET operation passes a PASID table to the host while the
- * UNSET operation detaches the one currently programmed. It is
- * allowed to "SET" the table several times without unsetting as
- * long as the table config does not stay IOMMU_PASID_CONFIG_TRANSLATE.
- */
-struct vfio_iommu_type1_set_pasid_table {
-	__u32	argsz;
-	__u32	flags;
-#define VFIO_PASID_TABLE_FLAG_SET	(1 << 0)
-#define VFIO_PASID_TABLE_FLAG_UNSET	(1 << 1)
-	struct iommu_pasid_table_config config; /* used on SET */
-};
-
-#define VFIO_IOMMU_SET_PASID_TABLE	_IO(VFIO_TYPE, VFIO_BASE + 18)
-
-/**
- * VFIO_IOMMU_CACHE_INVALIDATE - _IOWR(VFIO_TYPE, VFIO_BASE + 19,
- *			struct vfio_iommu_type1_cache_invalidate)
- *
- * Propagate guest IOMMU cache invalidation to the host.
- */
-struct vfio_iommu_type1_cache_invalidate {
-	__u32   argsz;
-	__u32   flags;
-	struct iommu_cache_invalidate_info info;
-};
-#define VFIO_IOMMU_CACHE_INVALIDATE      _IO(VFIO_TYPE, VFIO_BASE + 19)
-
-/**
- * VFIO_IOMMU_SET_MSI_BINDING - _IOWR(VFIO_TYPE, VFIO_BASE + 20,
- *			struct vfio_iommu_type1_set_msi_binding)
- *
- * Pass a stage 1 MSI doorbell mapping to the host so that this
- * latter can build a nested stage2 mapping. Or conversely tear
- * down a previously bound stage 1 MSI binding.
- */
-struct vfio_iommu_type1_set_msi_binding {
-	__u32   argsz;
-	__u32   flags;
-#define VFIO_IOMMU_BIND_MSI	(1 << 0)
-#define VFIO_IOMMU_UNBIND_MSI	(1 << 1)
-	__u64	iova;	/* MSI guest IOVA */
-	/* Fields below are used on BIND */
-	__u64	gpa;	/* MSI guest physical address */
-	__u64	size;	/* size of stage1 mapping (bytes) */
-};
-#define VFIO_IOMMU_SET_MSI_BINDING      _IO(VFIO_TYPE, VFIO_BASE + 20)
 
 /* -------- Additional API for SPAPR TCE (Server POWERPC) IOMMU -------- */
 

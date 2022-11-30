@@ -10,7 +10,7 @@
 
 #include <linux/key.h>
 #include <linux/errno.h>
-#include <linux/kabi.h>
+#include <linux/android_kabi.h>
 
 #ifdef CONFIG_KEYS
 
@@ -56,7 +56,6 @@ struct key_match_data {
 	unsigned	lookup_type;	/* Type of lookup for this search. */
 #define KEYRING_SEARCH_LOOKUP_DIRECT	0x0000	/* Direct lookup by description. */
 #define KEYRING_SEARCH_LOOKUP_ITERATE	0x0001	/* Iterative search. */
-	KABI_RESERVE(1)
 };
 
 /*
@@ -156,6 +155,9 @@ struct key_type {
 			   const void *in, void *out);
 	int (*asym_verify_signature)(struct kernel_pkey_params *params,
 				     const void *in, const void *in2);
+
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
 
 	/* internal fields */
 	struct list_head	link;		/* link in types list */

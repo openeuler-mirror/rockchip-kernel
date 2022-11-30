@@ -428,9 +428,7 @@ static void xgbe_set_msglevel(struct net_device *netdev, u32 msglevel)
 }
 
 static int xgbe_get_coalesce(struct net_device *netdev,
-			     struct ethtool_coalesce *ec,
-			     struct kernel_ethtool_coalesce *kernel_coal,
-			     struct netlink_ext_ack *extack)
+			     struct ethtool_coalesce *ec)
 {
 	struct xgbe_prv_data *pdata = netdev_priv(netdev);
 
@@ -445,9 +443,7 @@ static int xgbe_get_coalesce(struct net_device *netdev,
 }
 
 static int xgbe_set_coalesce(struct net_device *netdev,
-			     struct ethtool_coalesce *ec,
-			     struct kernel_ethtool_coalesce *kernel_coal,
-			     struct netlink_ext_ack *extack)
+			     struct ethtool_coalesce *ec)
 {
 	struct xgbe_prv_data *pdata = netdev_priv(netdev);
 	struct xgbe_hw_if *hw_if = &pdata->hw_if;
@@ -621,11 +617,8 @@ static int xgbe_get_module_eeprom(struct net_device *netdev,
 	return pdata->phy_if.module_eeprom(pdata, eeprom, data);
 }
 
-static void
-xgbe_get_ringparam(struct net_device *netdev,
-		   struct ethtool_ringparam *ringparam,
-		   struct kernel_ethtool_ringparam *kernel_ringparam,
-		   struct netlink_ext_ack *extack)
+static void xgbe_get_ringparam(struct net_device *netdev,
+			       struct ethtool_ringparam *ringparam)
 {
 	struct xgbe_prv_data *pdata = netdev_priv(netdev);
 
@@ -636,9 +629,7 @@ xgbe_get_ringparam(struct net_device *netdev,
 }
 
 static int xgbe_set_ringparam(struct net_device *netdev,
-			      struct ethtool_ringparam *ringparam,
-			      struct kernel_ethtool_ringparam *kernel_ringparam,
-			      struct netlink_ext_ack *extack)
+			      struct ethtool_ringparam *ringparam)
 {
 	struct xgbe_prv_data *pdata = netdev_priv(netdev);
 	unsigned int rx, tx;

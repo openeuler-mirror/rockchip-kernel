@@ -129,8 +129,7 @@ static int hw_break_val2;
 static int cont_instead_of_sstep;
 static unsigned long cont_thread_id;
 static unsigned long sstep_thread_id;
-#if defined(CONFIG_ARM) || defined(CONFIG_MIPS) || defined(CONFIG_SPARC) \
-	|| defined(CONFIG_SW64)
+#if defined(CONFIG_ARM) || defined(CONFIG_MIPS) || defined(CONFIG_SPARC)
 static int arch_needs_sstep_emulation = 1;
 #else
 static int arch_needs_sstep_emulation;
@@ -1061,10 +1060,10 @@ static int kgdbts_option_setup(char *opt)
 {
 	if (strlen(opt) >= MAX_CONFIG_LEN) {
 		printk(KERN_ERR "kgdbts: config string too long\n");
-		return 1;
+		return -ENOSPC;
 	}
 	strcpy(config, opt);
-	return 1;
+	return 0;
 }
 
 __setup("kgdbts=", kgdbts_option_setup);

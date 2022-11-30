@@ -39,24 +39,6 @@ rq_sched_info_dequeued(struct rq *rq, unsigned long long delta)
 #define   schedstat_set(var, val)	do { if (schedstat_enabled()) { var = (val); } } while (0)
 #define   schedstat_val(var)		(var)
 #define   schedstat_val_or_zero(var)	((schedstat_enabled()) ? (var) : 0)
-#ifdef CONFIG_SCHED_STEAL
-#define   schedstat_start_time()	schedstat_val_or_zero(local_clock())
-#define   __schedstat_end_time(stat, time)			\
-	do {							\
-		unsigned long endtime;				\
-								\
-		if (schedstat_enabled() && (time)) {		\
-			endtime = local_clock() - (time) - schedstat_skid; \
-			schedstat_add((stat), endtime);		\
-		}						\
-	} while (0)
-#define   schedstat_end_time(rq, time)				\
-	__schedstat_end_time(((rq)->find_time), time)
-extern unsigned long schedstat_skid;
-#else /* !CONFIG_SCHED_STEAL */
-# define   schedstat_start_time()	0
-# define   schedstat_end_time(rq, t)	do { } while (0)
-#endif /* CONFIG_SCHED_STEAL */
 
 #else /* !CONFIG_SCHEDSTATS: */
 static inline void rq_sched_info_arrive  (struct rq *rq, unsigned long long delta) { }
@@ -71,8 +53,6 @@ static inline void rq_sched_info_depart  (struct rq *rq, unsigned long long delt
 # define   schedstat_set(var, val)	do { } while (0)
 # define   schedstat_val(var)		0
 # define   schedstat_val_or_zero(var)	0
-# define   schedstat_start_time()	0
-# define   schedstat_end_time(rq, t)	do { } while (0)
 #endif /* CONFIG_SCHEDSTATS */
 
 #ifdef CONFIG_PSI
@@ -89,9 +69,6 @@ static inline void psi_enqueue(struct task_struct *p, bool wakeup)
 	if (static_branch_likely(&psi_disabled))
 		return;
 
-	if (p->in_memstall)
-		set |= TSK_MEMSTALL_RUNNING;
-
 	if (!wakeup || p->sched_psi_wake_requeue) {
 		if (p->in_memstall)
 			set |= TSK_MEMSTALL;
@@ -107,24 +84,28 @@ static inline void psi_enqueue(struct task_struct *p, bool wakeup)
 
 static inline void psi_dequeue(struct task_struct *p, bool sleep)
 {
-	int clear = TSK_RUNNING;
+	int clear = TSK_RUNNING, set = 0;
 
 	if (static_branch_likely(&psi_disabled))
 		return;
 
-	/*
-	 * A voluntary sleep is a dequeue followed by a task switch. To
-	 * avoid walking all ancestors twice, psi_task_switch() handles
-	 * TSK_RUNNING and TSK_IOWAIT for us when it moves TSK_ONCPU.
-	 * Do nothing here.
-	 */
-	if (sleep)
-		return;
+	if (!sleep) {
+		if (p->in_memstall)
+			clear |= TSK_MEMSTALL;
+	} else {
+		/*
+		 * When a task sleeps, schedule() dequeues it before
+		 * switching to the next one. Merge the clearing of
+		 * TSK_RUNNING and TSK_ONCPU to save an unnecessary
+		 * psi_task_change() call in psi_sched_switch().
+		 */
+		clear |= TSK_ONCPU;
 
-	if (p->in_memstall)
-		clear |= (TSK_MEMSTALL | TSK_MEMSTALL_RUNNING);
+		if (p->in_iowait)
+			set |= TSK_IOWAIT;
+	}
 
-	psi_task_change(p, clear, 0);
+	psi_task_change(p, clear, set);
 }
 
 static inline void psi_ttwu_dequeue(struct task_struct *p)
@@ -163,6 +144,14 @@ static inline void psi_sched_switch(struct task_struct *prev,
 	psi_task_switch(prev, next, sleep);
 }
 
+static inline void psi_task_tick(struct rq *rq)
+{
+	if (static_branch_likely(&psi_disabled))
+		return;
+
+	if (unlikely(rq->curr->in_memstall))
+		psi_memstall_tick(rq->curr, cpu_of(rq));
+}
 #else /* CONFIG_PSI */
 static inline void psi_enqueue(struct task_struct *p, bool wakeup) {}
 static inline void psi_dequeue(struct task_struct *p, bool sleep) {}
@@ -170,6 +159,7 @@ static inline void psi_ttwu_dequeue(struct task_struct *p) {}
 static inline void psi_sched_switch(struct task_struct *prev,
 				    struct task_struct *next,
 				    bool sleep) {}
+static inline void psi_task_tick(struct rq *rq) {}
 #endif /* CONFIG_PSI */
 
 #ifdef CONFIG_SCHED_INFO

@@ -90,6 +90,8 @@
 #include <linux/seq_file.h>
 #include <linux/export.h>
 
+#include <trace/hooks/ipv6.h>
+
 #define	INFINITY_LIFE_TIME	0xFFFFFFFF
 
 #define IPV6_MAX_STRLEN \
@@ -216,6 +218,7 @@ static struct ipv6_devconf ipv6_devconf __read_mostly = {
 	.accept_ra_rt_info_max_plen = 0,
 #endif
 #endif
+	.accept_ra_rt_table	= 0,
 	.proxy_ndp		= 0,
 	.accept_source_route	= 0,	/* we do not accept RH0 by default. */
 	.disable_ipv6		= 0,
@@ -271,6 +274,7 @@ static struct ipv6_devconf ipv6_devconf_dflt __read_mostly = {
 	.accept_ra_rt_info_max_plen = 0,
 #endif
 #endif
+	.accept_ra_rt_table	= 0,
 	.proxy_ndp		= 0,
 	.accept_source_route	= 0,	/* we do not accept RH0 by default. */
 	.disable_ipv6		= 0,
@@ -368,7 +372,7 @@ static struct inet6_dev *ipv6_add_dev(struct net_device *dev)
 
 	ASSERT_RTNL();
 
-	if (dev->mtu < IPV6_MIN_MTU && dev != blackhole_netdev)
+	if (dev->mtu < IPV6_MIN_MTU)
 		return ERR_PTR(-EINVAL);
 
 	ndev = kzalloc(sizeof(struct inet6_dev), GFP_KERNEL);
@@ -404,13 +408,12 @@ static struct inet6_dev *ipv6_add_dev(struct net_device *dev)
 		return ERR_PTR(err);
 	}
 
-	if (dev != blackhole_netdev) {
-		if (snmp6_register_dev(ndev) < 0) {
-			netdev_dbg(dev, "%s: cannot create /proc/net/dev_snmp6/%s\n",
-				   __func__, dev->name);
-			goto err_release;
-		}
+	if (snmp6_register_dev(ndev) < 0) {
+		netdev_dbg(dev, "%s: cannot create /proc/net/dev_snmp6/%s\n",
+			   __func__, dev->name);
+		goto err_release;
 	}
+
 	/* One reference from device. */
 	refcount_set(&ndev->refcnt, 1);
 
@@ -441,28 +444,25 @@ static struct inet6_dev *ipv6_add_dev(struct net_device *dev)
 
 	ipv6_mc_init_dev(ndev);
 	ndev->tstamp = jiffies;
-	if (dev != blackhole_netdev) {
-		err = addrconf_sysctl_register(ndev);
-		if (err) {
-			ipv6_mc_destroy_dev(ndev);
-			snmp6_unregister_dev(ndev);
-			goto err_release;
-		}
+	err = addrconf_sysctl_register(ndev);
+	if (err) {
+		ipv6_mc_destroy_dev(ndev);
+		snmp6_unregister_dev(ndev);
+		goto err_release;
 	}
 	/* protected by rtnl_lock */
 	rcu_assign_pointer(dev->ip6_ptr, ndev);
 
-	if (dev != blackhole_netdev) {
-		/* Join interface-local all-node multicast group */
-		ipv6_dev_mc_inc(dev, &in6addr_interfacelocal_allnodes);
+	/* Join interface-local all-node multicast group */
+	ipv6_dev_mc_inc(dev, &in6addr_interfacelocal_allnodes);
 
-		/* Join all-node multicast group */
-		ipv6_dev_mc_inc(dev, &in6addr_linklocal_allnodes);
+	/* Join all-node multicast group */
+	ipv6_dev_mc_inc(dev, &in6addr_linklocal_allnodes);
 
-		/* Join all-router multicast group if forwarding is set */
-		if (ndev->cnf.forwarding && (dev->flags & IFF_MULTICAST))
-			ipv6_dev_mc_inc(dev, &in6addr_linklocal_allrouters);
-	}
+	/* Join all-router multicast group if forwarding is set */
+	if (ndev->cnf.forwarding && (dev->flags & IFF_MULTICAST))
+		ipv6_dev_mc_inc(dev, &in6addr_linklocal_allrouters);
+
 	return ndev;
 
 err_release:
@@ -546,7 +546,7 @@ static int inet6_netconf_fill_devconf(struct sk_buff *skb, int ifindex,
 #ifdef CONFIG_IPV6_MROUTE
 	if ((all || type == NETCONFA_MC_FORWARDING) &&
 	    nla_put_s32(skb, NETCONFA_MC_FORWARDING,
-			atomic_read(&devconf->mc_forwarding)) < 0)
+			devconf->mc_forwarding) < 0)
 		goto nla_put_failure;
 #endif
 	if ((all || type == NETCONFA_PROXY_NEIGH) &&
@@ -793,7 +793,6 @@ static void dev_forward_change(struct inet6_dev *idev)
 {
 	struct net_device *dev;
 	struct inet6_ifaddr *ifa;
-	LIST_HEAD(tmp_addr_list);
 
 	if (!idev)
 		return;
@@ -812,24 +811,14 @@ static void dev_forward_change(struct inet6_dev *idev)
 		}
 	}
 
-	read_lock_bh(&idev->lock);
 	list_for_each_entry(ifa, &idev->addr_list, if_list) {
 		if (ifa->flags&IFA_F_TENTATIVE)
 			continue;
-		list_add_tail(&ifa->if_list_aux, &tmp_addr_list);
-	}
-	read_unlock_bh(&idev->lock);
-
-	while (!list_empty(&tmp_addr_list)) {
-		ifa = list_first_entry(&tmp_addr_list,
-				       struct inet6_ifaddr, if_list_aux);
-		list_del(&ifa->if_list_aux);
 		if (idev->cnf.forwarding)
 			addrconf_join_anycast(ifa);
 		else
 			addrconf_leave_anycast(ifa);
 	}
-
 	inet6_netconf_notify_devconf(dev_net(dev), RTM_NEWNETCONF,
 				     NETCONFA_FORWARDING,
 				     dev->ifindex, &idev->cnf);
@@ -2392,6 +2381,26 @@ regen:
 		goto regen;
 }
 
+u32 addrconf_rt_table(const struct net_device *dev, u32 default_table)
+{
+	struct inet6_dev *idev = in6_dev_get(dev);
+	int sysctl;
+	u32 table;
+
+	if (!idev)
+		return default_table;
+	sysctl = idev->cnf.accept_ra_rt_table;
+	if (sysctl == 0) {
+		table = default_table;
+	} else if (sysctl > 0) {
+		table = (u32) sysctl;
+	} else {
+		table = (unsigned) dev->ifindex + (-sysctl);
+	}
+	in6_dev_put(idev);
+	return table;
+}
+
 /*
  *	Add prefix route.
  */
@@ -2402,7 +2411,7 @@ addrconf_prefix_route(struct in6_addr *pfx, int plen, u32 metric,
 		      u32 flags, gfp_t gfp_flags)
 {
 	struct fib6_config cfg = {
-		.fc_table = l3mdev_fib_table(dev) ? : RT6_TABLE_PREFIX,
+		.fc_table = l3mdev_fib_table(dev) ? : addrconf_rt_table(dev, RT6_TABLE_PREFIX),
 		.fc_metric = metric ? : IP6_RT_PRIO_ADDRCONF,
 		.fc_ifindex = dev->ifindex,
 		.fc_expires = expires,
@@ -2437,7 +2446,7 @@ static struct fib6_info *addrconf_get_prefix_route(const struct in6_addr *pfx,
 	struct fib6_node *fn;
 	struct fib6_info *rt = NULL;
 	struct fib6_table *table;
-	u32 tb_id = l3mdev_fib_table(dev) ? : RT6_TABLE_PREFIX;
+	u32 tb_id = l3mdev_fib_table(dev) ? : addrconf_rt_table(dev, RT6_TABLE_PREFIX);
 
 	table = fib6_get_table(dev_net(dev), tb_id);
 	if (!table)
@@ -2592,7 +2601,7 @@ int addrconf_prefix_rcv_add_addr(struct net *net, struct net_device *dev,
 				 __u32 valid_lft, u32 prefered_lft)
 {
 	struct inet6_ifaddr *ifp = ipv6_get_ifaddr(net, addr, dev, 1);
-	int create = 0, update_lft = 0;
+	int create = 0;
 
 	if (!ifp && valid_lft) {
 		int max_addresses = in6_dev->cnf.max_addresses;
@@ -2636,32 +2645,19 @@ int addrconf_prefix_rcv_add_addr(struct net *net, struct net_device *dev,
 		unsigned long now;
 		u32 stored_lft;
 
-		/* update lifetime (RFC2462 5.5.3 e) */
+		/* Update lifetime (RFC4862 5.5.3 e)
+		 * We deviate from RFC4862 by honoring all Valid Lifetimes to
+		 * improve the reaction of SLAAC to renumbering events
+		 * (draft-gont-6man-slaac-renum-06, Section 4.2)
+		 */
 		spin_lock_bh(&ifp->lock);
 		now = jiffies;
 		if (ifp->valid_lft > (now - ifp->tstamp) / HZ)
 			stored_lft = ifp->valid_lft - (now - ifp->tstamp) / HZ;
 		else
 			stored_lft = 0;
+
 		if (!create && stored_lft) {
-			const u32 minimum_lft = min_t(u32,
-				stored_lft, MIN_VALID_LIFETIME);
-			valid_lft = max(valid_lft, minimum_lft);
-
-			/* RFC4862 Section 5.5.3e:
-			 * "Note that the preferred lifetime of the
-			 *  corresponding address is always reset to
-			 *  the Preferred Lifetime in the received
-			 *  Prefix Information option, regardless of
-			 *  whether the valid lifetime is also reset or
-			 *  ignored."
-			 *
-			 * So we should always update prefered_lft here.
-			 */
-			update_lft = 1;
-		}
-
-		if (update_lft) {
 			ifp->valid_lft = valid_lft;
 			ifp->prefered_lft = prefered_lft;
 			ifp->tstamp = now;
@@ -3125,9 +3121,6 @@ static void sit_add_v4_addrs(struct inet6_dev *idev)
 	memcpy(&addr.s6_addr32[3], idev->dev->dev_addr, 4);
 
 	if (idev->dev->flags&IFF_POINTOPOINT) {
-		if (idev->cnf.addr_gen_mode == IN6_ADDR_GEN_MODE_NONE)
-			return;
-
 		addr.s6_addr32[0] = htonl(0xfe800000);
 		scope = IFA_LINK;
 		plen = 64;
@@ -3353,6 +3346,7 @@ static void addrconf_addr_gen(struct inet6_dev *idev, bool prefix_route)
 static void addrconf_dev_config(struct net_device *dev)
 {
 	struct inet6_dev *idev;
+	bool ret = false;
 
 	ASSERT_RTNL();
 
@@ -3378,6 +3372,10 @@ static void addrconf_dev_config(struct net_device *dev)
 
 	idev = addrconf_add_dev(dev);
 	if (IS_ERR(idev))
+		return;
+
+	trace_android_vh_ipv6_gen_linklocal_addr(dev, &ret);
+	if (ret)
 		return;
 
 	/* this device type has no EUI support */
@@ -3725,10 +3723,8 @@ static int addrconf_ifdown(struct net_device *dev, bool unregister)
 	unsigned long event = unregister ? NETDEV_UNREGISTER : NETDEV_DOWN;
 	struct net *net = dev_net(dev);
 	struct inet6_dev *idev;
-	struct inet6_ifaddr *ifa;
-	LIST_HEAD(tmp_addr_list);
+	struct inet6_ifaddr *ifa, *tmp;
 	bool keep_addr = false;
-	bool was_ready;
 	int state, i;
 
 	ASSERT_RTNL();
@@ -3794,10 +3790,7 @@ restart:
 
 	addrconf_del_rs_timer(idev);
 
-	/* Step 2: clear flags for stateless addrconf, repeated down
-	 *         detection
-	 */
-	was_ready = idev->if_flags & IF_READY;
+	/* Step 2: clear flags for stateless addrconf */
 	if (!unregister)
 		idev->if_flags &= ~(IF_RS_SENT|IF_RA_RCVD|IF_READY);
 
@@ -3818,23 +3811,16 @@ restart:
 		write_lock_bh(&idev->lock);
 	}
 
-	list_for_each_entry(ifa, &idev->addr_list, if_list)
-		list_add_tail(&ifa->if_list_aux, &tmp_addr_list);
-	write_unlock_bh(&idev->lock);
-
-	while (!list_empty(&tmp_addr_list)) {
+	list_for_each_entry_safe(ifa, tmp, &idev->addr_list, if_list) {
 		struct fib6_info *rt = NULL;
 		bool keep;
-
-		ifa = list_first_entry(&tmp_addr_list,
-				       struct inet6_ifaddr, if_list_aux);
-		list_del(&ifa->if_list_aux);
 
 		addrconf_del_dad_work(ifa);
 
 		keep = keep_addr && (ifa->flags & IFA_F_PERMANENT) &&
 			!addr_is_local(&ifa->addr);
 
+		write_unlock_bh(&idev->lock);
 		spin_lock_bh(&ifa->lock);
 
 		if (keep) {
@@ -3865,19 +3851,20 @@ restart:
 			addrconf_leave_solict(ifa->idev, &ifa->addr);
 		}
 
+		write_lock_bh(&idev->lock);
 		if (!keep) {
-			write_lock_bh(&idev->lock);
 			list_del_rcu(&ifa->if_list);
-			write_unlock_bh(&idev->lock);
 			in6_ifa_put(ifa);
 		}
 	}
+
+	write_unlock_bh(&idev->lock);
 
 	/* Step 5: Discard anycast and multicast list */
 	if (unregister) {
 		ipv6_ac_destroy_dev(idev);
 		ipv6_mc_destroy_dev(idev);
-	} else if (was_ready) {
+	} else {
 		ipv6_mc_down(idev);
 	}
 
@@ -4204,8 +4191,7 @@ static void addrconf_dad_completed(struct inet6_ifaddr *ifp, bool bump_id,
 	send_rs = send_mld &&
 		  ipv6_accept_ra(ifp->idev) &&
 		  ifp->idev->cnf.rtr_solicits != 0 &&
-		  (dev->flags & IFF_LOOPBACK) == 0 &&
-		  (dev->type != ARPHRD_TUNNEL);
+		  (dev->flags&IFF_LOOPBACK) == 0;
 	read_unlock_bh(&ifp->idev->lock);
 
 	/* While dad is in progress mld report's source address is in6_addrany.
@@ -5002,7 +4988,6 @@ static int inet6_fill_ifaddr(struct sk_buff *skb, struct inet6_ifaddr *ifa,
 	    nla_put_s32(skb, IFA_TARGET_NETNSID, args->netnsid))
 		goto error;
 
-	spin_lock_bh(&ifa->lock);
 	if (!((ifa->flags&IFA_F_PERMANENT) &&
 	      (ifa->prefered_lft == INFINITY_LIFE_TIME))) {
 		preferred = ifa->prefered_lft;
@@ -5024,7 +5009,6 @@ static int inet6_fill_ifaddr(struct sk_buff *skb, struct inet6_ifaddr *ifa,
 		preferred = INFINITY_LIFE_TIME;
 		valid = INFINITY_LIFE_TIME;
 	}
-	spin_unlock_bh(&ifa->lock);
 
 	if (!ipv6_addr_any(&ifa->peer_addr)) {
 		if (nla_put_in6_addr(skb, IFA_LOCAL, &ifa->addr) < 0 ||
@@ -5538,7 +5522,7 @@ static inline void ipv6_store_devconf(struct ipv6_devconf *cnf,
 	array[DEVCONF_USE_OPTIMISTIC] = cnf->use_optimistic;
 #endif
 #ifdef CONFIG_IPV6_MROUTE
-	array[DEVCONF_MC_FORWARDING] = atomic_read(&cnf->mc_forwarding);
+	array[DEVCONF_MC_FORWARDING] = cnf->mc_forwarding;
 #endif
 	array[DEVCONF_DISABLE_IPV6] = cnf->disable_ipv6;
 	array[DEVCONF_ACCEPT_DAD] = cnf->accept_dad;
@@ -6759,6 +6743,13 @@ static const struct ctl_table addrconf_sysctl[] = {
 #endif
 #endif
 	{
+		.procname	= "accept_ra_rt_table",
+		.data		= &ipv6_devconf.accept_ra_rt_table,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec,
+	},
+	{
 		.procname	= "proxy_ndp",
 		.data		= &ipv6_devconf.proxy_ndp,
 		.maxlen		= sizeof(int),
@@ -7157,8 +7148,26 @@ int __init addrconf_init(void)
 		goto out_nowq;
 	}
 
+	/* The addrconf netdev notifier requires that loopback_dev
+	 * has it's ipv6 private information allocated and setup
+	 * before it can bring up and give link-local addresses
+	 * to other devices which are up.
+	 *
+	 * Unfortunately, loopback_dev is not necessarily the first
+	 * entry in the global dev_base list of net devices.  In fact,
+	 * it is likely to be the very last entry on that list.
+	 * So this causes the notifier registry below to try and
+	 * give link-local addresses to all devices besides loopback_dev
+	 * first, then loopback_dev, which cases all the non-loopback_dev
+	 * devices to fail to get a link-local address.
+	 *
+	 * So, as a temporary fix, allocate the ipv6 structure for
+	 * loopback_dev first by hand.
+	 * Longer term, all of the dependencies ipv6 has upon the loopback
+	 * device and it being up should be removed.
+	 */
 	rtnl_lock();
-	idev = ipv6_add_dev(blackhole_netdev);
+	idev = ipv6_add_dev(init_net.loopback_dev);
 	rtnl_unlock();
 	if (IS_ERR(idev)) {
 		err = PTR_ERR(idev);

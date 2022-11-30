@@ -2,7 +2,6 @@
 #ifndef _LINUX_FS_H
 #define _LINUX_FS_H
 
-#include <linux/kabi.h>
 #include <linux/linkage.h>
 #include <linux/wait_bit.h>
 #include <linux/kdev_t.h>
@@ -40,14 +39,11 @@
 #include <linux/fs_types.h>
 #include <linux/build_bug.h>
 #include <linux/stddef.h>
-#include <linux/mount.h>
-#include <linux/tracepoint-defs.h>
+#include <linux/android_kabi.h>
 
 #include <asm/byteorder.h>
 #include <uapi/linux/fs.h>
-
-#define D_COUNT_MAX (INT_MAX / 2)
-
+#include <linux/android_vendor.h>
 
 struct backing_dev_info;
 struct bdi_writeback;
@@ -183,12 +179,6 @@ typedef int (dio_iodone_t)(struct kiocb *iocb, loff_t offset,
 
 /* File supports async buffered reads */
 #define FMODE_BUF_RASYNC	((__force fmode_t)0x40000000)
-
-/* File mode control flag, expect random access pattern */
-#define FMODE_CTL_RANDOM	((__force fmode_t)0x1000)
-
-/* File mode control flag, will try to read head of the file into pagecache */
-#define FMODE_CTL_WILLNEED		((__force fmode_t)0x400000)
 
 /*
  * Attribute flags.  These should be or-ed together to figure out what
@@ -426,10 +416,10 @@ struct address_space_operations {
 				sector_t *span);
 	void (*swap_deactivate)(struct file *file);
 
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
-	KABI_RESERVE(3)
-	KABI_RESERVE(4)
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
+	ANDROID_KABI_RESERVE(3);
+	ANDROID_KABI_RESERVE(4);
 };
 
 extern const struct address_space_operations empty_aops;
@@ -456,6 +446,7 @@ int pagecache_write_end(struct file *, struct address_space *mapping,
  * @i_mmap: Tree of private and shared mappings.
  * @i_mmap_rwsem: Protects @i_mmap and @i_mmap_writable.
  * @nrpages: Number of page entries, protected by the i_pages lock.
+ * @nrexceptional: Shadow or DAX entries, protected by the i_pages lock.
  * @writeback_index: Writeback starts here.
  * @a_ops: Methods.
  * @flags: Error bits and flags (AS_*).
@@ -476,6 +467,7 @@ struct address_space {
 	struct rb_root_cached	i_mmap;
 	struct rw_semaphore	i_mmap_rwsem;
 	unsigned long		nrpages;
+	unsigned long		nrexceptional;
 	pgoff_t			writeback_index;
 	const struct address_space_operations *a_ops;
 	unsigned long		flags;
@@ -484,10 +476,10 @@ struct address_space {
 	struct list_head	private_list;
 	void			*private_data;
 
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
-	KABI_RESERVE(3)
-	KABI_RESERVE(4)
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
+	ANDROID_KABI_RESERVE(3);
+	ANDROID_KABI_RESERVE(4);
 } __attribute__((aligned(sizeof(long)))) __randomize_layout;
 	/*
 	 * On most architectures that alignment is already the case; but
@@ -739,8 +731,8 @@ struct inode {
 
 	void			*i_private; /* fs or device private pointer */
 
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
 } __randomize_layout;
 
 struct timespec64 timestamp_truncate(struct timespec64 t, struct inode *inode);
@@ -975,14 +967,10 @@ struct file {
 	struct address_space	*f_mapping;
 	errseq_t		f_wb_err;
 	errseq_t		f_sb_err; /* for syncfs */
-#ifndef __GENKSYMS__
-	union {
-		fmode_t			f_ctl_mode;
-		u64			kabi_reserved1;
-	};
-#else
-	KABI_RESERVE(1)
-#endif
+
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
+	ANDROID_OEM_DATA(1);
 } __randomize_layout
   __attribute__((aligned(4)));	/* lest something weird decides that 2 is OK */
 
@@ -1043,8 +1031,8 @@ struct file_lock_operations {
 	void (*fl_copy_lock)(struct file_lock *, struct file_lock *);
 	void (*fl_release_private)(struct file_lock *);
 
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
 };
 
 struct lock_manager_operations {
@@ -1057,8 +1045,8 @@ struct lock_manager_operations {
 	void (*lm_setup)(struct file_lock *, void **);
 	bool (*lm_breaker_owns_lease)(struct file_lock *);
 
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
 };
 
 struct lock_manager {
@@ -1132,6 +1120,10 @@ struct file_lock {
 			unsigned int	debug_id;
 		} afs;
 	} fl_u;
+
+	struct list_head android_reserved1;	/* not a macro as we might just need it as-is */
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
 } __randomize_layout;
 
 struct file_lock_context {
@@ -1445,9 +1437,7 @@ enum {
 #define SB_FREEZE_LEVELS (SB_FREEZE_COMPLETE - 1)
 
 struct sb_writers {
-	unsigned short			frozen;		/* Is sb frozen? */
-	unsigned short			frozen_ro;	/* Was sb read-only
-							 * when frozen? */
+	int				frozen;		/* Is sb frozen? */
 	wait_queue_head_t		wait_unfrozen;	/* for get_super_thawed() */
 	struct percpu_rw_semaphore	rw_sem[SB_FREEZE_LEVELS];
 };
@@ -1586,6 +1576,11 @@ struct super_block {
 
 	spinlock_t		s_inode_wblist_lock;
 	struct list_head	s_inodes_wb;	/* writeback inodes */
+
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
+	ANDROID_KABI_RESERVE(3);
+	ANDROID_KABI_RESERVE(4);
 } __randomize_layout;
 
 /* Helper functions so that in most cases filesystems will
@@ -1899,10 +1894,10 @@ struct file_operations {
 				   loff_t len, unsigned int remap_flags);
 	int (*fadvise)(struct file *, loff_t, loff_t, int);
 
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
-	KABI_RESERVE(3)
-	KABI_RESERVE(4)
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
+	ANDROID_KABI_RESERVE(3);
+	ANDROID_KABI_RESERVE(4);
 } __randomize_layout;
 
 struct inode_operations {
@@ -1934,18 +1929,10 @@ struct inode_operations {
 	int (*tmpfile) (struct inode *, struct dentry *, umode_t);
 	int (*set_acl)(struct inode *, struct posix_acl *, int);
 
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
-	KABI_RESERVE(3)
-	KABI_RESERVE(4)
-	KABI_RESERVE(5)
-	KABI_RESERVE(6)
-	KABI_RESERVE(7)
-	KABI_RESERVE(8)
-	KABI_RESERVE(9)
-	KABI_RESERVE(10)
-	KABI_RESERVE(11)
-	KABI_RESERVE(12)
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
+	ANDROID_KABI_RESERVE(3);
+	ANDROID_KABI_RESERVE(4);
 } ____cacheline_aligned;
 
 static inline ssize_t call_read_iter(struct file *file, struct kiocb *kio,
@@ -2017,15 +2004,16 @@ struct super_operations {
 	ssize_t (*quota_write)(struct super_block *, int, const char *, size_t, loff_t);
 	struct dquot **(*get_dquots)(struct inode *);
 #endif
+	int (*bdev_try_to_free_page)(struct super_block*, struct page*, gfp_t);
 	long (*nr_cached_objects)(struct super_block *,
 				  struct shrink_control *);
 	long (*free_cached_objects)(struct super_block *,
 				    struct shrink_control *);
 
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
-	KABI_RESERVE(3)
-	KABI_RESERVE(4)
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
+	ANDROID_KABI_RESERVE(3);
+	ANDROID_KABI_RESERVE(4);
 };
 
 /*
@@ -2275,8 +2263,6 @@ enum file_time_flags {
 
 extern bool atime_needs_update(const struct path *, struct inode *);
 extern void touch_atime(const struct path *);
-int inode_update_time(struct inode *inode, struct timespec64 *time, int flags);
-
 static inline void file_accessed(struct file *file)
 {
 	if (!(file->f_flags & O_NOATIME))
@@ -2316,10 +2302,10 @@ struct file_system_type {
 	struct lock_class_key i_mutex_key;
 	struct lock_class_key i_mutex_dir_key;
 
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
-	KABI_RESERVE(3)
-	KABI_RESERVE(4)
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
+	ANDROID_KABI_RESERVE(3);
+	ANDROID_KABI_RESERVE(4);
 };
 
 #define MODULE_ALIAS_FS(NAME) MODULE_ALIAS("fs-" NAME)
@@ -2596,14 +2582,9 @@ extern long do_sys_open(int dfd, const char __user *filename, int flags,
 			umode_t mode);
 extern struct file *file_open_name(struct filename *, int, umode_t);
 extern struct file *filp_open(const char *, int, umode_t);
-extern struct file *file_open_root(const struct path *,
+extern struct file *filp_open_block(const char *, int, umode_t);
+extern struct file *file_open_root(struct dentry *, struct vfsmount *,
 				   const char *, int, umode_t);
-static inline struct file *file_open_root_mnt(struct vfsmount *mnt,
-				   const char *name, int flags, umode_t mode)
-{
-	return file_open_root(&(struct path){.mnt = mnt, .dentry = mnt->mnt_root},
-			      name, flags, mode);
-}
 extern struct file * dentry_open(const struct path *, int, const struct cred *);
 extern struct file * open_with_fake_path(const struct path *, int,
 					 struct inode*, const struct cred *);
@@ -3082,11 +3063,6 @@ extern void
 file_ra_state_init(struct file_ra_state *ra, struct address_space *mapping);
 extern loff_t noop_llseek(struct file *file, loff_t offset, int whence);
 extern loff_t no_llseek(struct file *file, loff_t offset, int whence);
-static inline bool unsigned_offsets(struct file *file)
-{
-	return file->f_mode & FMODE_UNSIGNED_OFFSET;
-}
-
 extern loff_t vfs_setpos(struct file *file, loff_t offset, loff_t maxsize);
 extern loff_t generic_file_llseek(struct file *file, loff_t offset, int whence);
 extern loff_t generic_file_llseek_size(struct file *file, loff_t offset,
@@ -3280,11 +3256,7 @@ extern int generic_file_fsync(struct file *, loff_t, loff_t, int);
 
 extern int generic_check_addressable(unsigned, u64);
 
-#ifdef CONFIG_UNICODE
-extern int generic_ci_d_hash(const struct dentry *dentry, struct qstr *str);
-extern int generic_ci_d_compare(const struct dentry *dentry, unsigned int len,
-				const char *str, const struct qstr *name);
-#endif
+extern void generic_set_encrypted_ci_d_ops(struct dentry *dentry);
 
 #ifdef CONFIG_MIGRATION
 extern int buffer_migrate_page(struct address_space *,
@@ -3360,6 +3332,11 @@ static inline int kiocb_set_rw_flags(struct kiocb *ki, rwf_t flags)
 
 	ki->ki_flags |= kiocb_flags;
 	return 0;
+}
+
+static inline rwf_t iocb_to_rw_flags(int ifl, int iocb_mask)
+{
+	return ifl & iocb_mask;
 }
 
 static inline ino_t parent_ino(struct dentry *dentry)
@@ -3559,33 +3536,4 @@ static inline int inode_drain_writes(struct inode *inode)
 	return filemap_write_and_wait(inode->i_mapping);
 }
 
-struct fs_file_read_ctx {
-	const unsigned char *name;
-	unsigned int f_mode;
-	unsigned int rsvd;
-	/* clear from f_ctl_mode */
-	unsigned int clr_f_mode;
-	/* set into f_ctl_mode */
-	unsigned int set_f_mode;
-	unsigned long key;
-	/* file size */
-	long long i_size;
-	/* previous page index */
-	long long prev_index;
-	/* current page index */
-	long long index;
-};
-
-#ifdef CONFIG_TRACEPOINTS
-DECLARE_TRACEPOINT(fs_file_read);
-extern void fs_file_read_update_args_by_trace(struct kiocb *iocb);
-#else
-static inline void fs_file_read_update_args_by_trace(struct kiocb *iocb) {}
-#endif
-
-static inline void fs_file_read_do_trace(struct kiocb *iocb)
-{
-	if (tracepoint_enabled(fs_file_read))
-		fs_file_read_update_args_by_trace(iocb);
-}
 #endif /* _LINUX_FS_H */

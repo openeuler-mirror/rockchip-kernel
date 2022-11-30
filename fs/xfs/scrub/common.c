@@ -74,16 +74,14 @@ __xchk_process_error(
 		return true;
 	case -EDEADLOCK:
 		/* Used to restart an op with deadlock avoidance. */
-		trace_xchk_deadlock_retry(
-				sc->ip ? sc->ip : XFS_I(file_inode(sc->file)),
-				sc->sm, *error);
+		trace_xchk_deadlock_retry(sc->ip, sc->sm, *error);
 		break;
 	case -EFSBADCRC:
 	case -EFSCORRUPTED:
 		/* Note the badness but don't abort. */
 		sc->sm->sm_flags |= errflag;
 		*error = 0;
-		fallthrough;
+		/* fall through */
 	default:
 		trace_xchk_op_error(sc, agno, bno, *error,
 				ret_ip);
@@ -136,7 +134,7 @@ __xchk_fblock_process_error(
 		/* Note the badness but don't abort. */
 		sc->sm->sm_flags |= errflag;
 		*error = 0;
-		fallthrough;
+		/* fall through */
 	default:
 		trace_xchk_file_op_error(sc, whichfork, offset, *error,
 				ret_ip);
@@ -715,7 +713,7 @@ xchk_get_inode(
 		if (error)
 			return -ENOENT;
 		error = -EFSCORRUPTED;
-		fallthrough;
+		/* fall through */
 	default:
 		trace_xchk_op_error(sc,
 				XFS_INO_TO_AGNO(mp, sc->sm->sm_ino),
@@ -904,8 +902,7 @@ xchk_stop_reaping(
 	struct xfs_scrub	*sc)
 {
 	sc->flags |= XCHK_REAPING_DISABLED;
-	xfs_blockgc_stop(sc->mp);
-	xfs_inodegc_stop(sc->mp);
+	xfs_stop_block_reaping(sc->mp);
 }
 
 /* Restart background reaping of resources. */
@@ -913,13 +910,6 @@ void
 xchk_start_reaping(
 	struct xfs_scrub	*sc)
 {
-	/*
-	 * Readonly filesystems do not perform inactivation or speculative
-	 * preallocation, so there's no need to restart the workers.
-	 */
-	if (!(sc->mp->m_flags & XFS_MOUNT_RDONLY)) {
-		xfs_inodegc_start(sc->mp);
-		xfs_blockgc_start(sc->mp);
-	}
+	xfs_start_block_reaping(sc->mp);
 	sc->flags &= ~XCHK_REAPING_DISABLED;
 }

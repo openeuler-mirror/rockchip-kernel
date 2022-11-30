@@ -23,7 +23,6 @@ static inline bool klp_is_object_loaded(struct klp_object *obj)
 	return !obj->name || obj->mod;
 }
 
-#ifdef CONFIG_LIVEPATCH_PER_TASK_CONSISTENCY
 static inline int klp_pre_patch_callback(struct klp_object *obj)
 {
 	int ret = 0;
@@ -56,5 +55,5 @@ static inline void klp_post_unpatch_callback(struct klp_object *obj)
 
 	obj->callbacks.post_unpatch_enabled = false;
 }
-#endif /* CONFIG_LIVEPATCH_PER_TASK_CONSISTENCY */
+
 #endif /* _LIVEPATCH_CORE_H */

@@ -244,7 +244,7 @@ xfs_bmap_count_blocks(
 		 */
 		*count += btblocks - 1;
 
-		fallthrough;
+		/* fall through */
 	case XFS_DINODE_FMT_EXTENTS:
 		*nextents = xfs_bmap_count_leaves(ifp, count);
 		break;
@@ -727,9 +727,11 @@ xfs_alloc_file_space(
 	xfs_fileoff_t		startoffset_fsb;
 	xfs_fileoff_t		endoffset_fsb;
 	int			nimaps;
+	int			quota_flag;
 	int			rt;
 	xfs_trans_t		*tp;
 	xfs_bmbt_irec_t		imaps[1], *imapp;
+	uint			qblocks, resblks, resrtextents;
 	int			error;
 
 	trace_xfs_alloc_file_space(ip);
@@ -759,7 +761,6 @@ xfs_alloc_file_space(
 	 */
 	while (allocatesize_fsb && !error) {
 		xfs_fileoff_t	s, e;
-		unsigned int	dblocks, rblocks, resblks;
 
 		/*
 		 * Determine space reservations for data/realtime.
@@ -789,27 +790,45 @@ xfs_alloc_file_space(
 		 */
 		resblks = min_t(xfs_fileoff_t, (e - s), (MAXEXTLEN * nimaps));
 		if (unlikely(rt)) {
-			dblocks = XFS_DIOSTRAT_SPACE_RES(mp, 0);
-			rblocks = resblks;
+			resrtextents = qblocks = resblks;
+			resrtextents /= mp->m_sb.sb_rextsize;
+			resblks = XFS_DIOSTRAT_SPACE_RES(mp, 0);
+			quota_flag = XFS_QMOPT_RES_RTBLKS;
 		} else {
-			dblocks = XFS_DIOSTRAT_SPACE_RES(mp, resblks);
-			rblocks = 0;
+			resrtextents = 0;
+			resblks = qblocks = XFS_DIOSTRAT_SPACE_RES(mp, resblks);
+			quota_flag = XFS_QMOPT_RES_REGBLKS;
 		}
 
 		/*
 		 * Allocate and setup the transaction.
 		 */
-		error = xfs_trans_alloc_inode(ip, &M_RES(mp)->tr_write,
-				dblocks, rblocks, false, &tp);
-		if (error)
-			break;
+		error = xfs_trans_alloc(mp, &M_RES(mp)->tr_write, resblks,
+				resrtextents, 0, &tp);
 
+		/*
+		 * Check for running out of space
+		 */
+		if (error) {
+			/*
+			 * Free the transaction structure.
+			 */
+			ASSERT(error == -ENOSPC || XFS_FORCED_SHUTDOWN(mp));
+			break;
+		}
+		xfs_ilock(ip, XFS_ILOCK_EXCL);
+		error = xfs_trans_reserve_quota_nblks(tp, ip, qblocks,
+						      0, quota_flag);
+		if (error)
+			goto error1;
+
+		xfs_trans_ijoin(tp, ip, 0);
 
 		error = xfs_bmapi_write(tp, ip, startoffset_fsb,
 					allocatesize_fsb, alloc_type, 0, imapp,
 					&nimaps);
 		if (error)
-			goto error;
+			goto error0;
 
 		/*
 		 * Complete the transaction
@@ -832,7 +851,10 @@ xfs_alloc_file_space(
 
 	return error;
 
-error:
+error0:	/* unlock inode, unreserve quota blocks, cancel trans */
+	xfs_trans_unreserve_quota_nblks(tp, ip, (long)qblocks, 0, quota_flag);
+
+error1:	/* Just cancel transaction */
 	xfs_trans_cancel(tp);
 	xfs_iunlock(ip, XFS_ILOCK_EXCL);
 	return error;
@@ -850,10 +872,19 @@ xfs_unmap_extent(
 	uint			resblks = XFS_DIOSTRAT_SPACE_RES(mp, 0);
 	int			error;
 
-	error = xfs_trans_alloc_inode(ip, &M_RES(mp)->tr_write, resblks, 0,
-			false, &tp);
-	if (error)
+	error = xfs_trans_alloc(mp, &M_RES(mp)->tr_write, resblks, 0, 0, &tp);
+	if (error) {
+		ASSERT(error == -ENOSPC || XFS_FORCED_SHUTDOWN(mp));
 		return error;
+	}
+
+	xfs_ilock(ip, XFS_ILOCK_EXCL);
+	error = xfs_trans_reserve_quota(tp, mp, ip->i_udquot, ip->i_gdquot,
+			ip->i_pdquot, resblks, 0, XFS_QMOPT_RES_REGBLKS);
+	if (error)
+		goto out_trans_cancel;
+
+	xfs_trans_ijoin(tp, ip, 0);
 
 	error = xfs_bunmapi(tp, ip, startoffset_fsb, len_fsb, 0, 2, done);
 	if (error)

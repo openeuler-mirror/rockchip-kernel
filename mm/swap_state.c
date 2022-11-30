@@ -39,9 +39,6 @@ static const struct address_space_operations swap_aops = {
 struct address_space *swapper_spaces[MAX_SWAPFILES] __read_mostly;
 static unsigned int nr_swapper_spaces[MAX_SWAPFILES] __read_mostly;
 static bool enable_vma_readahead __read_mostly = true;
-#ifdef CONFIG_ETMEM
-static bool enable_kernel_swap __read_mostly = true;
-#endif
 
 #define SWAP_RA_WIN_SHIFT	(PAGE_SHIFT / 2)
 #define SWAP_RA_HITS_MASK	((1UL << SWAP_RA_WIN_SHIFT) - 1)
@@ -117,9 +114,11 @@ void *get_shadow_from_swap_cache(swp_entry_t entry)
 	pgoff_t idx = swp_offset(entry);
 	struct page *page;
 
-	page = xa_load(&address_space->i_pages, idx);
+	page = find_get_entry(address_space, idx);
 	if (xa_is_value(page))
 		return page;
+	if (page)
+		put_page(page);
 	return NULL;
 }
 
@@ -144,6 +143,8 @@ int add_to_swap_cache(struct page *page, swp_entry_t entry,
 	SetPageSwapCache(page);
 
 	do {
+		unsigned long nr_shadows = 0;
+
 		xas_lock_irq(&xas);
 		xas_create_range(&xas);
 		if (xas_error(&xas))
@@ -152,6 +153,7 @@ int add_to_swap_cache(struct page *page, swp_entry_t entry,
 			VM_BUG_ON_PAGE(xas.xa_index != idx + i, page);
 			old = xas_load(&xas);
 			if (xa_is_value(old)) {
+				nr_shadows++;
 				if (shadowp)
 					*shadowp = old;
 			}
@@ -159,6 +161,7 @@ int add_to_swap_cache(struct page *page, swp_entry_t entry,
 			xas_store(&xas, page);
 			xas_next(&xas);
 		}
+		address_space->nrexceptional -= nr_shadows;
 		address_space->nrpages += nr;
 		__mod_node_page_state(page_pgdat(page), NR_FILE_PAGES, nr);
 		ADD_CACHE_INFO(add_total, nr);
@@ -197,6 +200,8 @@ void __delete_from_swap_cache(struct page *page,
 		xas_next(&xas);
 	}
 	ClearPageSwapCache(page);
+	if (shadow)
+		address_space->nrexceptional += nr;
 	address_space->nrpages -= nr;
 	__mod_node_page_state(page_pgdat(page), NR_FILE_PAGES, -nr);
 	ADD_CACHE_INFO(del_total, nr);
@@ -285,6 +290,7 @@ void clear_shadow_from_swap_cache(int type, unsigned long begin,
 	void *old;
 
 	for (;;) {
+		unsigned long nr_shadows = 0;
 		swp_entry_t entry = swp_entry(type, curr);
 		struct address_space *address_space = swap_address_space(entry);
 		XA_STATE(xas, &address_space->i_pages, curr);
@@ -294,7 +300,9 @@ void clear_shadow_from_swap_cache(int type, unsigned long begin,
 			if (!xa_is_value(old))
 				continue;
 			xas_store(&xas, NULL);
+			nr_shadows++;
 		}
+		address_space->nrexceptional -= nr_shadows;
 		xa_unlock_irq(&address_space->i_pages);
 
 		/* search the next swapcache until we meet end */
@@ -352,13 +360,6 @@ static inline bool swap_use_vma_readahead(void)
 {
 	return READ_ONCE(enable_vma_readahead) && !atomic_read(&nr_rotate_swap);
 }
-
-#ifdef CONFIG_ETMEM
-bool kernel_swap_enabled(void)
-{
-	return READ_ONCE(enable_kernel_swap);
-}
-#endif
 
 /*
  * Lookup a swap entry in the swap cache. A found page will be returned
@@ -429,8 +430,7 @@ struct page *find_get_incore_page(struct address_space *mapping, pgoff_t index)
 {
 	swp_entry_t swp;
 	struct swap_info_struct *si;
-	struct page *page = pagecache_get_page(mapping, index,
-						FGP_ENTRY | FGP_HEAD, 0);
+	struct page *page = find_get_entry(mapping, index);
 
 	if (!page)
 		return page;
@@ -513,7 +513,7 @@ struct page *__read_swap_cache_async(swp_entry_t entry, gfp_t gfp_mask,
 		 * __read_swap_cache_async(), which has set SWAP_HAS_CACHE
 		 * in swap_map, but not yet added its page to swap cache.
 		 */
-		schedule_timeout_uninterruptible(1);
+		cond_resched();
 	}
 
 	/*
@@ -645,7 +645,11 @@ static unsigned long swapin_nr_pages(unsigned long offset)
  * This has been extended to use the NUMA policies from the mm triggering
  * the readahead.
  *
- * Caller must hold read mmap_lock if vmf->vma is not NULL.
+ * Caller must hold down_read on the vma->vm_mm if vmf->vma is not NULL.
+ * This is needed to ensure the VMA will not be freed in our back. In the case
+ * of the speculative page fault handler, this cannot happen, even if we don't
+ * hold the mmap_sem. Callees are assumed to take care of reading VMA's fields
+ * using READ_ONCE() to read consistent values.
  */
 struct page *swap_cluster_readahead(swp_entry_t entry, gfp_t gfp_mask,
 				struct vm_fault *vmf)
@@ -742,9 +746,9 @@ static inline void swap_ra_clamp_pfn(struct vm_area_struct *vma,
 				     unsigned long *start,
 				     unsigned long *end)
 {
-	*start = max3(lpfn, PFN_DOWN(vma->vm_start),
+	*start = max3(lpfn, PFN_DOWN(READ_ONCE(vma->vm_start)),
 		      PFN_DOWN(faddr & PMD_MASK));
-	*end = min3(rpfn, PFN_DOWN(vma->vm_end),
+	*end = min3(rpfn, PFN_DOWN(READ_ONCE(vma->vm_end)),
 		    PFN_DOWN((faddr & PMD_MASK) + PMD_SIZE));
 }
 
@@ -920,35 +924,8 @@ static struct kobj_attribute vma_ra_enabled_attr =
 	__ATTR(vma_ra_enabled, 0644, vma_ra_enabled_show,
 	       vma_ra_enabled_store);
 
-#ifdef CONFIG_ETMEM
-static ssize_t kernel_swap_enable_show(struct kobject *kobj,
-					struct kobj_attribute *attr, char *buf)
-{
-	return sprintf(buf, "%s\n", enable_kernel_swap ? "true" : "false");
-}
-static ssize_t kernel_swap_enable_store(struct kobject *kobj,
-					struct kobj_attribute *attr,
-					const char *buf, size_t count)
-{
-	if (!strncmp(buf, "true", 4) || !strncmp(buf, "1", 1))
-		WRITE_ONCE(enable_kernel_swap, true);
-	else if (!strncmp(buf, "false", 5) || !strncmp(buf, "0", 1))
-		WRITE_ONCE(enable_kernel_swap, false);
-	else
-		return -EINVAL;
-
-	return count;
-}
-static struct kobj_attribute kernel_swap_enable_attr =
-	__ATTR(kernel_swap_enable, 0644, kernel_swap_enable_show,
-		kernel_swap_enable_store);
-#endif
-
 static struct attribute *swap_attrs[] = {
 	&vma_ra_enabled_attr.attr,
-#ifdef CONFIG_ETMEM
-	&kernel_swap_enable_attr.attr,
-#endif
 	NULL,
 };
 

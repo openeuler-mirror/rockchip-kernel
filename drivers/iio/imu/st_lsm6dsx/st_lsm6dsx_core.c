@@ -1465,8 +1465,6 @@ st_lsm6dsx_set_odr(struct st_lsm6dsx_sensor *sensor, u32 req_odr)
 	int err;
 
 	switch (sensor->id) {
-	case ST_LSM6DSX_ID_GYRO:
-		break;
 	case ST_LSM6DSX_ID_EXT0:
 	case ST_LSM6DSX_ID_EXT1:
 	case ST_LSM6DSX_ID_EXT2:
@@ -1492,8 +1490,8 @@ st_lsm6dsx_set_odr(struct st_lsm6dsx_sensor *sensor, u32 req_odr)
 		}
 		break;
 	}
-	default: /* should never occur */
-		return -EINVAL;
+	default:
+		break;
 	}
 
 	if (req_odr > 0) {
@@ -1558,12 +1556,8 @@ static int st_lsm6dsx_read_oneshot(struct st_lsm6dsx_sensor *sensor,
 	if (err < 0)
 		return err;
 
-	/*
-	 * we need to wait for sensor settling time before
-	 * reading data in order to avoid corrupted samples
-	 */
 	delay = 1000000000 / sensor->odr;
-	usleep_range(3 * delay, 4 * delay);
+	usleep_range(delay, 2 * delay);
 
 	err = st_lsm6dsx_read_locked(hw, addr, &data, sizeof(data));
 	if (err < 0)

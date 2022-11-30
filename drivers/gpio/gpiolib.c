@@ -30,6 +30,8 @@
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/gpio.h>
+#undef CREATE_TRACE_POINTS
+#include <trace/hooks/gpiolib.h>
 
 /* Implementation infrastructure for GPIO interfaces.
  *
@@ -55,8 +57,10 @@
 static DEFINE_IDA(gpio_ida);
 static dev_t gpio_devt;
 #define GPIO_DEV_MAX 256 /* 256 GPIO chip devices supported */
+static int gpio_bus_match(struct device *dev, struct device_driver *drv);
 static struct bus_type gpio_bus_type = {
 	.name = "gpio",
+	.match = gpio_bus_match,
 };
 
 /*
@@ -467,7 +471,7 @@ EXPORT_SYMBOL_GPL(gpiochip_line_is_valid);
 
 static void gpiodevice_release(struct device *dev)
 {
-	struct gpio_device *gdev = dev_get_drvdata(dev);
+	struct gpio_device *gdev = container_of(dev, struct gpio_device, dev);
 	unsigned long flags;
 
 	spin_lock_irqsave(&gpio_lock, flags);
@@ -574,6 +578,7 @@ int gpiochip_add_data_with_key(struct gpio_chip *gc, void *data,
 	unsigned	i;
 	int		base = gc->base;
 	struct gpio_device *gdev;
+	bool		block_gpio_read = false;
 
 	/*
 	 * First: allocate and populate the internal stat container, and
@@ -590,13 +595,7 @@ int gpiochip_add_data_with_key(struct gpio_chip *gc, void *data,
 		gdev->dev.of_node = gc->parent->of_node;
 	}
 
-#ifdef CONFIG_OF_GPIO
-	/* If the gpiochip has an assigned OF node this takes precedence */
-	if (gc->of_node)
-		gdev->dev.of_node = gc->of_node;
-	else
-		gc->of_node = gdev->dev.of_node;
-#endif
+	of_gpio_dev_init(gc, gdev);
 
 	/*
 	 * Assign fwnode depending on the result of the previous calls,
@@ -615,7 +614,6 @@ int gpiochip_add_data_with_key(struct gpio_chip *gc, void *data,
 		goto err_free_ida;
 
 	device_initialize(&gdev->dev);
-	dev_set_drvdata(&gdev->dev, gdev);
 	if (gc->parent && gc->parent->driver)
 		gdev->owner = gc->parent->driver->owner;
 	else if (gc->owner)
@@ -711,15 +709,18 @@ int gpiochip_add_data_with_key(struct gpio_chip *gc, void *data,
 	if (ret)
 		goto err_remove_of_chip;
 
-	for (i = 0; i < gc->ngpio; i++) {
-		struct gpio_desc *desc = &gdev->descs[i];
+	trace_android_vh_gpio_block_read(gdev, &block_gpio_read);
+	if (!block_gpio_read) {
+		for (i = 0; i < gc->ngpio; i++) {
+			struct gpio_desc *desc = &gdev->descs[i];
 
-		if (gc->get_direction && gpiochip_line_is_valid(gc, i)) {
-			assign_bit(FLAG_IS_OUT,
-				   &desc->flags, !gc->get_direction(gc, i));
-		} else {
-			assign_bit(FLAG_IS_OUT,
-				   &desc->flags, !gc->direction_input);
+			if (gc->get_direction && gpiochip_line_is_valid(gc, i)) {
+				assign_bit(FLAG_IS_OUT,
+					   &desc->flags, !gc->get_direction(gc, i));
+			} else {
+				assign_bit(FLAG_IS_OUT,
+					   &desc->flags, !gc->direction_input);
+			}
 		}
 	}
 
@@ -1411,16 +1412,6 @@ static int gpiochip_to_irq(struct gpio_chip *gc, unsigned offset)
 {
 	struct irq_domain *domain = gc->irq.domain;
 
-#ifdef CONFIG_GPIOLIB_IRQCHIP
-	/*
-	 * Avoid race condition with other code, which tries to lookup
-	 * an IRQ before the irqchip has been properly registered,
-	 * i.e. while gpiochip is still being brought up.
-	 */
-	if (!gc->irq.initialized)
-		return -EPROBE_DEFER;
-#endif
-
 	if (!gpiochip_irqchip_irq_valid(gc, offset))
 		return -ENXIO;
 
@@ -1611,15 +1602,6 @@ static int gpiochip_add_irqchip(struct gpio_chip *gc,
 	}
 
 	gpiochip_set_irq_hooks(gc);
-
-	/*
-	 * Using barrier() here to prevent compiler from reordering
-	 * gc->irq.initialized before initialization of above
-	 * GPIO chip irq members.
-	 */
-	barrier();
-
-	gc->irq.initialized = true;
 
 	acpi_gpiochip_request_interrupts(gc);
 
@@ -3234,16 +3216,6 @@ int gpiod_to_irq(const struct gpio_desc *desc)
 
 		return retirq;
 	}
-#ifdef CONFIG_GPIOLIB_IRQCHIP
-	if (gc->irq.chip) {
-		/*
-		 * Avoid race condition with other code, which tries to lookup
-		 * an IRQ before the irqchip has been properly registered,
-		 * i.e. while gpiochip is still being brought up.
-		 */
-		return -EPROBE_DEFER;
-	}
-#endif
 	return -ENXIO;
 }
 EXPORT_SYMBOL_GPL(gpiod_to_irq);
@@ -4378,6 +4350,41 @@ void gpiod_put_array(struct gpio_descs *descs)
 }
 EXPORT_SYMBOL_GPL(gpiod_put_array);
 
+
+static int gpio_bus_match(struct device *dev, struct device_driver *drv)
+{
+	/*
+	 * Only match if the fwnode doesn't already have a proper struct device
+	 * created for it.
+	 */
+	if (dev->fwnode && dev->fwnode->dev != dev)
+		return 0;
+	return 1;
+}
+
+static int gpio_stub_drv_probe(struct device *dev)
+{
+	/*
+	 * The DT node of some GPIO chips have a "compatible" property, but
+	 * never have a struct device added and probed by a driver to register
+	 * the GPIO chip with gpiolib. In such cases, fw_devlink=on will cause
+	 * the consumers of the GPIO chip to get probe deferred forever because
+	 * they will be waiting for a device associated with the GPIO chip
+	 * firmware node to get added and bound to a driver.
+	 *
+	 * To allow these consumers to probe, we associate the struct
+	 * gpio_device of the GPIO chip with the firmware node and then simply
+	 * bind it to this stub driver.
+	 */
+	return 0;
+}
+
+static struct device_driver gpio_stub_drv = {
+	.name = "gpio_stub_drv",
+	.bus = &gpio_bus_type,
+	.probe = gpio_stub_drv_probe,
+};
+
 static int __init gpiolib_dev_init(void)
 {
 	int ret;
@@ -4389,9 +4396,17 @@ static int __init gpiolib_dev_init(void)
 		return ret;
 	}
 
+	ret = driver_register(&gpio_stub_drv);
+	if (ret < 0) {
+		pr_err("gpiolib: could not register GPIO stub driver\n");
+		bus_unregister(&gpio_bus_type);
+		return ret;
+	}
+
 	ret = alloc_chrdev_region(&gpio_devt, 0, GPIO_DEV_MAX, GPIOCHIP_NAME);
 	if (ret < 0) {
 		pr_err("gpiolib: failed to allocate char dev region\n");
+		driver_unregister(&gpio_stub_drv);
 		bus_unregister(&gpio_bus_type);
 		return ret;
 	}

@@ -234,9 +234,8 @@ static void send_user_sigtrap(int si_code)
 	if (interrupts_enabled(regs))
 		local_irq_enable();
 
-	arm64_force_sig_fault(SIGTRAP, si_code,
-			     (void __user *)instruction_pointer(regs),
-			     "User debug trap");
+	arm64_force_sig_fault(SIGTRAP, si_code, instruction_pointer(regs),
+			      "User debug trap");
 }
 
 static int single_step_handler(unsigned long unused, unsigned int esr,
@@ -284,21 +283,25 @@ void register_user_break_hook(struct break_hook *hook)
 {
 	register_debug_hook(&hook->node, &user_break_hook);
 }
+EXPORT_SYMBOL_GPL(register_user_break_hook);
 
 void unregister_user_break_hook(struct break_hook *hook)
 {
 	unregister_debug_hook(&hook->node);
 }
+EXPORT_SYMBOL_GPL(unregister_user_break_hook);
 
 void register_kernel_break_hook(struct break_hook *hook)
 {
 	register_debug_hook(&hook->node, &kernel_break_hook);
 }
+EXPORT_SYMBOL_GPL(register_kernel_break_hook);
 
 void unregister_kernel_break_hook(struct break_hook *hook)
 {
 	unregister_debug_hook(&hook->node);
 }
+EXPORT_SYMBOL_GPL(unregister_kernel_break_hook);
 
 static int call_break_hook(struct pt_regs *regs, unsigned int esr)
 {
@@ -347,10 +350,10 @@ int aarch32_break_handler(struct pt_regs *regs)
 	bool bp = false;
 	void __user *pc = (void __user *)instruction_pointer(regs);
 
-	if (!a32_user_mode(regs))
+	if (!compat_user_mode(regs))
 		return -EFAULT;
 
-	if (a32_thumb_mode(regs)) {
+	if (compat_thumb_mode(regs)) {
 		/* get 16-bit Thumb instruction */
 		__le16 instr;
 		get_user(instr, (__le16 __user *)pc);

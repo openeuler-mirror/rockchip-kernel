@@ -72,17 +72,17 @@ static void trace_note(struct blk_trace *bt, pid_t pid, int action,
 	struct blk_io_trace *t;
 	struct ring_buffer_event *event = NULL;
 	struct trace_buffer *buffer = NULL;
-	unsigned int trace_ctx = 0;
+	int pc = 0;
 	int cpu = smp_processor_id();
 	bool blk_tracer = blk_tracer_enabled;
 	ssize_t cgid_len = cgid ? sizeof(cgid) : 0;
 
 	if (blk_tracer) {
 		buffer = blk_tr->array_buffer.buffer;
-		trace_ctx = tracing_gen_ctx_flags(0);
+		pc = preempt_count();
 		event = trace_buffer_lock_reserve(buffer, TRACE_BLK,
 						  sizeof(*t) + len + cgid_len,
-						  trace_ctx);
+						  0, pc);
 		if (!event)
 			return;
 		t = ring_buffer_event_data(event);
@@ -107,7 +107,7 @@ record_it:
 		memcpy((void *) t + sizeof(*t) + cgid_len, data, len);
 
 		if (blk_tracer)
-			trace_buffer_unlock_commit(blk_tr, buffer, event, trace_ctx);
+			trace_buffer_unlock_commit(blk_tr, buffer, event, 0, pc);
 	}
 }
 
@@ -222,9 +222,8 @@ static void __blk_add_trace(struct blk_trace *bt, sector_t sector, int bytes,
 	struct blk_io_trace *t;
 	unsigned long flags = 0;
 	unsigned long *sequence;
-	unsigned int trace_ctx = 0;
 	pid_t pid;
-	int cpu;
+	int cpu, pc = 0;
 	bool blk_tracer = blk_tracer_enabled;
 	ssize_t cgid_len = cgid ? sizeof(cgid) : 0;
 
@@ -253,10 +252,10 @@ static void __blk_add_trace(struct blk_trace *bt, sector_t sector, int bytes,
 		tracing_record_cmdline(current);
 
 		buffer = blk_tr->array_buffer.buffer;
-		trace_ctx = tracing_gen_ctx_flags(0);
+		pc = preempt_count();
 		event = trace_buffer_lock_reserve(buffer, TRACE_BLK,
 						  sizeof(*t) + pdu_len + cgid_len,
-						  trace_ctx);
+						  0, pc);
 		if (!event)
 			return;
 		t = ring_buffer_event_data(event);
@@ -302,7 +301,7 @@ record_it:
 			memcpy((void *)t + sizeof(*t) + cgid_len, pdu_data, pdu_len);
 
 		if (blk_tracer) {
-			trace_buffer_unlock_commit(blk_tr, buffer, event, trace_ctx);
+			trace_buffer_unlock_commit(blk_tr, buffer, event, 0, pc);
 			return;
 		}
 	}
@@ -1670,14 +1669,6 @@ static int blk_trace_remove_queue(struct request_queue *q)
 				 lockdep_is_held(&q->debugfs_mutex));
 	if (bt == NULL)
 		return -EINVAL;
-
-	if (bt->trace_state == Blktrace_running) {
-		bt->trace_state = Blktrace_stopped;
-		spin_lock_irq(&running_trace_lock);
-		list_del_init(&bt->running_list);
-		spin_unlock_irq(&running_trace_lock);
-		relay_flush(bt->rchan);
-	}
 
 	put_probe_ref();
 	synchronize_rcu();

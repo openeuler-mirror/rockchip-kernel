@@ -46,27 +46,22 @@ struct kmem_cache *inotify_inode_mark_cachep __read_mostly;
 
 #include <linux/sysctl.h>
 
-static long it_zero = 0;
-static long it_int_max = INT_MAX;
-
 struct ctl_table inotify_table[] = {
 	{
 		.procname	= "max_user_instances",
 		.data		= &init_user_ns.ucount_max[UCOUNT_INOTIFY_INSTANCES],
-		.maxlen		= sizeof(long),
+		.maxlen		= sizeof(int),
 		.mode		= 0644,
-		.proc_handler	= proc_doulongvec_minmax,
-		.extra1		= &it_zero,
-		.extra2		= &it_int_max,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ZERO,
 	},
 	{
 		.procname	= "max_user_watches",
 		.data		= &init_user_ns.ucount_max[UCOUNT_INOTIFY_WATCHES],
-		.maxlen		= sizeof(long),
+		.maxlen		= sizeof(int),
 		.mode		= 0644,
-		.proc_handler	= proc_doulongvec_minmax,
-		.extra1		= &it_zero,
-		.extra2		= &it_int_max,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ZERO,
 	},
 	{
 		.procname	= "max_queued_events",
@@ -93,7 +88,7 @@ static inline __u32 inotify_arg_to_mask(struct inode *inode, u32 arg)
 		mask |= FS_EVENT_ON_CHILD;
 
 	/* mask off the flags used to open the fd */
-	mask |= (arg & INOTIFY_USER_MASK);
+	mask |= (arg & (IN_ALL_EVENTS | IN_ONESHOT | IN_EXCL_UNLINK));
 
 	return mask;
 }
@@ -704,6 +699,8 @@ SYSCALL_DEFINE3(inotify_add_watch, int, fd, const char __user *, pathname,
 	struct fsnotify_group *group;
 	struct inode *inode;
 	struct path path;
+	struct path alteredpath;
+	struct path *canonical_path = &path;
 	struct fd f;
 	int ret;
 	unsigned flags = 0;
@@ -750,13 +747,23 @@ SYSCALL_DEFINE3(inotify_add_watch, int, fd, const char __user *, pathname,
 	if (ret)
 		goto fput_and_out;
 
+	/* support stacked filesystems */
+	if (path.dentry && path.dentry->d_op) {
+		if (path.dentry->d_op->d_canonical_path) {
+			path.dentry->d_op->d_canonical_path(&path,
+							    &alteredpath);
+			canonical_path = &alteredpath;
+			path_put(&path);
+		}
+	}
+
 	/* inode held in place by reference to path; group by fget on fd */
-	inode = path.dentry->d_inode;
+	inode = canonical_path->dentry->d_inode;
 	group = f.file->private_data;
 
 	/* create/update an inode mark */
 	ret = inotify_update_watch(group, inode, mask);
-	path_put(&path);
+	path_put(canonical_path);
 fput_and_out:
 	fdput(f);
 	return ret;

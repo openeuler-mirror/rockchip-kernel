@@ -2,7 +2,6 @@
 #ifndef _SCSI_SCSI_CMND_H
 #define _SCSI_SCSI_CMND_H
 
-#include <linux/kabi.h>
 #include <linux/dma-mapping.h>
 #include <linux/blkdev.h>
 #include <linux/t10-pi.h>
@@ -12,6 +11,7 @@
 #include <linux/scatterlist.h>
 #include <scsi/scsi_device.h>
 #include <scsi/scsi_request.h>
+#include <linux/android_kabi.h>
 
 struct Scsi_Host;
 struct scsi_driver;
@@ -144,10 +144,10 @@ struct scsi_cmnd {
 	unsigned char tag;	/* SCSI-II queued command tag */
 	unsigned int extra_len;	/* length of alignment and padding */
 
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
-	KABI_RESERVE(3)
-	KABI_RESERVE(4)
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
+	ANDROID_KABI_RESERVE(3);
+	ANDROID_KABI_RESERVE(4);
 };
 
 /*

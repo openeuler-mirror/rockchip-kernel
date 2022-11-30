@@ -1,14 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0-only
 menu "IRQ chip support"
 
-config SW64_INTC
-	bool "SW64 Platform-Level Interrupt Controller"
-	depends on ACPI && SW64
-	help
-           This enables support for the INTC chip found in SW systems.
-           The INTC controls devices interrupts and connects them to each
-           core's local interrupt controller.
-
 config IRQCHIP
 	def_bool y
 	depends on OF_IRQ
@@ -63,15 +55,6 @@ config ARM_GIC_V3_ITS_FSL_MC
 	depends on ARM_GIC_V3_ITS
 	depends on FSL_MC_BUS
 	default ARM_GIC_V3_ITS
-
-config ARM_GIC_PHYTIUM_2500
-    bool
-    select IRQ_DOMAIN
-    select GENERIC_IRQ_MULTI_HANDLER
-    select IRQ_DOMAIN_HIERARCHY
-    select PARTITION_PERCPU
-    select GENERIC_IRQ_EFFECTIVE_AFF_MASK
-    select GENERIC_MSI_IRQ_DOMAIN
 
 config ARM_NVIC
 	bool
@@ -433,8 +416,9 @@ config IRQ_UNIPHIER_AIDET
 	  Support for the UniPhier AIDET (ARM Interrupt Detector).
 
 config MESON_IRQ_GPIO
-       bool "Meson GPIO Interrupt Multiplexer"
-       depends on ARCH_MESON
+       tristate "Meson GPIO Interrupt Multiplexer"
+       depends on ARCH_MESON || COMPILE_TEST
+       default ARCH_MESON
        select IRQ_DOMAIN_HIERARCHY
        help
          Support Meson SoC Family GPIO Interrupt Multiplexer
@@ -442,15 +426,15 @@ config MESON_IRQ_GPIO
 config GOLDFISH_PIC
        bool "Goldfish programmable interrupt controller"
        depends on MIPS && (GOLDFISH || COMPILE_TEST)
-       select GENERIC_IRQ_CHIP
        select IRQ_DOMAIN
        help
          Say yes here to enable Goldfish interrupt controller driver used
          for Goldfish based virtual platforms.
 
 config QCOM_PDC
-	bool "QCOM PDC"
+	tristate "QCOM PDC"
 	depends on ARCH_QCOM
+	depends on QCOM_SCM || !QCOM_SCM
 	select IRQ_DOMAIN_HIERARCHY
 	help
 	  Power Domain Controller driver to manage and configure wakeup

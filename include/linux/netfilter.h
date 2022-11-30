@@ -14,8 +14,8 @@
 #include <linux/netfilter_defs.h>
 #include <linux/netdevice.h>
 #include <linux/sockptr.h>
+#include <linux/android_kabi.h>
 #include <net/net_namespace.h>
-#include <linux/kabi.h>
 
 static inline int NF_DROP_GETERR(int verdict)
 {
@@ -173,7 +173,7 @@ struct nf_sockopt_ops {
 	/* Use the module struct to lock set/get code in place */
 	struct module *owner;
 
-	KABI_RESERVE(1)
+	ANDROID_KABI_RESERVE(1);
 };
 
 /* Function to register/unregister hook points. */
@@ -377,7 +377,7 @@ struct nf_nat_hook {
 				  enum nf_nat_manip_type mtype,
 				  enum ip_conntrack_dir dir);
 
-	KABI_RESERVE(1)
+	ANDROID_KABI_RESERVE(1);
 };
 
 extern struct nf_nat_hook __rcu *nf_nat_hook;
@@ -463,7 +463,7 @@ struct nf_ct_hook {
 	bool (*get_tuple_skb)(struct nf_conntrack_tuple *,
 			      const struct sk_buff *);
 
-	KABI_RESERVE(1)
+	ANDROID_KABI_RESERVE(1);
 };
 extern struct nf_ct_hook __rcu *nf_ct_hook;
 
@@ -482,7 +482,7 @@ struct nfnl_ct_hook {
 	void (*seq_adjust)(struct sk_buff *skb, struct nf_conn *ct,
 			   enum ip_conntrack_info ctinfo, s32 off);
 
-	KABI_RESERVE(1)
+	ANDROID_KABI_RESERVE(1);
 };
 extern struct nfnl_ct_hook __rcu *nfnl_ct_hook;
 

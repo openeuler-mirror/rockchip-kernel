@@ -20,7 +20,7 @@
 #include <linux/seqlock.h>
 #include <linux/timer.h>
 #include <linux/timerqueue.h>
-#include <linux/kabi.h>
+#include <linux/android_kabi.h>
 
 struct hrtimer_clock_base;
 struct hrtimer_cpu_base;
@@ -96,12 +96,6 @@ enum hrtimer_restart {
 #define HRTIMER_STATE_ENQUEUED	0x01
 
 /**
- * struct hrtimer_resvd - KABI extension struct
- */
-struct hrtimer_resvd {
-};
-
-/**
  * struct hrtimer - the basic hrtimer structure
  * @node:	timerqueue node, which also manages node.expires,
  *		the absolute expiry time in the hrtimers internal
@@ -132,9 +126,7 @@ struct hrtimer {
 	u8				is_soft;
 	u8				is_hard;
 
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
-	KABI_AUX_PTR(hrtimer)
+	ANDROID_KABI_RESERVE(1);
 };
 
 /**
@@ -176,9 +168,6 @@ struct hrtimer_clock_base {
 	struct timerqueue_head	active;
 	ktime_t			(*get_time)(void);
 	ktime_t			offset;
-
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
 } __hrtimer_clock_base_align;
 
 enum  hrtimer_base_type {
@@ -249,9 +238,6 @@ struct hrtimer_cpu_base {
 	ktime_t				softirq_expires_next;
 	struct hrtimer			*softirq_next_timer;
 	struct hrtimer_clock_base	clock_base[HRTIMER_MAX_CLOCK_BASES];
-
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
 } ____cacheline_aligned;
 
 static inline void hrtimer_set_expires(struct hrtimer *timer, ktime_t time)

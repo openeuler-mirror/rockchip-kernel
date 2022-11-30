@@ -316,9 +316,7 @@ void mlx5e_ethtool_get_ringparam(struct mlx5e_priv *priv,
 }
 
 static void mlx5e_get_ringparam(struct net_device *dev,
-				struct ethtool_ringparam *param,
-				struct kernel_ethtool_ringparam *kernel_param,
-				struct netlink_ext_ack *extack)
+				struct ethtool_ringparam *param)
 {
 	struct mlx5e_priv *priv = netdev_priv(dev);
 
@@ -385,9 +383,7 @@ unlock:
 }
 
 static int mlx5e_set_ringparam(struct net_device *dev,
-			       struct ethtool_ringparam *param,
-			       struct kernel_ethtool_ringparam *kernel_param,
-			       struct netlink_ext_ack *extack)
+			       struct ethtool_ringparam *param)
 {
 	struct mlx5e_priv *priv = netdev_priv(dev);
 
@@ -515,9 +511,7 @@ int mlx5e_ethtool_get_coalesce(struct mlx5e_priv *priv,
 }
 
 static int mlx5e_get_coalesce(struct net_device *netdev,
-			      struct ethtool_coalesce *coal,
-			      struct kernel_ethtool_coalesce *kernel_coal,
-			      struct netlink_ext_ack *extack)
+			      struct ethtool_coalesce *coal)
 {
 	struct mlx5e_priv *priv = netdev_priv(netdev);
 
@@ -638,9 +632,7 @@ out:
 }
 
 static int mlx5e_set_coalesce(struct net_device *netdev,
-			      struct ethtool_coalesce *coal,
-			      struct kernel_ethtool_coalesce *kernel_coal,
-			      struct netlink_ext_ack *extack)
+			      struct ethtool_coalesce *coal)
 {
 	struct mlx5e_priv *priv    = netdev_priv(netdev);
 
@@ -1754,7 +1746,7 @@ static int mlx5e_get_module_eeprom(struct net_device *netdev,
 		if (size_read < 0) {
 			netdev_err(priv->netdev, "%s: mlx5_query_eeprom failed:0x%x\n",
 				   __func__, size_read);
-			return size_read;
+			return 0;
 		}
 
 		i += size_read;

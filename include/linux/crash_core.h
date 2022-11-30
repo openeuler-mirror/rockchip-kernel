@@ -69,9 +69,6 @@ extern unsigned char *vmcoreinfo_data;
 extern size_t vmcoreinfo_size;
 extern u32 *vmcoreinfo_note;
 
-extern struct resource crashk_res;
-extern struct resource crashk_low_res;
-
 /* raw contents of kernel .notes section */
 extern const void __start_notes __weak;
 extern const void __stop_notes __weak;
@@ -86,10 +83,5 @@ int parse_crashkernel_high(char *cmdline, unsigned long long system_ram,
 		unsigned long long *crash_size, unsigned long long *crash_base);
 int parse_crashkernel_low(char *cmdline, unsigned long long system_ram,
 		unsigned long long *crash_size, unsigned long long *crash_base);
-
-#ifdef CONFIG_PIN_MEMORY
-int __init parse_pin_memory(char *cmdline, unsigned long long system_ram,
-	unsigned long long *pin_size, unsigned long long *pin_base);
-#endif
 
 #endif /* LINUX_CRASH_CORE_H */

@@ -2,12 +2,12 @@
 #ifndef _LINUX_TIMER_H
 #define _LINUX_TIMER_H
 
-#include <linux/kabi.h>
 #include <linux/list.h>
 #include <linux/ktime.h>
 #include <linux/stddef.h>
 #include <linux/debugobjects.h>
 #include <linux/stringify.h>
+#include <linux/android_kabi.h>
 
 struct timer_list {
 	/*
@@ -23,10 +23,8 @@ struct timer_list {
 	struct lockdep_map	lockdep_map;
 #endif
 
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
-	KABI_RESERVE(3)
-	KABI_RESERVE(4)
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
 };
 
 #ifdef CONFIG_LOCKDEP

@@ -560,9 +560,10 @@ int register_memory(struct memory_block *memory)
 	}
 	ret = xa_err(xa_store(&memory_blocks, memory->dev.id, memory,
 			      GFP_KERNEL));
-	if (ret)
+	if (ret) {
+		put_device(&memory->dev);
 		device_unregister(&memory->dev);
-
+	}
 	return ret;
 }
 

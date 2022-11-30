@@ -25,13 +25,6 @@
 
 #define KEXEC_ARCH KEXEC_ARCH_AARCH64
 
-/* 2M alignment for crash kernel regions */
-#define CRASH_ALIGN	SZ_2M
-
-#define CRASH_ADDR_LOW_MAX	arm64_dma_phys_limit
-
-#define CRASH_ADDR_HIGH_MAX	MEMBLOCK_ALLOC_ACCESSIBLE
-
 #ifndef __ASSEMBLY__
 
 /**
@@ -97,20 +90,16 @@ static inline void crash_prepare_suspend(void) {}
 static inline void crash_post_resume(void) {}
 #endif
 
-extern bool crash_low_mem_page_map;
-
-#ifdef CONFIG_KEXEC_CORE
-extern void __init reserve_crashkernel(void);
-extern void __init reserve_crashkernel_high(void);
-#endif
-void machine_kexec_mask_interrupts(void);
-
 #ifdef CONFIG_KEXEC_FILE
 #define ARCH_HAS_KIMAGE_ARCH
 
 struct kimage_arch {
 	void *dtb;
 	unsigned long dtb_mem;
+	/* Core ELF header buffer */
+	void *elf_headers;
+	unsigned long elf_headers_mem;
+	unsigned long elf_headers_sz;
 };
 
 extern const struct kexec_file_ops kexec_image_ops;

@@ -7,7 +7,7 @@
 
 #include <linux/sched.h>
 #include <asm/irq.h>
-#if defined(CONFIG_HAVE_NMI_WATCHDOG) && !defined(CONFIG_SDEI_WATCHDOG)
+#if defined(CONFIG_HAVE_NMI_WATCHDOG)
 #include <asm/nmi.h>
 #endif
 
@@ -83,7 +83,6 @@ static inline void reset_hung_task_detector(void) { }
 
 #if defined(CONFIG_HARDLOCKUP_DETECTOR)
 extern void hardlockup_detector_disable(void);
-extern void watchdog_hardlockup_check(struct pt_regs *regs);
 extern unsigned int hardlockup_panic;
 #else
 static inline void hardlockup_detector_disable(void) {}
@@ -95,17 +94,8 @@ static inline void hardlockup_detector_disable(void) {}
 # define NMI_WATCHDOG_SYSCTL_PERM	0444
 #endif
 
-#if defined(CONFIG_HARDLOCKUP_DETECTOR)
-#ifndef CONFIG_PPC_WATCHDOG
-extern void arch_touch_nmi_watchdog(void);
-#endif
-#else
-# if !defined(CONFIG_HAVE_NMI_WATCHDOG)
-static inline void arch_touch_nmi_watchdog(void) {}
-# endif
-#endif
-
 #if defined(CONFIG_HARDLOCKUP_DETECTOR_PERF)
+extern void arch_touch_nmi_watchdog(void);
 extern void hardlockup_detector_perf_stop(void);
 extern void hardlockup_detector_perf_restart(void);
 extern void hardlockup_detector_perf_disable(void);
@@ -120,19 +110,10 @@ static inline void hardlockup_detector_perf_enable(void) { }
 static inline void hardlockup_detector_perf_cleanup(void) { }
 # if !defined(CONFIG_HAVE_NMI_WATCHDOG)
 static inline int hardlockup_detector_perf_init(void) { return -ENODEV; }
+static inline void arch_touch_nmi_watchdog(void) {}
 # else
 static inline int hardlockup_detector_perf_init(void) { return 0; }
 # endif
-#endif
-
-#ifdef CONFIG_CORELOCKUP_DETECTOR
-extern void corelockup_detector_init(void);
-extern void corelockup_detector_online_cpu(unsigned int cpu);
-extern void corelockup_detector_offline_cpu(unsigned int cpu);
-extern void watchdog_check_hrtimer(void);
-extern unsigned long watchdog_hrtimer_interrupts(unsigned int cpu);
-extern bool enable_corelockup_detector;
-extern int corelockup_miss_thresh;
 #endif
 
 void watchdog_nmi_stop(void);
@@ -140,17 +121,6 @@ void watchdog_nmi_start(void);
 int watchdog_nmi_probe(void);
 int watchdog_nmi_enable(unsigned int cpu);
 void watchdog_nmi_disable(unsigned int cpu);
-
-struct watchdog_operations {
-	void (*watchdog_nmi_stop)(void);
-	void (*watchdog_nmi_start)(void);
-	int (*watchdog_nmi_probe)(void);
-	int (*watchdog_nmi_enable)(unsigned int cpu);
-	void (*watchdog_nmi_disable)(unsigned int cpu);
-};
-
-extern struct watchdog_operations nmi_watchdog_ops;
-void watchdog_ops_init(void);
 
 /**
  * touch_nmi_watchdog - restart NMI watchdog timeout.
@@ -173,22 +143,26 @@ static inline void touch_nmi_watchdog(void)
 #ifdef arch_trigger_cpumask_backtrace
 static inline bool trigger_all_cpu_backtrace(void)
 {
-	return arch_trigger_cpumask_backtrace(cpu_online_mask, false);
+	arch_trigger_cpumask_backtrace(cpu_online_mask, false);
+	return true;
 }
 
 static inline bool trigger_allbutself_cpu_backtrace(void)
 {
-	return arch_trigger_cpumask_backtrace(cpu_online_mask, true);
+	arch_trigger_cpumask_backtrace(cpu_online_mask, true);
+	return true;
 }
 
 static inline bool trigger_cpumask_backtrace(struct cpumask *mask)
 {
-	return arch_trigger_cpumask_backtrace(mask, false);
+	arch_trigger_cpumask_backtrace(mask, false);
+	return true;
 }
 
 static inline bool trigger_single_cpu_backtrace(int cpu)
 {
-	return arch_trigger_cpumask_backtrace(cpumask_of(cpu), false);
+	arch_trigger_cpumask_backtrace(cpumask_of(cpu), false);
+	return true;
 }
 
 /* generic implementation */
@@ -223,7 +197,6 @@ u64 hw_nmi_get_sample_period(int watchdog_thresh);
 #if defined(CONFIG_HARDLOCKUP_CHECK_TIMESTAMP) && \
     defined(CONFIG_HARDLOCKUP_DETECTOR)
 void watchdog_update_hrtimer_threshold(u64 period);
-void refresh_hld_last_timestamp(void);
 #else
 static inline void watchdog_update_hrtimer_threshold(u64 period) { }
 #endif
@@ -237,12 +210,6 @@ int proc_watchdog_cpumask(struct ctl_table *, int, void *, size_t *, loff_t *);
 
 #ifdef CONFIG_HAVE_ACPI_APEI_NMI
 #include <asm/nmi.h>
-#endif
-
-#ifdef CONFIG_SDEI_WATCHDOG
-void sdei_watchdog_clear_eoi(void);
-#else
-static inline void sdei_watchdog_clear_eoi(void) { }
 #endif
 
 #endif

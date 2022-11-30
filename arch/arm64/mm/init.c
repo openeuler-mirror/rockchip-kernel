@@ -30,13 +30,13 @@
 #include <linux/crash_dump.h>
 #include <linux/hugetlb.h>
 #include <linux/acpi_iort.h>
-#include <linux/pin_mem.h>
+#include <linux/rk-dma-heap.h>
 
 #include <asm/boot.h>
 #include <asm/fixmap.h>
 #include <asm/kasan.h>
 #include <asm/kernel-pgtable.h>
-#include <asm/kexec.h>
+#include <asm/kvm_host.h>
 #include <asm/memory.h>
 #include <asm/numa.h>
 #include <asm/sections.h>
@@ -44,9 +44,6 @@
 #include <linux/sizes.h>
 #include <asm/tlb.h>
 #include <asm/alternative.h>
-#include <asm/cpu_park.h>
-
-#include "internal.h"
 
 /*
  * We need to be able to catch inadvertent references to memstart_addr
@@ -63,53 +60,75 @@ EXPORT_SYMBOL(memstart_addr);
  * unless restricted on specific platforms (e.g. 30-bit on Raspberry Pi 4).
  * In such case, ZONE_DMA32 covers the rest of the 32-bit addressable memory,
  * otherwise it is empty.
- *
- * Memory reservation for crash kernel either done early or deferred
- * depending on DMA memory zones configs (ZONE_DMA) --
- *
- * In absence of ZONE_DMA configs arm64_dma_phys_limit initialized
- * here instead of max_zone_phys().  This lets early reservation of
- * crash kernel memory which has a dependency on arm64_dma_phys_limit.
- * Reserving memory early for crash kernel allows linear creation of block
- * mappings (greater than page-granularity) for all the memory bank rangs.
- * In this scheme a comparatively quicker boot is observed.
- *
- * If ZONE_DMA configs are defined, crash kernel memory reservation
- * is delayed until DMA zone memory range size initilazation performed in
- * zone_sizes_init().  The defer is necessary to steer clear of DMA zone
- * memory range to avoid overlap allocation.  So crash kernel memory boundaries
- * are not known when mapping all bank memory ranges, which otherwise means
- * not possible to exclude crash kernel range from creating block mappings
- * so page-granularity mappings are created for the entire memory range.
- * Hence a slightly slower boot is observed.
- *
- * Note: Page-granularity mapppings are necessary for crash kernel memory
- * range for shrinking its size via /sys/kernel/kexec_crash_size interface.
  */
-#if IS_ENABLED(CONFIG_ZONE_DMA) || IS_ENABLED(CONFIG_ZONE_DMA32)
-phys_addr_t __ro_after_init arm64_dma_phys_limit;
-#else
-phys_addr_t __ro_after_init arm64_dma_phys_limit = PHYS_MASK + 1;
-#endif
+phys_addr_t arm64_dma_phys_limit __ro_after_init;
 
-#ifndef CONFIG_KEXEC_CORE
+/*
+ * Provide a run-time mean of disabling ZONE_DMA32 if it is enabled via
+ * CONFIG_ZONE_DMA32.
+ */
+static bool disable_dma32 __ro_after_init;
+
+#ifdef CONFIG_KEXEC_CORE
+/*
+ * reserve_crashkernel() - reserves memory for crash kernel
+ *
+ * This function reserves memory area given in "crashkernel=" kernel command
+ * line parameter. The memory reserved is used by dump capture kernel when
+ * primary kernel is crashing.
+ */
+static void __init reserve_crashkernel(void)
+{
+	unsigned long long crash_base, crash_size;
+	int ret;
+
+	ret = parse_crashkernel(boot_command_line, memblock_phys_mem_size(),
+				&crash_size, &crash_base);
+	/* no crashkernel= or invalid value specified */
+	if (ret || !crash_size)
+		return;
+
+	crash_size = PAGE_ALIGN(crash_size);
+
+	if (crash_base == 0) {
+		/* Current arm64 boot protocol requires 2MB alignment */
+		crash_base = memblock_find_in_range(0, arm64_dma_phys_limit,
+				crash_size, SZ_2M);
+		if (crash_base == 0) {
+			pr_warn("cannot allocate crashkernel (size:0x%llx)\n",
+				crash_size);
+			return;
+		}
+	} else {
+		/* User specifies base address explicitly. */
+		if (!memblock_is_region_memory(crash_base, crash_size)) {
+			pr_warn("cannot reserve crashkernel: region is not memory\n");
+			return;
+		}
+
+		if (memblock_is_region_reserved(crash_base, crash_size)) {
+			pr_warn("cannot reserve crashkernel: region overlaps reserved memory\n");
+			return;
+		}
+
+		if (!IS_ALIGNED(crash_base, SZ_2M)) {
+			pr_warn("cannot reserve crashkernel: base address is not 2MB aligned\n");
+			return;
+		}
+	}
+	memblock_reserve(crash_base, crash_size);
+
+	pr_info("crashkernel reserved: 0x%016llx - 0x%016llx (%lld MB)\n",
+		crash_base, crash_base + crash_size, crash_size >> 20);
+
+	crashk_res.start = crash_base;
+	crashk_res.end = crash_base + crash_size - 1;
+}
+#else
 static void __init reserve_crashkernel(void)
 {
 }
-
-static void __init reserve_crashkernel_high(void)
-{
-}
-#endif
-
-/*
- * The main usage of linux,usable-memory-range is for crash dump kernel.
- * Originally, the number of usable-memory regions is one. Now there may
- * be two regions, low region and high region.
- * To make compatibility with existing user-space and older kdump, the low
- * region is always the last range of linux,usable-memory-range if exist.
- */
-#define MAX_USABLE_RANGES	2
+#endif /* CONFIG_KEXEC_CORE */
 
 #ifdef CONFIG_CRASH_DUMP
 static int __init early_init_dt_scan_elfcorehdr(unsigned long node,
@@ -195,14 +214,28 @@ static void __init zone_sizes_init(unsigned long min, unsigned long max)
 	max_zone_pfns[ZONE_DMA] = PFN_DOWN(arm64_dma_phys_limit);
 #endif
 #ifdef CONFIG_ZONE_DMA32
-	max_zone_pfns[ZONE_DMA32] = PFN_DOWN(dma32_phys_limit);
+	max_zone_pfns[ZONE_DMA32] = disable_dma32 ? 0 : PFN_DOWN(dma32_phys_limit);
 	if (!arm64_dma_phys_limit)
 		arm64_dma_phys_limit = dma32_phys_limit;
 #endif
+	if (!arm64_dma_phys_limit)
+		arm64_dma_phys_limit = PHYS_MASK + 1;
 	max_zone_pfns[ZONE_NORMAL] = max;
 
 	free_area_init(max_zone_pfns);
 }
+
+static int __init early_disable_dma32(char *buf)
+{
+	if (!buf)
+		return -EINVAL;
+
+	if (!strcmp(buf, "on"))
+		disable_dma32 = true;
+
+	return 0;
+}
+early_param("disable_dma32", early_disable_dma32);
 
 int pfn_valid(unsigned long pfn)
 {
@@ -254,9 +287,9 @@ early_param("mem", early_mem);
 static int __init early_init_dt_scan_usablemem(unsigned long node,
 		const char *uname, int depth, void *data)
 {
-	struct memblock_region *usable_rgns = data;
-	const __be32 *reg, *endp;
-	int len, nr = 0;
+	struct memblock_region *usablemem = data;
+	const __be32 *reg;
+	int len;
 
 	if (depth != 1 || strcmp(uname, "chosen") != 0)
 		return 0;
@@ -265,149 +298,23 @@ static int __init early_init_dt_scan_usablemem(unsigned long node,
 	if (!reg || (len < (dt_root_addr_cells + dt_root_size_cells)))
 		return 1;
 
-	endp = reg + (len / sizeof(__be32));
-	while ((endp - reg) >= (dt_root_addr_cells + dt_root_size_cells)) {
-		usable_rgns[nr].base = dt_mem_next_cell(dt_root_addr_cells, &reg);
-		usable_rgns[nr].size = dt_mem_next_cell(dt_root_size_cells, &reg);
-
-		if (++nr >= MAX_USABLE_RANGES)
-			break;
-	}
+	usablemem->base = dt_mem_next_cell(dt_root_addr_cells, &reg);
+	usablemem->size = dt_mem_next_cell(dt_root_size_cells, &reg);
 
 	return 1;
 }
 
 static void __init fdt_enforce_memory_region(void)
 {
-	struct memblock_region usable_rgns[MAX_USABLE_RANGES] = {
-		{ .size = 0 },
-		{ .size = 0 }
+	struct memblock_region reg = {
+		.size = 0,
 	};
 
-	of_scan_flat_dt(early_init_dt_scan_usablemem, &usable_rgns);
+	of_scan_flat_dt(early_init_dt_scan_usablemem, &reg);
 
-	/*
-	 * The first range of usable-memory regions is for crash dump
-	 * kernel with only one region or for high region with two regions,
-	 * the second range is dedicated for low region if exist.
-	 */
-	if (usable_rgns[0].size)
-		memblock_cap_memory_range(usable_rgns[0].base, usable_rgns[0].size);
-	if (usable_rgns[1].size)
-		memblock_add(usable_rgns[1].base, usable_rgns[1].size);
+	if (reg.size)
+		memblock_cap_memory_range(reg.base, reg.size);
 }
-
-#define MAX_RES_REGIONS 32
-
-static struct memblock_region mbk_memmap_regions[MAX_RES_REGIONS] __initdata_memblock;
-static int mbk_memmap_cnt __initdata;
-
-static void __init setup_mbk_memmap_regions(phys_addr_t base, phys_addr_t size)
-{
-	if (mbk_memmap_cnt >= MAX_RES_REGIONS) {
-		pr_err("Too many memmap specified, exceed %d\n", MAX_RES_REGIONS);
-		return;
-	}
-
-	mbk_memmap_regions[mbk_memmap_cnt].base = base;
-	mbk_memmap_regions[mbk_memmap_cnt].size = size;
-	mbk_memmap_cnt++;
-}
-
-static void __init reserve_memmap_regions(void)
-{
-	phys_addr_t base, size;
-	int i;
-
-	for (i = 0; i < mbk_memmap_cnt; i++) {
-		base = mbk_memmap_regions[i].base;
-		size = mbk_memmap_regions[i].size;
-
-		if (!memblock_is_region_memory(base, size)) {
-			pr_warn("memmap reserve: 0x%08llx - 0x%08llx is not a memory region - ignore\n",
-				base, base + size);
-			continue;
-		}
-
-		if (memblock_is_region_reserved(base, size)) {
-			pr_warn("memmap reserve: 0x%08llx - 0x%08llx overlaps in-use memory region - ignore\n",
-				base, base + size);
-			continue;
-		}
-
-		if (memblock_reserve(base, size)) {
-			pr_warn("memmap reserve: 0x%08llx - 0x%08llx failed\n",
-				base, base + size);
-			continue;
-		}
-
-		pr_info("memmap reserved: 0x%08llx - 0x%08llx (%lld MB)",
-			base, base + size, size >> 20);
-		memblock_mark_memmap(base, size);
-	}
-}
-
-static int need_remove_real_memblock __initdata;
-
-static int __init parse_memmap_one(char *p)
-{
-	char *oldp;
-	u64 start_at, mem_size;
-
-	if (!p)
-		return -EINVAL;
-
-	if (!strncmp(p, "exactmap", 8)) {
-		need_remove_real_memblock = 1;
-		return -EINVAL;
-	}
-
-	oldp = p;
-	mem_size = memparse(p, &p);
-	if (p == oldp)
-		return -EINVAL;
-
-	if (!mem_size)
-		return -EINVAL;
-
-	if (*p == '@') {
-		start_at = memparse(p + 1, &p);
-		/*
-		 * use the exactmap defined by nn[KMG]@ss[KMG], remove
-		 * memblock populated by DT etc.
-		 */
-		if (need_remove_real_memblock) {
-			need_remove_real_memblock = 0;
-			memblock_remove(0, ULLONG_MAX);
-		}
-		memblock_add(start_at, mem_size);
-	} else if (*p == '$') {
-		start_at = memparse(p + 1, &p);
-		setup_mbk_memmap_regions(start_at, mem_size);
-	} else if (*p == '!') {
-		start_at = memparse(p + 1, &p);
-		setup_reserve_pmem(start_at, mem_size);
-	} else
-		pr_info("Unrecognized memmap option, please check the parameter.\n");
-
-	return *p == '\0' ? 0 : -EINVAL;
-}
-
-static int __init parse_memmap_opt(char *str)
-{
-	while (str) {
-		char *k = strchr(str, ',');
-
-		if (k)
-			*k++ = 0;
-
-		parse_memmap_one(str);
-		str = k;
-	}
-
-	return 0;
-}
-early_param("memmap", parse_memmap_opt);
 
 void __init arm64_memblock_init(void)
 {
@@ -490,15 +397,18 @@ void __init arm64_memblock_init(void)
 
 	if (IS_ENABLED(CONFIG_RANDOMIZE_BASE)) {
 		extern u16 memstart_offset_seed;
-		u64 range = linear_region_size -
-			    (memblock_end_of_DRAM() - memblock_start_of_DRAM());
+		u64 mmfr0 = read_cpuid(ID_AA64MMFR0_EL1);
+		int parange = cpuid_feature_extract_unsigned_field(
+					mmfr0, ID_AA64MMFR0_PARANGE_SHIFT);
+		s64 range = linear_region_size -
+			    BIT(id_aa64mmfr0_parange_to_phys_shift(parange));
 
 		/*
 		 * If the size of the linear region exceeds, by a sufficient
-		 * margin, the size of the region that the available physical
-		 * memory spans, randomize the linear region as well.
+		 * margin, the size of the region that the physical memory can
+		 * span, randomize the linear region as well.
 		 */
-		if (memstart_offset_seed > 0 && range >= ARM64_MEMSTART_ALIGN) {
+		if (memstart_offset_seed > 0 && range >= (s64)ARM64_MEMSTART_ALIGN) {
 			range /= ARM64_MEMSTART_ALIGN;
 			memstart_addr -= ARM64_MEMSTART_ALIGN *
 					 ((range * memstart_offset_seed) >> 16);
@@ -518,12 +428,7 @@ void __init arm64_memblock_init(void)
 
 	early_init_fdt_scan_reserved_mem();
 
-	reserve_crashkernel_high();
-
 	reserve_elfcorehdr();
-
-	if (!IS_ENABLED(CONFIG_ZONE_DMA) && !IS_ENABLED(CONFIG_ZONE_DMA32))
-		reserve_crashkernel();
 
 	high_memory = __va(memblock_end_of_DRAM() - 1) + 1;
 }
@@ -553,6 +458,8 @@ void __init bootmem_init(void)
 
 	dma_pernuma_cma_reserve();
 
+	kvm_hyp_reserve();
+
 	/*
 	 * sparse_init() tries to allocate memory from memblock, so must be
 	 * done after the fixed reservations
@@ -564,32 +471,13 @@ void __init bootmem_init(void)
 	 * Reserve the CMA area after arm64_dma_phys_limit was initialised.
 	 */
 	dma_contiguous_reserve(arm64_dma_phys_limit);
-
-	/*
-	 * Reserve park memory before crashkernel and quick kexec.
-	 * Because park memory must be specified by address, but
-	 * crashkernel and quickkexec may be specified by memory length,
-	 * then find one sutiable memory region to reserve.
-	 *
-	 * So reserve park memory firstly is better, but it may cause
-	 * crashkernel or quickkexec reserving failed.
-	 */
-	reserve_park_mem();
+	rk_dma_heap_cma_setup();
 
 	/*
 	 * request_standard_resources() depends on crashkernel's memory being
 	 * reserved, so do it here.
 	 */
-	if (IS_ENABLED(CONFIG_ZONE_DMA) || IS_ENABLED(CONFIG_ZONE_DMA32))
-		reserve_crashkernel();
-
-	reserve_quick_kexec();
-
-	reserve_memmap_regions();
-
-	reserve_pmem();
-
-	reserve_pin_memory_res();
+	reserve_crashkernel();
 
 	memblock_dump_all();
 }
@@ -679,9 +567,6 @@ void __init mem_init(void)
 #endif
 	/* this will put all unused low memory onto the freelists */
 	memblock_free_all();
-
-	/* pre alloc the pages for pin memory */
-	init_reserve_page_map();
 
 	mem_init_print_info(NULL);
 

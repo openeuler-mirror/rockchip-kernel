@@ -43,7 +43,7 @@ __xchk_btree_process_error(
 		/* Note the badness but don't abort. */
 		sc->sm->sm_flags |= errflag;
 		*error = 0;
-		fallthrough;
+		/* fall through */
 	default:
 		if (cur->bc_flags & XFS_BTREE_ROOT_IN_INODE)
 			trace_xchk_ifork_btree_op_error(sc, cur, level,
@@ -376,7 +376,7 @@ xchk_btree_check_block_owner(
 		error = xchk_ag_init(bs->sc, agno, &bs->sc->sa);
 		if (!xchk_btree_xref_process_error(bs->sc, bs->cur,
 				level, &error))
-			goto out_free;
+			return error;
 	}
 
 	xchk_xref_is_used_space(bs->sc, agbno, 1);
@@ -392,7 +392,6 @@ xchk_btree_check_block_owner(
 	if (!bs->sc->sa.rmap_cur && btnum == XFS_BTNUM_RMAP)
 		bs->cur = NULL;
 
-out_free:
 	if (init_sa)
 		xchk_ag_free(bs->sc, &bs->sc->sa);
 

@@ -77,7 +77,7 @@ static const char *check[] = {
 	NULL
 };
 
-static u32 block_sizes[] = { 16, 64, 128, 256, 1024, 1472, 8192, 0 };
+static u32 block_sizes[] = { 16, 64, 256, 1024, 1472, 8192, 0 };
 static u32 aead_sizes[] = { 16, 64, 256, 512, 1024, 2048, 4096, 8192, 0 };
 
 #define XBUFSIZE 8
@@ -290,11 +290,6 @@ static void test_mb_aead_speed(const char *algo, int enc, int secs,
 	}
 
 	ret = crypto_aead_setauthsize(tfm, authsize);
-	if (ret) {
-		pr_err("alg: aead: Failed to setauthsize for %s: %d\n", algo,
-		       ret);
-		goto out_free_tfm;
-	}
 
 	for (i = 0; i < num_mb; ++i)
 		if (testmgr_alloc_buf(data[i].xbuf)) {
@@ -320,7 +315,7 @@ static void test_mb_aead_speed(const char *algo, int enc, int secs,
 	for (i = 0; i < num_mb; ++i) {
 		data[i].req = aead_request_alloc(tfm, GFP_KERNEL);
 		if (!data[i].req) {
-			pr_err("alg: aead: Failed to allocate request for %s\n",
+			pr_err("alg: skcipher: Failed to allocate request for %s\n",
 			       algo);
 			while (i--)
 				aead_request_free(data[i].req);
@@ -577,13 +572,6 @@ static void test_aead_speed(const char *algo, int enc, unsigned int secs,
 		goto out_notfm;
 	}
 
-	ret = crypto_aead_setauthsize(tfm, authsize);
-	if (ret) {
-		pr_err("alg: aead: Failed to setauthsize for %s: %d\n", algo,
-		       ret);
-		goto out_noreq;
-	}
-
 	crypto_init_wait(&wait);
 	printk(KERN_INFO "\ntesting speed of %s (%s) %s\n", algo,
 			get_driver_name(crypto_aead, tfm), e);
@@ -619,13 +607,8 @@ static void test_aead_speed(const char *algo, int enc, unsigned int secs,
 					break;
 				}
 			}
-
 			ret = crypto_aead_setkey(tfm, key, *keysize);
-			if (ret) {
-				pr_err("setkey() failed flags=%x\n",
-						crypto_aead_get_flags(tfm));
-				goto out;
-			}
+			ret = crypto_aead_setauthsize(tfm, authsize);
 
 			iv_len = crypto_aead_ivsize(tfm);
 			if (iv_len)
@@ -635,7 +618,14 @@ static void test_aead_speed(const char *algo, int enc, unsigned int secs,
 			printk(KERN_INFO "test %u (%d bit key, %d byte blocks): ",
 					i, *keysize * 8, *b_size);
 
+
 			memset(tvmem[0], 0xff, PAGE_SIZE);
+
+			if (ret) {
+				pr_err("setkey() failed flags=%x\n",
+						crypto_aead_get_flags(tfm));
+				goto out;
+			}
 
 			sg_init_aead(sg, xbuf, *b_size + (enc ? 0 : authsize),
 				     assoc, aad_size);
@@ -1929,14 +1919,6 @@ static int do_test(const char *alg, u32 type, u32 mask, int m, u32 num_mb)
 	case 54:
 		ret += tcrypt_test("streebog512");
 		break;
-	
-	case 55:
-		ret += tcrypt_test("gcm(sm4)");
-		break;
-
-	case 56:
-		ret += tcrypt_test("ccm(sm4)");
-		break;
 
 	case 100:
 		ret += tcrypt_test("hmac(md5)");
@@ -2033,15 +2015,6 @@ static int do_test(const char *alg, u32 type, u32 mask, int m, u32 num_mb)
 	case 157:
 		ret += tcrypt_test("authenc(hmac(sha1),ecb(cipher_null))");
 		break;
-
-	case 158:
-		ret += tcrypt_test("cbcmac(sm4)");
-		break;
-
-	case 159:
-		ret += tcrypt_test("cmac(sm4)");
-		break;
-
 	case 181:
 		ret += tcrypt_test("authenc(hmac(sha1),cbc(des))");
 		break;
@@ -2075,7 +2048,6 @@ static int do_test(const char *alg, u32 type, u32 mask, int m, u32 num_mb)
 	case 191:
 		ret += tcrypt_test("ecb(sm4)");
 		ret += tcrypt_test("cbc(sm4)");
-		ret += tcrypt_test("cfb(sm4)");
 		ret += tcrypt_test("ctr(sm4)");
 		break;
 	case 200:
@@ -2339,10 +2311,6 @@ static int do_test(const char *alg, u32 type, u32 mask, int m, u32 num_mb)
 				speed_template_16);
 		test_cipher_speed("cbc(sm4)", DECRYPT, sec, NULL, 0,
 				speed_template_16);
-		test_cipher_speed("cfb(sm4)", ENCRYPT, sec, NULL, 0,
-				speed_template_16);
-		test_cipher_speed("cfb(sm4)", DECRYPT, sec, NULL, 0,
-				speed_template_16);
 		test_cipher_speed("ctr(sm4)", ENCRYPT, sec, NULL, 0,
 				speed_template_16);
 		test_cipher_speed("ctr(sm4)", DECRYPT, sec, NULL, 0,
@@ -2374,34 +2342,6 @@ static int do_test(const char *alg, u32 type, u32 mask, int m, u32 num_mb)
 				NULL, 0, 16, 8, speed_template_16);
 		test_aead_speed("aegis128", DECRYPT, sec,
 				NULL, 0, 16, 8, speed_template_16);
-		break;
-
-	case 222:
-		test_aead_speed("gcm(sm4)", ENCRYPT, sec,
-				NULL, 0, 16, 8, speed_template_16);
-		test_aead_speed("gcm(sm4)", DECRYPT, sec,
-				NULL, 0, 16, 8, speed_template_16);
-		break;
-
-	case 223:
-		test_aead_speed("rfc4309(ccm(sm4))", ENCRYPT, sec,
-				NULL, 0, 16, 16, aead_speed_template_19);
-		test_aead_speed("rfc4309(ccm(sm4))", DECRYPT, sec,
-				NULL, 0, 16, 16, aead_speed_template_19);
-		break;
-
-	case 224:
-		test_mb_aead_speed("gcm(sm4)", ENCRYPT, sec, NULL, 0, 16, 8,
-				   speed_template_16, num_mb);
-		test_mb_aead_speed("gcm(sm4)", DECRYPT, sec, NULL, 0, 16, 8,
-				   speed_template_16, num_mb);
-		break;
-
-	case 225:
-		test_mb_aead_speed("rfc4309(ccm(sm4))", ENCRYPT, sec, NULL, 0,
-				   16, 16, aead_speed_template_19, num_mb);
-		test_mb_aead_speed("rfc4309(ccm(sm4))", DECRYPT, sec, NULL, 0,
-				   16, 16, aead_speed_template_19, num_mb);
 		break;
 
 	case 300:
@@ -2861,25 +2801,6 @@ static int do_test(const char *alg, u32 type, u32 mask, int m, u32 num_mb)
 				   speed_template_8_32);
 		test_acipher_speed("ctr(blowfish)", DECRYPT, sec, NULL, 0,
 				   speed_template_8_32);
-		break;
-
-	case 518:
-		test_acipher_speed("ecb(sm4)", ENCRYPT, sec, NULL, 0,
-		                speed_template_16);
-		test_acipher_speed("ecb(sm4)", DECRYPT, sec, NULL, 0,
-		                speed_template_16);
-		test_acipher_speed("cbc(sm4)", ENCRYPT, sec, NULL, 0,
-		                speed_template_16);
-		test_acipher_speed("cbc(sm4)", DECRYPT, sec, NULL, 0,
-		                speed_template_16);
-		test_acipher_speed("cfb(sm4)", ENCRYPT, sec, NULL, 0,
-		                speed_template_16);
-		test_acipher_speed("cfb(sm4)", DECRYPT, sec, NULL, 0,
-		                speed_template_16);
-		test_acipher_speed("ctr(sm4)", ENCRYPT, sec, NULL, 0,
-		                speed_template_16);
-		test_acipher_speed("ctr(sm4)", DECRYPT, sec, NULL, 0,
-		                speed_template_16);
 		break;
 
 	case 600:

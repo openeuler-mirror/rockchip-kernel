@@ -376,14 +376,16 @@ xfs_reflink_allocate_cow(
 	resblks = XFS_DIOSTRAT_SPACE_RES(mp, resaligned);
 
 	xfs_iunlock(ip, *lockmode);
-	*lockmode = 0;
+	error = xfs_trans_alloc(mp, &M_RES(mp)->tr_write, resblks, 0, 0, &tp);
+	*lockmode = XFS_ILOCK_EXCL;
+	xfs_ilock(ip, *lockmode);
 
-	error = xfs_trans_alloc_inode(ip, &M_RES(mp)->tr_write, resblks, 0,
-			false, &tp);
 	if (error)
 		return error;
 
-	*lockmode = XFS_ILOCK_EXCL;
+	error = xfs_qm_dqattach_locked(ip, false);
+	if (error)
+		goto out_trans_cancel;
 
 	/*
 	 * Check for an overlapping extent again now that we dropped the ilock.
@@ -396,13 +398,20 @@ xfs_reflink_allocate_cow(
 		goto convert;
 	}
 
+	error = xfs_trans_reserve_quota_nblks(tp, ip, resblks, 0,
+			XFS_QMOPT_RES_REGBLKS);
+	if (error)
+		goto out_trans_cancel;
+
+	xfs_trans_ijoin(tp, ip, 0);
+
 	/* Allocate the entire reservation as unwritten blocks. */
 	nimaps = 1;
 	error = xfs_bmapi_write(tp, ip, imap->br_startoff, imap->br_blockcount,
 			XFS_BMAPI_COWFORK | XFS_BMAPI_PREALLOC, 0, cmap,
 			&nimaps);
 	if (error)
-		goto out_trans_cancel;
+		goto out_unreserve;
 
 	xfs_inode_set_cowblocks_tag(ip);
 	error = xfs_trans_commit(tp);
@@ -427,6 +436,9 @@ convert:
 	trace_xfs_reflink_convert_cow(ip, cmap);
 	return xfs_reflink_convert_cow_locked(ip, offset_fsb, count_fsb);
 
+out_unreserve:
+	xfs_trans_unreserve_quota_nblks(tp, ip, (long)resblks, 0,
+			XFS_QMOPT_RES_REGBLKS);
 out_trans_cancel:
 	xfs_trans_cancel(tp);
 	return error;
@@ -496,8 +508,9 @@ xfs_reflink_cancel_cow_blocks(
 			xfs_bmap_del_extent_cow(ip, &icur, &got, &del);
 
 			/* Remove the quota reservation */
-			error = xfs_quota_unreserve_blkres(ip,
-					del.br_blockcount);
+			error = xfs_trans_reserve_quota_nblks(NULL, ip,
+					-(long)del.br_blockcount, 0,
+					XFS_QMOPT_RES_REGBLKS);
 			if (error)
 				break;
 		} else {
@@ -984,45 +997,21 @@ xfs_reflink_remap_extent(
 	struct xfs_mount	*mp = ip->i_mount;
 	struct xfs_trans	*tp;
 	xfs_off_t		newlen;
-	int64_t			qdelta = 0;
+	int64_t			qres, qdelta;
 	unsigned int		resblks;
-	bool			quota_reserved = true;
 	bool			smap_real;
 	bool			dmap_written = xfs_bmap_is_written_extent(dmap);
 	int			nimaps;
 	int			error;
 
-	/*
-	 * Start a rolling transaction to switch the mappings.
-	 *
-	 * Adding a written extent to the extent map can cause a bmbt split,
-	 * and removing a mapped extent from the extent can cause a bmbt split.
-	 * The two operations cannot both cause a split since they operate on
-	 * the same index in the bmap btree, so we only need a reservation for
-	 * one bmbt split if either thing is happening.  However, we haven't
-	 * locked the inode yet, so we reserve assuming this is the case.
-	 *
-	 * The first allocation call tries to reserve enough space to handle
-	 * mapping dmap into a sparse part of the file plus the bmbt split.  We
-	 * haven't locked the inode or read the existing mapping yet, so we do
-	 * not know for sure that we need the space.  This should succeed most
-	 * of the time.
-	 *
-	 * If the first attempt fails, try again but reserving only enough
-	 * space to handle a bmbt split.  This is the hard minimum requirement,
-	 * and we revisit quota reservations later when we know more about what
-	 * we're remapping.
-	 */
+	/* Start a rolling transaction to switch the mappings */
 	resblks = XFS_EXTENTADD_SPACE_RES(mp, XFS_DATA_FORK);
-	error = xfs_trans_alloc_inode(ip, &M_RES(mp)->tr_write,
-			resblks + dmap->br_blockcount, 0, false, &tp);
-	if (error == -EDQUOT || error == -ENOSPC) {
-		quota_reserved = false;
-		error = xfs_trans_alloc_inode(ip, &M_RES(mp)->tr_write,
-				resblks, 0, false, &tp);
-	}
+	error = xfs_trans_alloc(mp, &M_RES(mp)->tr_write, resblks, 0, 0, &tp);
 	if (error)
 		goto out;
+
+	xfs_ilock(ip, XFS_ILOCK_EXCL);
+	xfs_trans_ijoin(tp, ip, 0);
 
 	/*
 	 * Read what's currently mapped in the destination file into smap.
@@ -1071,8 +1060,14 @@ xfs_reflink_remap_extent(
 	}
 
 	/*
-	 * Increase quota reservation if we think the quota block counter for
+	 * Compute quota reservation if we think the quota block counter for
 	 * this file could increase.
+	 *
+	 * Adding a written extent to the extent map can cause a bmbt split,
+	 * and removing a mapped extent from the extent can cause a bmbt split.
+	 * The two operations cannot both cause a split since they operate on
+	 * the same index in the bmap btree, so we only need a reservation for
+	 * one bmbt split if either thing is happening.
 	 *
 	 * If we are mapping a written extent into the file, we need to have
 	 * enough quota block count reservation to handle the blocks in that
@@ -1086,15 +1081,15 @@ xfs_reflink_remap_extent(
 	 * count.  This is suboptimal, but the VFS flushed the dest range
 	 * before we started.  That should have removed all the delalloc
 	 * reservations, but we code defensively.
-	 *
-	 * xfs_trans_alloc_inode above already tried to grab an even larger
-	 * quota reservation, and kicked off a blockgc scan if it couldn't.
-	 * If we can't get a potentially smaller quota reservation now, we're
-	 * done.
 	 */
-	if (!quota_reserved && !smap_real && dmap_written) {
-		error = xfs_trans_reserve_quota_nblks(tp, ip,
-				dmap->br_blockcount, 0, false);
+	qres = qdelta = 0;
+	if (smap_real || dmap_written)
+		qres = XFS_EXTENTADD_SPACE_RES(mp, XFS_DATA_FORK);
+	if (!smap_real && dmap_written)
+		qres += dmap->br_blockcount;
+	if (qres > 0) {
+		error = xfs_trans_reserve_quota_nblks(tp, ip, qres, 0,
+				XFS_QMOPT_RES_REGBLKS);
 		if (error)
 			goto out_cancel;
 	}
@@ -1508,8 +1503,7 @@ xfs_reflink_unshare(
 	if (error)
 		goto out;
 
-	error = filemap_write_and_wait_range(inode->i_mapping, offset,
-			offset + len - 1);
+	error = filemap_write_and_wait_range(inode->i_mapping, offset, len);
 	if (error)
 		goto out;
 

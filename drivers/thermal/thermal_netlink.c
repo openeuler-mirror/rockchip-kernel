@@ -9,6 +9,7 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <net/genetlink.h>
+#include <trace/hooks/thermal.h>
 #include <uapi/linux/thermal.h>
 
 #include "thermal_core.h"
@@ -229,6 +230,11 @@ static int thermal_genl_send_event(enum thermal_genl_event event,
 	struct sk_buff *msg;
 	int ret = -EMSGSIZE;
 	void *hdr;
+	int enable_thermal_genl = 1;
+
+	trace_android_vh_enable_thermal_genl_check(event, p->tz_id, &enable_thermal_genl);
+	if (!enable_thermal_genl)
+		return 0;
 
 	msg = genlmsg_new(NLMSG_GOODSIZE, GFP_KERNEL);
 	if (!msg)
@@ -418,12 +424,11 @@ static int thermal_genl_cmd_tz_get_trip(struct param *p)
 	for (i = 0; i < tz->trips; i++) {
 
 		enum thermal_trip_type type;
-		int temp, hyst = 0;
+		int temp, hyst;
 
 		tz->ops->get_trip_type(tz, i, &type);
 		tz->ops->get_trip_temp(tz, i, &temp);
-		if (tz->ops->get_trip_hyst)
-			tz->ops->get_trip_hyst(tz, i, &hyst);
+		tz->ops->get_trip_hyst(tz, i, &hyst);
 
 		if (nla_put_u32(msg, THERMAL_GENL_ATTR_TZ_TRIP_ID, i) ||
 		    nla_put_u32(msg, THERMAL_GENL_ATTR_TZ_TRIP_TYPE, type) ||

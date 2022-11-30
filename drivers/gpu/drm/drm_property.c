@@ -602,7 +602,7 @@ EXPORT_SYMBOL(drm_property_create_blob);
  */
 void drm_property_blob_put(struct drm_property_blob *blob)
 {
-	if (IS_ERR_OR_NULL(blob))
+	if (!blob)
 		return;
 
 	drm_mode_object_put(&blob->base);

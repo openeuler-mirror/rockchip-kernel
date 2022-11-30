@@ -232,15 +232,6 @@ config GPIO_DWAPB
 	  Say Y or M here to build support for the Synopsys DesignWare APB
 	  GPIO block.
 
-config GPIO_SUNWAY
-	tristate "Sunway gpio driver"
-	depends on SW64
-	select GPIO_GENERIC
-	select GENERIC_IRQ_CHIP
-	help
-	  Say Y or M here to build support for the Sunway
-	  GPIO block.
-
 config GPIO_EIC_SPRD
 	tristate "Spreadtrum EIC support"
 	depends on ARCH_SPRD || COMPILE_TEST
@@ -304,17 +295,6 @@ config GPIO_GRGPIO
 	help
 	  Select this to support Aeroflex Gaisler GRGPIO cores from the GRLIB
 	  VHDL IP core library.
-
-config GPIO_HISI
-	tristate "HiSilicon GPIO controller driver"
-	depends on (ARM64 || COMPILE_TEST) && ACPI
-	select GPIO_GENERIC
-	select GPIOLIB_IRQCHIP
-	help
-	  Say Y or M here to build support for the HiSilicon GPIO controller
-	  driver GPIO block.
-	  This GPIO controller support double-edge interrupt and multi-core
-	  concurrent access.
 
 config GPIO_HLWD
 	tristate "Nintendo Wii (Hollywood) GPIO"
@@ -514,6 +494,14 @@ config GPIO_REG
 	help
 	  A 32-bit single register GPIO fixed in/out implementation.  This
 	  can be used to represent any register as a set of GPIO signals.
+
+config GPIO_ROCKCHIP
+	tristate "Rockchip GPIO support"
+	depends on ARCH_ROCKCHIP || COMPILE_TEST
+	select GPIOLIB_IRQCHIP
+	default ARCH_ROCKCHIP
+	help
+	  Say yes here to support GPIO on Rockchip SoCs.
 
 config GPIO_SAMA5D2_PIOBU
 	tristate "SAMA5D2 PIOBU GPIO support"
@@ -1247,6 +1235,13 @@ config GPIO_MAX77650
 	  GPIO driver for MAX77650/77651 PMIC from Maxim Semiconductor.
 	  These chips have a single pin that can be configured as GPIO.
 
+config GPIO_MAX96752F
+	tristate "MAX96752F GPIO"
+	depends on MFD_MAX96752F
+	help
+	  Select this option to enable GPIO driver for the MAX96752F
+	  chip.
+
 config GPIO_MSIC
 	bool "Intel MSIC mixed signal gpio support"
 	depends on (X86 || COMPILE_TEST) && MFD_INTEL_MSIC
@@ -1613,6 +1608,18 @@ config GPIO_VIPERBOARD
 	  of the module parameters.
 
 endmenu
+
+config GPIO_FIREFLY_GL3321G
+	tristate "Firefly GL3321G GPIO driver support"
+	default y
+	help
+	  Sample code of gpio
+
+config GPIO_FIREFLY
+	tristate "Firefly GPIO Demo support"
+	default y
+	help
+	  Sample code of gpio.
 
 config GPIO_AGGREGATOR
 	tristate "GPIO Aggregator"

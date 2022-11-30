@@ -19,13 +19,17 @@ struct sys_reg_params {
 	u8	Op2;
 	u64	regval;
 	bool	is_write;
-	bool	is_aarch32;
-	bool	is_32bit;	/* Only valid if is_aarch32 is true */
 };
 
 struct sys_reg_desc {
 	/* Sysreg string for debug */
 	const char *name;
+
+	enum {
+		AA32_ZEROHIGH,
+		AA32_LO,
+		AA32_HI,
+	} aarch32_map;
 
 	/* MRS/MSR instruction which accesses it. */
 	u8	Op0;
@@ -63,13 +67,8 @@ struct sys_reg_desc {
 #define REG_RAZ			(1 << 1) /* RAZ from userspace and guest */
 
 static __printf(2, 3)
-#if defined(CONFIG_OPTIMIZE_INLINING)
 inline void print_sys_reg_msg(const struct sys_reg_params *p,
 				       char *fmt, ...)
-#else
-void print_sys_reg_msg(const struct sys_reg_params *p,
-				       char *fmt, ...)
-#endif
 {
 	va_list va;
 
@@ -158,6 +157,7 @@ const struct sys_reg_desc *find_reg_by_id(u64 id,
 					  const struct sys_reg_desc table[],
 					  unsigned int num);
 
+#define AA32(_x)	.aarch32_map = AA32_##_x
 #define Op0(_x) 	.Op0 = _x
 #define Op1(_x) 	.Op1 = _x
 #define CRn(_x)		.CRn = _x

@@ -8,6 +8,9 @@
 #ifndef __ASM_PROCESSOR_H
 #define __ASM_PROCESSOR_H
 
+#define KERNEL_DS		UL(-1)
+#define USER_DS			((UL(1) << VA_BITS) - 1)
+
 /*
  * On arm64 systems, unaligned accesses by the CPU are cheap, and so there is
  * no point in shifting all network buffers by 2 bytes just to make some IP
@@ -15,6 +18,12 @@
  * performance on some platforms.
  */
 #define NET_IP_ALIGN	0
+
+#define MTE_CTRL_GCR_USER_EXCL_SHIFT	0
+#define MTE_CTRL_GCR_USER_EXCL_MASK	0xffff
+
+#define MTE_CTRL_TCF_SYNC		(1UL << 16)
+#define MTE_CTRL_TCF_ASYNC		(1UL << 17)
 
 #ifndef __ASSEMBLY__
 
@@ -24,13 +33,12 @@
 #include <linux/stddef.h>
 #include <linux/string.h>
 #include <linux/thread_info.h>
-#include <linux/kabi.h>
+#include <linux/android_vendor.h>
 
 #include <vdso/processor.h>
 
 #include <asm/alternative.h>
 #include <asm/cpufeature.h>
-#include <asm/is_compat.h>
 #include <asm/hw_breakpoint.h>
 #include <asm/kasan.h>
 #include <asm/lse.h>
@@ -49,8 +57,6 @@
 #define TASK_SIZE_64		(UL(1) << vabits_actual)
 
 #ifdef CONFIG_COMPAT
-#define TASK_SIZE_MAX		(is_ilp32_compat_task() ? \
-				UL(0x100000000) : (UL(1) << VA_BITS))
 #if defined(CONFIG_ARM64_64K_PAGES) && defined(CONFIG_KUSER_HELPERS)
 /*
  * With CONFIG_ARM64_64K_PAGES enabled, the last page is occupied
@@ -60,14 +66,13 @@
 #else
 #define TASK_SIZE_32		(UL(0x100000000) - PAGE_SIZE)
 #endif /* CONFIG_ARM64_64K_PAGES */
-#define TASK_SIZE		(is_compat_task() ? \
+#define TASK_SIZE		(test_thread_flag(TIF_32BIT) ? \
 				TASK_SIZE_32 : TASK_SIZE_64)
-#define TASK_SIZE_OF(tsk)	(is_compat_thread(tsk) ? \
+#define TASK_SIZE_OF(tsk)	(test_tsk_thread_flag(tsk, TIF_32BIT) ? \
 				TASK_SIZE_32 : TASK_SIZE_64)
-#define DEFAULT_MAP_WINDOW	(is_compat_task() ? \
+#define DEFAULT_MAP_WINDOW	(test_thread_flag(TIF_32BIT) ? \
 				TASK_SIZE_32 : DEFAULT_MAP_WINDOW_64)
 #else
-#define TASK_SIZE_MAX		(UL(1) << VA_BITS)
 #define TASK_SIZE		TASK_SIZE_64
 #define DEFAULT_MAP_WINDOW	DEFAULT_MAP_WINDOW_64
 #endif /* CONFIG_COMPAT */
@@ -82,7 +87,7 @@
 
 #ifdef CONFIG_COMPAT
 #define AARCH32_VECTORS_BASE	0xffff0000
-#define STACK_TOP		(is_compat_task() ? \
+#define STACK_TOP		(test_thread_flag(TIF_32BIT) ? \
 				AARCH32_VECTORS_BASE : STACK_TOP_MAX)
 #else
 #define STACK_TOP		STACK_TOP_MAX
@@ -143,6 +148,8 @@ struct thread_struct {
 		struct user_fpsimd_state fpsimd_state;
 	} uw;
 
+	ANDROID_VENDOR_DATA(1);
+
 	unsigned int		fpsimd_cpu;
 	void			*sve_state;	/* SVE registers, if any */
 	unsigned int		sve_vl;		/* SVE vector length */
@@ -155,18 +162,14 @@ struct thread_struct {
 	struct ptrauth_keys_kernel	keys_kernel;
 #endif
 #ifdef CONFIG_ARM64_MTE
-	u64			sctlr_tcf0;
-	u64			gcr_user_incl;
+	u64			mte_ctrl;
 #endif
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
-	KABI_RESERVE(3)
-	KABI_RESERVE(4)
-	KABI_RESERVE(5)
-	KABI_RESERVE(6)
-	KABI_RESERVE(7)
-	KABI_RESERVE(8)
+	u64			sctlr_user;
 };
+
+#define SCTLR_USER_MASK                                                        \
+	(SCTLR_ELx_ENIA | SCTLR_ELx_ENIB | SCTLR_ELx_ENDA | SCTLR_ELx_ENDB |   \
+	 SCTLR_EL1_TCF0_MASK)
 
 static inline void arch_thread_struct_whitelist(unsigned long *offset,
 						unsigned long *size)
@@ -181,11 +184,11 @@ static inline void arch_thread_struct_whitelist(unsigned long *offset,
 	*size = sizeof_field(struct thread_struct, uw);
 }
 
-#ifdef CONFIG_AARCH32_EL0
+#ifdef CONFIG_COMPAT
 #define task_user_tls(t)						\
 ({									\
 	unsigned long *__tls;						\
-	if (is_a32_compat_thread(task_thread_info(t)))			\
+	if (is_compat_thread(task_thread_info(t)))			\
 		__tls = &(t)->thread.uw.tp2_value;			\
 	else								\
 		__tls = &(t)->thread.uw.tp_value;			\
@@ -221,7 +224,7 @@ static inline void start_thread(struct pt_regs *regs, unsigned long pc,
 	regs->sp = sp;
 }
 
-#ifdef CONFIG_AARCH32_EL0
+#ifdef CONFIG_COMPAT
 static inline void compat_start_thread(struct pt_regs *regs, unsigned long pc,
 				       unsigned long sp)
 {
@@ -258,6 +261,8 @@ struct task_struct;
 extern void release_thread(struct task_struct *);
 
 unsigned long get_wchan(struct task_struct *p);
+
+void update_sctlr_el1(u64 sctlr);
 
 /* Thread switching */
 extern struct task_struct *cpu_switch_to(struct task_struct *prev,
@@ -312,6 +317,11 @@ extern void __init minsigstksz_setup(void);
 
 /* PR_PAC_RESET_KEYS prctl */
 #define PAC_RESET_KEYS(tsk, arg)	ptrauth_prctl_reset_keys(tsk, arg)
+
+/* PR_PAC_{SET,GET}_ENABLED_KEYS prctl */
+#define PAC_SET_ENABLED_KEYS(tsk, keys, enabled)				\
+	ptrauth_set_enabled_keys(tsk, keys, enabled)
+#define PAC_GET_ENABLED_KEYS(tsk) ptrauth_get_enabled_keys(tsk)
 
 #ifdef CONFIG_ARM64_TAGGED_ADDR_ABI
 /* PR_{SET,GET}_TAGGED_ADDR_CTRL prctl */

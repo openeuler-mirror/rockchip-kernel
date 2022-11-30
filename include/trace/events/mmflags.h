@@ -48,9 +48,7 @@
 	{(unsigned long)__GFP_WRITE,		"__GFP_WRITE"},		\
 	{(unsigned long)__GFP_RECLAIM,		"__GFP_RECLAIM"},	\
 	{(unsigned long)__GFP_DIRECT_RECLAIM,	"__GFP_DIRECT_RECLAIM"},\
-	{(unsigned long)__GFP_KSWAPD_RECLAIM,	"__GFP_KSWAPD_RECLAIM"},\
-	{(unsigned long)__GFP_RELIABLE,		"__GFP_RELIABLE"},	\
-	{(unsigned long)__GFP_RESERVE_1,	"__GFP_RESERVE_1"}	\
+	{(unsigned long)__GFP_KSWAPD_RECLAIM,	"__GFP_KSWAPD_RECLAIM"}\
 
 #define show_gfp_flags(flags)						\
 	(flags) ? __print_flags(flags, "|",				\
@@ -75,7 +73,7 @@
 #define IF_HAVE_PG_HWPOISON(flag,string)
 #endif
 
-#if defined(CONFIG_PAGE_IDLE_FLAG) && defined(CONFIG_64BIT)
+#if defined(CONFIG_IDLE_PAGE_TRACKING) && defined(CONFIG_64BIT)
 #define IF_HAVE_PG_IDLE(flag,string) ,{1UL << flag, string}
 #else
 #define IF_HAVE_PG_IDLE(flag,string)
@@ -87,20 +85,10 @@
 #define IF_HAVE_PG_ARCH_2(flag,string)
 #endif
 
-#if defined(CONFIG_X86_64) || defined(CONFIG_ARM64)
-#define IF_HAVE_PG_POOL(flag,string) ,{1UL << flag, string}
-#define IF_HAVE_PG_RESERVE0(flag,string) ,{1UL << flag, string}
-#define IF_HAVE_PG_RESERVE1(flag,string) ,{1UL << flag, string}
+#ifdef CONFIG_KASAN_HW_TAGS
+#define IF_HAVE_PG_SKIP_KASAN_POISON(flag,string) ,{1UL << flag, string}
 #else
-#define IF_HAVE_PG_POOL(flag,string)
-#define IF_HAVE_PG_RESERVE0(flag,string)
-#define IF_HAVE_PG_RESERVE1(flag,string)
-#endif
-
-#ifdef CONFIG_PIN_MEMORY
-#define IF_HAVE_PG_HOTREPLACE(flag, string) ,{1UL << flag, string}
-#else
-#define IF_HAVE_PG_HOTREPLACE(flag, string)
+#define IF_HAVE_PG_SKIP_KASAN_POISON(flag,string)
 #endif
 
 #define __def_pageflag_names						\
@@ -131,10 +119,7 @@ IF_HAVE_PG_HWPOISON(PG_hwpoison,	"hwpoison"	)		\
 IF_HAVE_PG_IDLE(PG_young,		"young"		)		\
 IF_HAVE_PG_IDLE(PG_idle,		"idle"		)		\
 IF_HAVE_PG_ARCH_2(PG_arch_2,		"arch_2"	)		\
-IF_HAVE_PG_POOL(PG_pool,		"pool"		)		\
-IF_HAVE_PG_HOTREPLACE(PG_hotreplace,	"hotreplace"	)		\
-IF_HAVE_PG_RESERVE0(PG_reserve_pgflag_0,"reserve_pgflag_0")		\
-IF_HAVE_PG_RESERVE1(PG_reserve_pgflag_1,"reserve_pgflag_1")
+IF_HAVE_PG_SKIP_KASAN_POISON(PG_skip_kasan_poison, "skip_kasan_poison")
 
 #define show_page_flags(flags)						\
 	(flags) ? __print_flags(flags, "|",				\
@@ -159,10 +144,10 @@ IF_HAVE_PG_RESERVE1(PG_reserve_pgflag_1,"reserve_pgflag_1")
 #define IF_HAVE_VM_SOFTDIRTY(flag,name)
 #endif
 
-#ifdef CONFIG_USERSWAP
-#define IF_HAVE_VM_USWAP(flag,name) {flag, name },
+#ifdef CONFIG_HAVE_ARCH_USERFAULTFD_MINOR
+# define IF_HAVE_UFFD_MINOR(flag, name) {flag, name},
 #else
-#define IF_HAVE_VM_USWAP(flag,name)
+# define IF_HAVE_UFFD_MINOR(flag, name)
 #endif
 
 #define __def_vmaflag_names						\
@@ -176,6 +161,7 @@ IF_HAVE_PG_RESERVE1(PG_reserve_pgflag_1,"reserve_pgflag_1")
 	{VM_MAYSHARE,			"mayshare"	},		\
 	{VM_GROWSDOWN,			"growsdown"	},		\
 	{VM_UFFD_MISSING,		"uffd_missing"	},		\
+IF_HAVE_UFFD_MINOR(VM_UFFD_MINOR,	"uffd_minor"	)		\
 	{VM_PFNMAP,			"pfnmap"	},		\
 	{VM_DENYWRITE,			"denywrite"	},		\
 	{VM_UFFD_WP,			"uffd_wp"	},		\
@@ -197,7 +183,6 @@ IF_HAVE_VM_SOFTDIRTY(VM_SOFTDIRTY,	"softdirty"	)		\
 	{VM_MIXEDMAP,			"mixedmap"	},		\
 	{VM_HUGEPAGE,			"hugepage"	},		\
 	{VM_NOHUGEPAGE,			"nohugepage"	},		\
-IF_HAVE_VM_USWAP(VM_USWAP,		"userswap"	)		\
 	{VM_MERGEABLE,			"mergeable"	}		\
 
 #define show_vma_flags(flags)						\

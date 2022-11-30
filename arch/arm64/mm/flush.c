@@ -78,9 +78,6 @@ EXPORT_SYMBOL(flush_dcache_page);
  * Additional functions defined in assembly.
  */
 EXPORT_SYMBOL(__flush_icache_range);
-EXPORT_SYMBOL(__inval_dcache_area);
-EXPORT_SYMBOL(__clean_dcache_area_poc);
-EXPORT_SYMBOL(__flush_dcache_area);
 
 #ifdef CONFIG_ARCH_HAS_PMEM_API
 void arch_wb_cache_pmem(void *addr, size_t size)

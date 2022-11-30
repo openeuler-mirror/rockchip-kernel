@@ -442,7 +442,6 @@ static const struct pci_device_id ahci_pci_tbl[] = {
 	/* AMD */
 	{ PCI_VDEVICE(AMD, 0x7800), board_ahci }, /* AMD Hudson-2 */
 	{ PCI_VDEVICE(AMD, 0x7900), board_ahci }, /* AMD CZ */
-	{ PCI_VDEVICE(AMD, 0x7901), board_ahci_mobile }, /* AMD Green Sardine */
 	/* AMD is using RAID class only for ahci controllers */
 	{ PCI_VENDOR_ID_AMD, PCI_ANY_ID, PCI_ANY_ID, PCI_ANY_ID,
 	  PCI_CLASS_STORAGE_RAID << 8, 0xffffff, board_ahci },
@@ -869,19 +868,6 @@ static int ahci_pci_device_runtime_resume(struct device *dev)
 	if (rc)
 		return rc;
 	ahci_pci_init_controller(host);
-
-	/* Port resume for Zhaoxin platform */
-	if (pdev->vendor == PCI_VENDOR_ID_ZHAOXIN) {
-		if (pdev->revision == 0x01)
-			ata_msleep(NULL, 10);
-
-		for (rc = 0; rc < host->n_ports; rc++) {
-			struct ata_port *ap = host->ports[rc];
-
-			pm_request_resume(&ap->tdev);
-		}
-	}
-
 	return 0;
 }
 
@@ -1880,17 +1866,6 @@ static int ahci_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 		host->flags |= ATA_HOST_PARALLEL_SCAN;
 	else
 		dev_info(&pdev->dev, "SSS flag set, parallel bus scan disabled\n");
-
-	if (pdev->vendor == PCI_VENDOR_ID_ZHAOXIN) {
-		if (hpriv->cap & HOST_CAP_PART)
-			host->flags |= ATA_HOST_PART;
-
-		if (hpriv->cap & HOST_CAP_SSC)
-			host->flags |= ATA_HOST_SSC;
-
-		if (hpriv->cap2 & HOST_CAP2_SDS)
-			host->flags |= ATA_HOST_DEVSLP;
-	}
 
 	if (pi.flags & ATA_FLAG_EM)
 		ahci_reset_em(host);

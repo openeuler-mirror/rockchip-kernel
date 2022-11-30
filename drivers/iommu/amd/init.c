@@ -20,7 +20,6 @@
 #include <linux/export.h>
 #include <linux/kmemleak.h>
 #include <linux/mem_encrypt.h>
-#include <linux/iopoll.h>
 #include <asm/pci-direct.h>
 #include <asm/iommu.h>
 #include <asm/apic.h>
@@ -84,7 +83,7 @@
 #define ACPI_DEVFLAG_LINT1              0x80
 #define ACPI_DEVFLAG_ATSDIS             0x10000000
 
-#define LOOP_TIMEOUT	2000000
+#define LOOP_TIMEOUT	100000
 /*
  * ACPI table definitions
  *
@@ -298,22 +297,6 @@ int amd_iommu_get_num_iommus(void)
 {
 	return amd_iommus_present;
 }
-
-#ifdef CONFIG_IRQ_REMAP
-static bool check_feature_on_all_iommus(u64 mask)
-{
-	bool ret = false;
-	struct amd_iommu *iommu;
-
-	for_each_iommu(iommu) {
-		ret = iommu_feature(iommu, mask);
-		if (!ret)
-			return false;
-	}
-
-	return true;
-}
-#endif
 
 /*
  * For IVHD type 0x11/0x40, EFR is also available via IVHD.
@@ -657,16 +640,6 @@ static int __init alloc_command_buffer(struct amd_iommu *iommu)
 }
 
 /*
- * This function restarts event logging in case the IOMMU experienced
- * an event log buffer overflow.
- */
-void amd_iommu_restart_event_logging(struct amd_iommu *iommu)
-{
-	iommu_feature_disable(iommu, CONTROL_EVT_LOG_EN);
-	iommu_feature_enable(iommu, CONTROL_EVT_LOG_EN);
-}
-
-/*
  * This function resets the command buffer if the IOMMU stopped fetching
  * commands from it.
  */
@@ -816,26 +789,15 @@ static int iommu_ga_log_enable(struct amd_iommu *iommu)
 {
 #ifdef CONFIG_IRQ_REMAP
 	u32 status, i;
-	u64 entry;
 
 	if (!iommu->ga_log)
 		return -EINVAL;
 
-	/* Check if already running */
 	status = readl(iommu->mmio_base + MMIO_STATUS_OFFSET);
-	if (WARN_ON(status & (MMIO_STATUS_GALOG_RUN_MASK)))
+
+	/* Check if already running */
+	if (status & (MMIO_STATUS_GALOG_RUN_MASK))
 		return 0;
-
-	entry = iommu_virt_to_phys(iommu->ga_log) | GA_LOG_SIZE_512;
-	memcpy_toio(iommu->mmio_base + MMIO_GA_LOG_BASE_OFFSET,
-		    &entry, sizeof(entry));
-	entry = (iommu_virt_to_phys(iommu->ga_log_tail) &
-		 (BIT_ULL(52)-1)) & ~7ULL;
-	memcpy_toio(iommu->mmio_base + MMIO_GA_LOG_TAIL_OFFSET,
-		    &entry, sizeof(entry));
-	writel(0x00, iommu->mmio_base + MMIO_GA_HEAD_OFFSET);
-	writel(0x00, iommu->mmio_base + MMIO_GA_TAIL_OFFSET);
-
 
 	iommu_feature_enable(iommu, CONTROL_GAINT_EN);
 	iommu_feature_enable(iommu, CONTROL_GALOG_EN);
@@ -844,18 +806,19 @@ static int iommu_ga_log_enable(struct amd_iommu *iommu)
 		status = readl(iommu->mmio_base + MMIO_STATUS_OFFSET);
 		if (status & (MMIO_STATUS_GALOG_RUN_MASK))
 			break;
-		udelay(10);
 	}
 
-	if (WARN_ON(i >= LOOP_TIMEOUT))
+	if (i >= LOOP_TIMEOUT)
 		return -EINVAL;
 #endif /* CONFIG_IRQ_REMAP */
 	return 0;
 }
 
+#ifdef CONFIG_IRQ_REMAP
 static int iommu_init_ga_log(struct amd_iommu *iommu)
 {
-#ifdef CONFIG_IRQ_REMAP
+	u64 entry;
+
 	if (!AMD_IOMMU_GUEST_IR_VAPIC(amd_iommu_guest_ir))
 		return 0;
 
@@ -869,13 +832,39 @@ static int iommu_init_ga_log(struct amd_iommu *iommu)
 	if (!iommu->ga_log_tail)
 		goto err_out;
 
+	entry = iommu_virt_to_phys(iommu->ga_log) | GA_LOG_SIZE_512;
+	memcpy_toio(iommu->mmio_base + MMIO_GA_LOG_BASE_OFFSET,
+		    &entry, sizeof(entry));
+	entry = (iommu_virt_to_phys(iommu->ga_log_tail) &
+		 (BIT_ULL(52)-1)) & ~7ULL;
+	memcpy_toio(iommu->mmio_base + MMIO_GA_LOG_TAIL_OFFSET,
+		    &entry, sizeof(entry));
+	writel(0x00, iommu->mmio_base + MMIO_GA_HEAD_OFFSET);
+	writel(0x00, iommu->mmio_base + MMIO_GA_TAIL_OFFSET);
+
 	return 0;
 err_out:
 	free_ga_log(iommu);
 	return -EINVAL;
-#else
-	return 0;
+}
 #endif /* CONFIG_IRQ_REMAP */
+
+static int iommu_init_ga(struct amd_iommu *iommu)
+{
+	int ret = 0;
+
+#ifdef CONFIG_IRQ_REMAP
+	/* Note: We have already checked GASup from IVRS table.
+	 *       Now, we need to make sure that GAMSup is set.
+	 */
+	if (AMD_IOMMU_GUEST_IR_VAPIC(amd_iommu_guest_ir) &&
+	    !iommu_feature(iommu, FEATURE_GAM_VAPIC))
+		amd_iommu_guest_ir = AMD_IOMMU_GUEST_IR_LEGACY_GA;
+
+	ret = iommu_init_ga_log(iommu);
+#endif /* CONFIG_IRQ_REMAP */
+
+	return ret;
 }
 
 static int __init alloc_cwwb_sem(struct amd_iommu *iommu)
@@ -1862,7 +1851,7 @@ static int __init iommu_init_pci(struct amd_iommu *iommu)
 	if (iommu_feature(iommu, FEATURE_PPR) && alloc_ppr_log(iommu))
 		return -ENOMEM;
 
-	ret = iommu_init_ga_log(iommu);
+	ret = iommu_init_ga(iommu);
 	if (ret)
 		return ret;
 
@@ -2407,14 +2396,6 @@ static void early_enable_iommus(void)
 	}
 
 #ifdef CONFIG_IRQ_REMAP
-	/*
-	 * Note: We have already checked GASup from IVRS table.
-	 *       Now, we need to make sure that GAMSup is set.
-	 */
-	if (AMD_IOMMU_GUEST_IR_VAPIC(amd_iommu_guest_ir) &&
-	    !check_feature_on_all_iommus(FEATURE_GAM_VAPIC))
-		amd_iommu_guest_ir = AMD_IOMMU_GUEST_IR_LEGACY_GA;
-
 	if (AMD_IOMMU_GUEST_IR_VAPIC(amd_iommu_guest_ir))
 		amd_iommu_irq_ops.capability |= (1 << IRQ_POSTING_CAP);
 #endif

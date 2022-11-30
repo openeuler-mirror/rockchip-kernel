@@ -944,7 +944,8 @@ static void memory_bm_recycle(struct memory_bitmap *bm)
  * Register a range of page frames the contents of which should not be saved
  * during hibernation (to be used in the early initialization code).
  */
-void __init register_nosave_region(unsigned long start_pfn, unsigned long end_pfn)
+void __init __register_nosave_region(unsigned long start_pfn,
+				     unsigned long end_pfn, int use_kmalloc)
 {
 	struct nosave_region *region;
 
@@ -960,12 +961,18 @@ void __init register_nosave_region(unsigned long start_pfn, unsigned long end_pf
 			goto Report;
 		}
 	}
-	/* This allocation cannot fail */
-	region = memblock_alloc(sizeof(struct nosave_region),
-				SMP_CACHE_BYTES);
-	if (!region)
-		panic("%s: Failed to allocate %zu bytes\n", __func__,
-		      sizeof(struct nosave_region));
+	if (use_kmalloc) {
+		/* During init, this shouldn't fail */
+		region = kmalloc(sizeof(struct nosave_region), GFP_KERNEL);
+		BUG_ON(!region);
+	} else {
+		/* This allocation cannot fail */
+		region = memblock_alloc(sizeof(struct nosave_region),
+					SMP_CACHE_BYTES);
+		if (!region)
+			panic("%s: Failed to allocate %zu bytes\n", __func__,
+			      sizeof(struct nosave_region));
+	}
 	region->start_pfn = start_pfn;
 	region->end_pfn = end_pfn;
 	list_add_tail(&region->list, &nosave_regions);
@@ -1137,7 +1144,15 @@ void free_basic_memory_bitmaps(void)
 	pr_debug("Basic memory bitmaps freed\n");
 }
 
-void clear_free_pages(void)
+static void clear_or_poison_free_page(struct page *page)
+{
+	if (page_poisoning_enabled_static())
+		__kernel_poison_pages(page, 1);
+	else if (want_init_on_free())
+		clear_highpage(page);
+}
+
+void clear_or_poison_free_pages(void)
 {
 	struct memory_bitmap *bm = free_pages_map;
 	unsigned long pfn;
@@ -1145,12 +1160,12 @@ void clear_free_pages(void)
 	if (WARN_ON(!(free_pages_map)))
 		return;
 
-	if (IS_ENABLED(CONFIG_PAGE_POISONING_ZERO) || want_init_on_free()) {
+	if (page_poisoning_enabled() || want_init_on_free()) {
 		memory_bm_position_reset(bm);
 		pfn = memory_bm_next_pfn(bm);
 		while (pfn != BM_END_OF_MAP) {
 			if (pfn_valid(pfn))
-				clear_highpage(pfn_to_page(pfn));
+				clear_or_poison_free_page(pfn_to_page(pfn));
 
 			pfn = memory_bm_next_pfn(bm);
 		}

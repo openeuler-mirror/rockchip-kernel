@@ -65,6 +65,10 @@ static bool support_p2p_device = true;
 module_param(support_p2p_device, bool, 0444);
 MODULE_PARM_DESC(support_p2p_device, "Support P2P-Device interface type");
 
+static ushort mac_prefix;
+module_param(mac_prefix, ushort, 0444);
+MODULE_PARM_DESC(mac_prefix, "Second and third most significant octets in MAC");
+
 /**
  * enum hwsim_regtest - the type of regulatory tests we offer
  *
@@ -1795,8 +1799,8 @@ mac80211_hwsim_beacon(struct hrtimer *timer)
 		bcn_int -= data->bcn_delta;
 		data->bcn_delta = 0;
 	}
-	hrtimer_forward_now(&data->beacon_timer,
-			    ns_to_ktime(bcn_int * NSEC_PER_USEC));
+	hrtimer_forward(&data->beacon_timer, hrtimer_get_expires(timer),
+			ns_to_ktime(bcn_int * NSEC_PER_USEC));
 	return HRTIMER_RESTART;
 }
 
@@ -2264,21 +2268,9 @@ static void hw_scan_work(struct work_struct *work)
 			if (req->ie_len)
 				skb_put_data(probe, req->ie, req->ie_len);
 
-			rcu_read_lock();
-			if (!ieee80211_tx_prepare_skb(hwsim->hw,
-						      hwsim->hw_scan_vif,
-						      probe,
-						      hwsim->tmp_chan->band,
-						      NULL)) {
-				rcu_read_unlock();
-				kfree_skb(probe);
-				continue;
-			}
-
 			local_bh_disable();
 			mac80211_hwsim_tx_frame(hwsim->hw, probe,
 						hwsim->tmp_chan);
-			rcu_read_unlock();
 			local_bh_enable();
 		}
 	}
@@ -3032,6 +3024,8 @@ static int mac80211_hwsim_new_radio(struct genl_info *info,
 	if (!param->perm_addr) {
 		eth_zero_addr(addr);
 		addr[0] = 0x02;
+		addr[1] = (mac_prefix >> 8) & 0xFF;
+		addr[2] = mac_prefix & 0xFF;
 		addr[3] = idx >> 8;
 		addr[4] = idx;
 		memcpy(data->addresses[0].addr, addr, ETH_ALEN);
@@ -3579,10 +3573,6 @@ static int hwsim_tx_info_frame_received_nl(struct sk_buff *skb_2,
 		}
 		txi->flags |= IEEE80211_TX_STAT_ACK;
 	}
-
-	if (hwsim_flags & HWSIM_TX_CTL_NO_ACK)
-		txi->flags |= IEEE80211_TX_STAT_NOACK_TRANSMITTED;
-
 	ieee80211_tx_status_irqsafe(data2->hw, skb);
 	return 0;
 out:

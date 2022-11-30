@@ -3,7 +3,7 @@
 #define _NETNS_NFTABLES_H_
 
 #include <linux/list.h>
-#include <linux/kabi.h>
+#include <linux/android_kabi.h>
 
 struct netns_nftables {
 	struct list_head	tables;
@@ -15,7 +15,7 @@ struct netns_nftables {
 	u8			gencursor;
 	u8			validate_state;
 
-	KABI_RESERVE(1)
+	ANDROID_KABI_RESERVE(1);
 };
 
 #endif

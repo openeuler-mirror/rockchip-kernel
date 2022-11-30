@@ -19,19 +19,6 @@
 #define __exception_irq_entry	__kprobes
 #endif
 
-#ifdef CONFIG_ARM64_UCE_KERNEL_RECOVERY
-bool arm64_process_kernel_sea(unsigned long addr, unsigned int esr,
-			      struct pt_regs *regs, int sig,
-			      int code, void __user *siaddr);
-#else
-static inline bool arm64_process_kernel_sea(unsigned long addr, unsigned int esr,
-					    struct pt_regs *regs, int sig,
-					    int code, void __user *siaddr)
-{
-	return false;
-}
-#endif
-
 static inline u32 disr_to_esr(u64 disr)
 {
 	unsigned int esr = ESR_ELx_EC_SERROR << ESR_ELx_EC_SHIFT;
@@ -50,7 +37,7 @@ asmlinkage void enter_from_user_mode(void);
 asmlinkage void exit_to_user_mode(void);
 void arm64_enter_nmi(struct pt_regs *regs);
 void arm64_exit_nmi(struct pt_regs *regs);
-void do_mem_abort(unsigned long addr, unsigned int esr, struct pt_regs *regs);
+void do_mem_abort(unsigned long far, unsigned int esr, struct pt_regs *regs);
 void do_undefinstr(struct pt_regs *regs);
 void do_bti(struct pt_regs *regs);
 asmlinkage void bad_mode(struct pt_regs *regs, int reason, unsigned int esr);

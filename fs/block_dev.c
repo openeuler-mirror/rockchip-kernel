@@ -79,7 +79,7 @@ static void kill_bdev(struct block_device *bdev)
 {
 	struct address_space *mapping = bdev->bd_inode->i_mapping;
 
-	if (mapping_empty(mapping))
+	if (mapping->nrpages == 0 && mapping->nrexceptional == 0)
 		return;
 
 	invalidate_bh_lrus();
@@ -229,11 +229,6 @@ static void blkdev_bio_end_io_simple(struct bio *bio)
 {
 	struct task_struct *waiter = bio->bi_private;
 
-	/*
-	 * Paired with smp_rmb() in __blkdev_direct_IO_simple() to ensure
-	 * the order between bi_private and bi_xxx.
-	 */
-	smp_wmb();
 	WRITE_ONCE(bio->bi_private, NULL);
 	blk_wake_io_task(waiter);
 }
@@ -293,15 +288,8 @@ __blkdev_direct_IO_simple(struct kiocb *iocb, struct iov_iter *iter,
 	qc = submit_bio(&bio);
 	for (;;) {
 		set_current_state(TASK_UNINTERRUPTIBLE);
-		if (!READ_ONCE(bio.bi_private)) {
-			/*
-			 * Paired with smp_wmb() in
-			 * blkdev_bio_end_io_simple().
-			 */
-			smp_rmb();
+		if (!READ_ONCE(bio.bi_private))
 			break;
-		}
-
 		if (!(iocb->ki_flags & IOCB_HIPRI) ||
 		    !blk_poll(bdev_get_queue(bdev), qc, true))
 			blk_io_schedule();
@@ -370,11 +358,6 @@ static void blkdev_bio_end_io(struct bio *bio)
 		} else {
 			struct task_struct *waiter = dio->waiter;
 
-			/*
-			 * Paired with smp_rmb() in __blkdev_direct_IO() to
-			 * ensure the order between dio->waiter and bio->bi_xxx.
-			 */
-			smp_wmb();
 			WRITE_ONCE(dio->waiter, NULL);
 			blk_wake_io_task(waiter);
 		}
@@ -500,11 +483,8 @@ __blkdev_direct_IO(struct kiocb *iocb, struct iov_iter *iter, int nr_pages)
 
 	for (;;) {
 		set_current_state(TASK_UNINTERRUPTIBLE);
-		if (!READ_ONCE(dio->waiter)) {
-			/* Paired with smp_wmb() in blkdev_bio_end_io(). */
-			smp_rmb();
+		if (!READ_ONCE(dio->waiter))
 			break;
-		}
 
 		if (!(iocb->ki_flags & IOCB_HIPRI) ||
 		    !blk_poll(bdev_get_queue(bdev), qc, true))
@@ -589,55 +569,47 @@ EXPORT_SYMBOL(fsync_bdev);
  * count down in thaw_bdev(). When it becomes 0, thaw_bdev() will unfreeze
  * actually.
  */
-struct super_block *freeze_bdev(struct block_device *bdev)
+int freeze_bdev(struct block_device *bdev)
 {
 	struct super_block *sb;
 	int error = 0;
 
 	mutex_lock(&bdev->bd_fsfreeze_mutex);
-	if (++bdev->bd_fsfreeze_count > 1) {
-		/*
-		 * We don't even need to grab a reference - the first call
-		 * to freeze_bdev grab an active reference and only the last
-		 * thaw_bdev drops it.
-		 */
-		sb = get_super(bdev);
-		if (sb)
-			drop_super(sb);
-		mutex_unlock(&bdev->bd_fsfreeze_mutex);
-		return sb;
-	}
+	if (++bdev->bd_fsfreeze_count > 1)
+		goto done;
 
 	sb = get_active_super(bdev);
 	if (!sb)
-		goto out;
+		goto sync;
 	if (sb->s_op->freeze_super)
 		error = sb->s_op->freeze_super(sb);
 	else
 		error = freeze_super(sb);
-	if (error) {
-		deactivate_super(sb);
-		bdev->bd_fsfreeze_count--;
-		mutex_unlock(&bdev->bd_fsfreeze_mutex);
-		return ERR_PTR(error);
-	}
 	deactivate_super(sb);
- out:
+
+	if (error) {
+		bdev->bd_fsfreeze_count--;
+		goto done;
+	}
+	bdev->bd_fsfreeze_sb = sb;
+
+sync:
 	sync_blockdev(bdev);
+done:
 	mutex_unlock(&bdev->bd_fsfreeze_mutex);
-	return sb;	/* thaw_bdev releases s->s_umount */
+	return error;
 }
 EXPORT_SYMBOL(freeze_bdev);
 
 /**
  * thaw_bdev  -- unlock filesystem
  * @bdev:	blockdevice to unlock
- * @sb:		associated superblock
  *
  * Unlocks the filesystem and marks it writeable again after freeze_bdev().
  */
-int thaw_bdev(struct block_device *bdev, struct super_block *sb)
+int thaw_bdev(struct block_device *bdev)
 {
+	struct super_block *sb;
 	int error = -EINVAL;
 
 	mutex_lock(&bdev->bd_fsfreeze_mutex);
@@ -648,6 +620,7 @@ int thaw_bdev(struct block_device *bdev, struct super_block *sb)
 	if (--bdev->bd_fsfreeze_count > 0)
 		goto out;
 
+	sb = bdev->bd_fsfreeze_sb;
 	if (!sb)
 		goto out;
 
@@ -1427,16 +1400,14 @@ int bdev_disk_changed(struct block_device *bdev, bool invalidate)
 	int ret;
 
 	lockdep_assert_held(&bdev->bd_mutex);
-	down_read(&disk->lookup_sem);
-	if (!(disk->flags & GENHD_FL_UP)) {
-		ret = -ENXIO;
-		goto out;
-	}
+
+	if (!(disk->flags & GENHD_FL_UP))
+		return -ENXIO;
 
 rescan:
 	ret = blk_drop_partitions(bdev);
 	if (ret)
-		goto out;
+		return ret;
 
 	clear_bit(GD_NEED_PART_SCAN, &disk->state);
 
@@ -1471,8 +1442,6 @@ rescan:
 		kobject_uevent(&disk_to_dev(disk)->kobj, KOBJ_CHANGE);
 	}
 
-out:
-	up_read(&disk->lookup_sem);
 	return ret;
 }
 /*
@@ -1988,6 +1957,20 @@ ssize_t blkdev_read_iter(struct kiocb *iocb, struct iov_iter *to)
 }
 EXPORT_SYMBOL_GPL(blkdev_read_iter);
 
+/*
+ * Try to release a page associated with block device when the system
+ * is under memory pressure.
+ */
+static int blkdev_releasepage(struct page *page, gfp_t wait)
+{
+	struct super_block *super = BDEV_I(page->mapping->host)->bdev.bd_super;
+
+	if (super && super->s_op->bdev_try_to_free_page)
+		return super->s_op->bdev_try_to_free_page(super, page, wait);
+
+	return try_to_free_buffers(page);
+}
+
 static int blkdev_writepages(struct address_space *mapping,
 			     struct writeback_control *wbc)
 {
@@ -2001,6 +1984,7 @@ static const struct address_space_operations def_blk_aops = {
 	.write_begin	= blkdev_write_begin,
 	.write_end	= blkdev_write_end,
 	.writepages	= blkdev_writepages,
+	.releasepage	= blkdev_releasepage,
 	.direct_IO	= blkdev_direct_IO,
 	.migratepage	= buffer_migrate_page_norefs,
 	.is_dirty_writeback = buffer_check_dirty_writeback,
@@ -2066,11 +2050,13 @@ static long blkdev_fallocate(struct file *file, int mode, loff_t start,
 		return error;
 
 	/*
-	 * Invalidate the page cache again; if someone wandered in and dirtied
-	 * a page, we just discard it - userspace has no way of knowing whether
-	 * the write happened before or after discard completing...
+	 * Invalidate again; if someone wandered in and dirtied a page,
+	 * the caller will be given -EBUSY.  The third argument is
+	 * inclusive, so the rounding here is safe.
 	 */
-	return truncate_bdev_range(bdev, file->f_mode, start, end);
+	return invalidate_inode_pages2_range(bdev->bd_inode->i_mapping,
+					     start >> PAGE_SHIFT,
+					     end >> PAGE_SHIFT);
 }
 
 const struct file_operations def_blk_fops = {

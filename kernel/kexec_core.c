@@ -42,6 +42,7 @@
 #include <asm/sections.h>
 
 #include <crypto/hash.h>
+#include <crypto/sha.h>
 #include "kexec_internal.h"
 
 DEFINE_MUTEX(kexec_mutex);
@@ -52,16 +53,22 @@ note_buf_t __percpu *crash_notes;
 /* Flag to indicate we are going to kexec a new kernel */
 bool kexec_in_progress = false;
 
-/* Resource for quick kexec */
-#ifdef CONFIG_QUICK_KEXEC
-struct resource quick_kexec_res = {
-	.name  = "Quick kexec",
+
+/* Location of the reserved area for the crash kernel */
+struct resource crashk_res = {
+	.name  = "Crash kernel",
 	.start = 0,
 	.end   = 0,
 	.flags = IORESOURCE_BUSY | IORESOURCE_SYSTEM_RAM,
-	.desc  = IORES_DESC_QUICK_KEXEC
+	.desc  = IORES_DESC_CRASH_KERNEL
 };
-#endif
+struct resource crashk_low_res = {
+	.name  = "Crash kernel",
+	.start = 0,
+	.end   = 0,
+	.flags = IORESOURCE_BUSY | IORESOURCE_SYSTEM_RAM,
+	.desc  = IORES_DESC_CRASH_KERNEL
+};
 
 int kexec_should_crash(struct task_struct *p)
 {
@@ -406,9 +413,8 @@ static struct page *kimage_alloc_normal_control_pages(struct kimage *image,
 	return pages;
 }
 
-static struct page *kimage_alloc_special_control_pages(struct kimage *image,
-						       unsigned int order,
-						       unsigned long end)
+static struct page *kimage_alloc_crash_control_pages(struct kimage *image,
+						      unsigned int order)
 {
 	/* Control pages are special, they are the intermediaries
 	 * that are needed while we copy the rest of the pages
@@ -438,7 +444,7 @@ static struct page *kimage_alloc_special_control_pages(struct kimage *image,
 	size = (1 << order) << PAGE_SHIFT;
 	hole_start = (image->control_page + (size - 1)) & ~(size - 1);
 	hole_end   = hole_start + size - 1;
-	while (hole_end <= end) {
+	while (hole_end <= crashk_res.end) {
 		unsigned long i;
 
 		cond_resched();
@@ -473,6 +479,7 @@ static struct page *kimage_alloc_special_control_pages(struct kimage *image,
 	return pages;
 }
 
+
 struct page *kimage_alloc_control_pages(struct kimage *image,
 					 unsigned int order)
 {
@@ -483,15 +490,8 @@ struct page *kimage_alloc_control_pages(struct kimage *image,
 		pages = kimage_alloc_normal_control_pages(image, order);
 		break;
 	case KEXEC_TYPE_CRASH:
-		pages = kimage_alloc_special_control_pages(image, order,
-							   crashk_res.end);
+		pages = kimage_alloc_crash_control_pages(image, order);
 		break;
-#ifdef CONFIG_QUICK_KEXEC
-	case KEXEC_TYPE_QUICK:
-		pages = kimage_alloc_special_control_pages(image, order,
-							   quick_kexec_res.end);
-		break;
-#endif
 	}
 
 	return pages;
@@ -847,12 +847,11 @@ out:
 	return result;
 }
 
-static int kimage_load_special_segment(struct kimage *image,
+static int kimage_load_crash_segment(struct kimage *image,
 					struct kexec_segment *segment)
 {
-	/*
-	 * For crash dumps kernels and quick kexec kernels
-	 * we simply copy the data from user space to it's destination.
+	/* For crash dumps kernels we simply copy the data from
+	 * user space to it's destination.
 	 * We do things a page at a time for the sake of kmap.
 	 */
 	unsigned long maddr;
@@ -926,13 +925,8 @@ int kimage_load_segment(struct kimage *image,
 		result = kimage_load_normal_segment(image, segment);
 		break;
 	case KEXEC_TYPE_CRASH:
-		result = kimage_load_special_segment(image, segment);
+		result = kimage_load_crash_segment(image, segment);
 		break;
-#ifdef CONFIG_QUICK_KEXEC
-	case KEXEC_TYPE_QUICK:
-		result = kimage_load_special_segment(image, segment);
-		break;
-#endif
 	}
 
 	return result;

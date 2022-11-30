@@ -24,7 +24,7 @@
 
 enum arch_timer_reg {
 	ARCH_TIMER_REG_CTRL,
-	ARCH_TIMER_REG_CVAL,
+	ARCH_TIMER_REG_TVAL,
 };
 
 enum arch_timer_ppi_nr {

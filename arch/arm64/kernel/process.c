@@ -44,9 +44,11 @@
 #include <linux/percpu.h>
 #include <linux/thread_info.h>
 #include <linux/prctl.h>
+#include <trace/hooks/fpsimd.h>
 
 #include <asm/alternative.h>
 #include <asm/arch_gicv3.h>
+#include <asm/compat.h>
 #include <asm/cpufeature.h>
 #include <asm/cacheflush.h>
 #include <asm/exec.h>
@@ -56,12 +58,10 @@
 #include <asm/processor.h>
 #include <asm/pointer_auth.h>
 #include <asm/stacktrace.h>
-#include <asm/mpam_sched.h>
-#include <asm/cpu_park.h>
 
 #if defined(CONFIG_STACKPROTECTOR) && !defined(CONFIG_STACKPROTECTOR_PER_TASK)
 #include <linux/stackprotector.h>
-unsigned long __stack_chk_guard __ro_after_init;
+unsigned long __stack_chk_guard __read_mostly;
 EXPORT_SYMBOL(__stack_chk_guard);
 #endif
 
@@ -70,8 +70,6 @@ EXPORT_SYMBOL(__stack_chk_guard);
  */
 void (*pm_power_off)(void);
 EXPORT_SYMBOL_GPL(pm_power_off);
-
-void (*arm_pm_restart)(enum reboot_mode reboot_mode, const char *cmd);
 
 static void noinstr __cpu_do_idle(void)
 {
@@ -130,10 +128,6 @@ void noinstr arch_cpu_idle(void)
 	raw_local_irq_enable();
 }
 
-#if defined(CONFIG_HALTPOLL_CPUIDLE_MODULE)
-EXPORT_SYMBOL(arch_cpu_idle);
-#endif
-
 #ifdef CONFIG_HOTPLUG_CPU
 void arch_cpu_idle_dead(void)
 {
@@ -152,8 +146,6 @@ void arch_cpu_idle_dead(void)
  */
 void machine_shutdown(void)
 {
-	if (kexec_smp_send_park() == 0)
-		return;
 	smp_shutdown_nonboot_cpus(reboot_cpu);
 }
 
@@ -198,6 +190,8 @@ void machine_restart(char *cmd)
 	local_irq_disable();
 	smp_send_stop();
 
+	do_kernel_pre_restart(cmd);
+
 	/*
 	 * UpdateCapsule() depends on the system being reset via
 	 * ResetSystem().
@@ -206,10 +200,7 @@ void machine_restart(char *cmd)
 		efi_reboot(reboot_mode, NULL);
 
 	/* Now call the architecture specific reboot code. */
-	if (arm_pm_restart)
-		arm_pm_restart(reboot_mode, cmd);
-	else
-		do_kernel_restart(cmd);
+	do_kernel_restart(cmd);
 
 	/*
 	 * Whoops - the architecture was unable to reboot.
@@ -231,7 +222,7 @@ static void print_pstate(struct pt_regs *regs)
 {
 	u64 pstate = regs->pstate;
 
-	if (a32_user_mode(regs)) {
+	if (compat_user_mode(regs)) {
 		printk("pstate: %08llx (%c%c%c%c %c %s %s %c%c%c)\n",
 			pstate,
 			pstate & PSR_AA32_N_BIT ? 'N' : 'n',
@@ -265,12 +256,77 @@ static void print_pstate(struct pt_regs *regs)
 	}
 }
 
+/*
+ * dump a block of kernel memory from around the given address
+ */
+static void show_data(unsigned long addr, int nbytes, const char *name)
+{
+	int	i, j;
+	int	nlines;
+	u32	*p;
+
+	/*
+	 * don't attempt to dump non-kernel addresses or
+	 * values that are probably just small negative numbers
+	 */
+	if (addr < PAGE_OFFSET || addr > -256UL)
+		return;
+
+	printk("\n%s: %#lx:\n", name, addr);
+
+	/*
+	 * round address down to a 32 bit boundary
+	 * and always dump a multiple of 32 bytes
+	 */
+	p = (u32 *)(addr & ~(sizeof(u32) - 1));
+	nbytes += (addr & (sizeof(u32) - 1));
+	nlines = (nbytes + 31) / 32;
+
+
+	for (i = 0; i < nlines; i++) {
+		/*
+		 * just display low 16 bits of address to keep
+		 * each line of the dump < 80 characters
+		 */
+		printk("%04lx ", (unsigned long)p & 0xffff);
+		for (j = 0; j < 8; j++) {
+			u32	data;
+
+			if (aarch64_insn_read((void *)p, &data)) {
+				pr_cont(" ********");
+			} else {
+				pr_cont(" %08x", data);
+			}
+			++p;
+		}
+		pr_cont("\n");
+	}
+}
+
+static void show_extra_register_data(struct pt_regs *regs, int nbytes)
+{
+	mm_segment_t fs;
+	unsigned int i;
+
+	fs = get_fs();
+	set_fs(KERNEL_DS);
+	show_data(regs->pc - nbytes, nbytes * 2, "PC");
+	show_data(regs->regs[30] - nbytes, nbytes * 2, "LR");
+	show_data(regs->sp - nbytes, nbytes * 2, "SP");
+	for (i = 0; i < 30; i++) {
+		char name[4];
+		snprintf(name, sizeof(name), "X%u", i);
+		show_data(regs->regs[i] - nbytes, nbytes * 2, name);
+	}
+	set_fs(fs);
+}
+
 void __show_regs(struct pt_regs *regs)
 {
 	int i, top_reg;
 	u64 lr, sp;
 
-	if (a32_user_mode(regs)) {
+	if (compat_user_mode(regs)) {
 		lr = regs->compat_lr;
 		sp = regs->compat_sp;
 		top_reg = 12;
@@ -315,13 +371,17 @@ void show_regs(struct pt_regs * regs)
 {
 	__show_regs(regs);
 	dump_backtrace(regs, NULL, KERN_DEFAULT);
+
+	if (!user_mode(regs))
+		show_extra_register_data(regs, 256);
 }
+EXPORT_SYMBOL_GPL(show_regs);
 
 static void tls_thread_flush(void)
 {
 	write_sysreg(0, tpidr_el0);
 
-	if (is_a32_compat_task()) {
+	if (is_compat_task()) {
 		current->thread.uw.tp_value = 0;
 
 		/*
@@ -346,7 +406,6 @@ void flush_thread(void)
 	tls_thread_flush();
 	flush_ptrace_hw_breakpoint(current);
 	flush_tagged_addr_state();
-	flush_mte_state();
 }
 
 void release_thread(struct task_struct *dead_task)
@@ -416,7 +475,7 @@ int copy_thread(unsigned long clone_flags, unsigned long stack_start,
 		*task_user_tls(p) = read_sysreg(tpidr_el0);
 
 		if (stack_start) {
-			if (is_a32_compat_thread(task_thread_info(p)))
+			if (is_compat_thread(task_thread_info(p)))
 				childregs->compat_sp = stack_start;
 			else
 				childregs->sp = stack_start;
@@ -459,12 +518,23 @@ static void tls_thread_switch(struct task_struct *next)
 {
 	tls_preserve_current_state();
 
-	if (is_a32_compat_thread(task_thread_info(next)))
+	if (is_compat_thread(task_thread_info(next)))
 		write_sysreg(next->thread.uw.tp_value, tpidrro_el0);
 	else if (!arm64_kernel_unmapped_at_el0())
 		write_sysreg(0, tpidrro_el0);
 
 	write_sysreg(*task_user_tls(next), tpidr_el0);
+}
+
+/* Restore the UAO state depending on next's addr_limit */
+void uao_thread_switch(struct task_struct *next)
+{
+	if (IS_ENABLED(CONFIG_ARM64_UAO)) {
+		if (task_thread_info(next)->addr_limit == KERNEL_DS)
+			asm(ALTERNATIVE("nop", SET_PSTATE_UAO(1), ARM64_HAS_UAO));
+		else
+			asm(ALTERNATIVE("nop", SET_PSTATE_UAO(0), ARM64_HAS_UAO));
+	}
 }
 
 /*
@@ -506,26 +576,52 @@ static void entry_task_switch(struct task_struct *next)
 
 /*
  * ARM erratum 1418040 handling, affecting the 32bit view of CNTVCT.
- * Ensure access is disabled when switching to a 32bit task, ensure
- * access is enabled when switching to a 64bit task.
+ * Assuming the virtual counter is enabled at the beginning of times:
+ *
+ * - disable access when switching from a 64bit task to a 32bit task
+ * - enable access when switching from a 32bit task to a 64bit task
  */
-static void erratum_1418040_thread_switch(struct task_struct *next)
+static void erratum_1418040_thread_switch(struct task_struct *prev,
+					  struct task_struct *next)
 {
-	if (!IS_ENABLED(CONFIG_ARM64_ERRATUM_1418040) ||
-	    !this_cpu_has_cap(ARM64_WORKAROUND_1418040))
+	bool prev32, next32;
+	u64 val;
+
+	if (!IS_ENABLED(CONFIG_ARM64_ERRATUM_1418040))
 		return;
 
-	if (is_a32_compat_thread(task_thread_info(next)))
-		sysreg_clear_set(cntkctl_el1, ARCH_TIMER_USR_VCT_ACCESS_EN, 0);
+	prev32 = is_compat_thread(task_thread_info(prev));
+	next32 = is_compat_thread(task_thread_info(next));
+
+	if (prev32 == next32 || !this_cpu_has_cap(ARM64_WORKAROUND_1418040))
+		return;
+
+	val = read_sysreg(cntkctl_el1);
+
+	if (!next32)
+		val |= ARCH_TIMER_USR_VCT_ACCESS_EN;
 	else
-		sysreg_clear_set(cntkctl_el1, 0, ARCH_TIMER_USR_VCT_ACCESS_EN);
+		val &= ~ARCH_TIMER_USR_VCT_ACCESS_EN;
+
+	write_sysreg(val, cntkctl_el1);
 }
 
-static void erratum_1418040_new_exec(void)
+/*
+ * __switch_to() checks current->thread.sctlr_user as an optimisation. Therefore
+ * this function must be called with preemption disabled and the update to
+ * sctlr_user must be made in the same preemption disabled block so that
+ * __switch_to() does not see the variable update before the SCTLR_EL1 one.
+ */
+void update_sctlr_el1(u64 sctlr)
 {
-	preempt_disable();
-	erratum_1418040_thread_switch(current);
-	preempt_enable();
+	/*
+	 * EnIA must not be cleared while in the kernel as this is necessary for
+	 * in-kernel PAC. It will be cleared on kernel exit if needed.
+	 */
+	sysreg_clear_set(sctlr_el1, SCTLR_USER_MASK & ~SCTLR_ELx_ENIA, sctlr);
+
+	/* ISB required for the kernel uaccess routines when setting TCF0. */
+	isb();
 }
 
 /*
@@ -541,8 +637,10 @@ __notrace_funcgraph struct task_struct *__switch_to(struct task_struct *prev,
 	hw_breakpoint_thread_switch(next);
 	contextidr_thread_switch(next);
 	entry_task_switch(next);
+	uao_thread_switch(next);
 	ssbs_thread_switch(next);
-	erratum_1418040_thread_switch(next);
+	erratum_1418040_thread_switch(prev, next);
+	ptrauth_thread_switch_user(next);
 
 	/*
 	 * Complete any pending TLB or cache maintenance on this CPU in case
@@ -558,11 +656,14 @@ __notrace_funcgraph struct task_struct *__switch_to(struct task_struct *prev,
 	 * registers.
 	 */
 	mte_thread_switch(next);
+	/* avoid expensive SCTLR_EL1 accesses if no change */
+	if (prev->thread.sctlr_user != next->thread.sctlr_user)
+		update_sctlr_el1(next->thread.sctlr_user);
+
+	trace_android_vh_is_fpsimd_save(prev, next);
 
 	/* the actual thread switch */
 	last = cpu_switch_to(prev, next);
-
-	mpam_sched_in();
 
 	return last;
 }
@@ -594,6 +695,7 @@ out:
 	put_task_stack(p);
 	return ret;
 }
+EXPORT_SYMBOL_GPL(get_wchan);
 
 unsigned long arch_align_stack(unsigned long sp)
 {
@@ -607,10 +709,27 @@ unsigned long arch_align_stack(unsigned long sp)
  */
 void arch_setup_new_exec(void)
 {
-	current->mm->context.flags = is_compat_task() ? MMCF_AARCH32 : 0;
+	unsigned long mmflags = 0;
 
-	ptrauth_thread_init_user(current);
-	erratum_1418040_new_exec();
+	if (is_compat_task()) {
+		mmflags = MMCF_AARCH32;
+
+		/*
+		 * Restrict the CPU affinity mask for a 32-bit task so that
+		 * it contains only 32-bit-capable CPUs.
+		 *
+		 * From the perspective of the task, this looks similar to
+		 * what would happen if the 64-bit-only CPUs were hot-unplugged
+		 * at the point of execve(), although we try a bit harder to
+		 * honour the cpuset hierarchy.
+		 */
+		if (static_branch_unlikely(&arm64_mismatched_32bit_el0))
+			force_compatible_cpus_allowed_ptr(current);
+	}
+
+	current->mm->context.flags = mmflags;
+	ptrauth_thread_init_user();
+	mte_thread_init_user();
 
 	if (task_spec_ssb_noexec(current)) {
 		arch_prctl_spec_ctrl_set(current, PR_SPEC_STORE_BYPASS,

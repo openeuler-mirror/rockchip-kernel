@@ -361,7 +361,7 @@ xfs_buf_allocate_memory(
 	unsigned short		page_count, i;
 	xfs_off_t		start, end;
 	int			error;
-	xfs_km_flags_t		kmflag_mask = KM_NOFS;
+	xfs_km_flags_t		kmflag_mask = 0;
 
 	/*
 	 * assure zeroed buffer for non-read cases.
@@ -378,7 +378,9 @@ xfs_buf_allocate_memory(
 	 */
 	size = BBTOB(bp->b_length);
 	if (size < PAGE_SIZE) {
-		bp->b_addr = kmem_alloc(size, kmflag_mask);
+		int align_mask = xfs_buftarg_dma_alignment(bp->b_target);
+		bp->b_addr = kmem_alloc_io(size, align_mask,
+					   KM_NOFS | kmflag_mask);
 		if (!bp->b_addr) {
 			/* low memory - use alloc_page loop instead */
 			goto use_alloc_page;
@@ -2112,9 +2114,9 @@ xfs_buf_delwri_queue(
  */
 static int
 xfs_buf_cmp(
-	void			*priv,
-	const struct list_head	*a,
-	const struct list_head	*b)
+	void		*priv,
+	struct list_head *a,
+	struct list_head *b)
 {
 	struct xfs_buf	*ap = container_of(a, struct xfs_buf, b_list);
 	struct xfs_buf	*bp = container_of(b, struct xfs_buf, b_list);

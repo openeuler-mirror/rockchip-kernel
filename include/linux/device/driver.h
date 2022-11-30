@@ -14,7 +14,6 @@
 #ifndef _DEVICE_DRIVER_H_
 #define _DEVICE_DRIVER_H_
 
-#include <linux/kabi.h>
 #include <linux/kobject.h>
 #include <linux/klist.h>
 #include <linux/pm.h>
@@ -46,12 +45,6 @@ enum probe_type {
 	PROBE_DEFAULT_STRATEGY,
 	PROBE_PREFER_ASYNCHRONOUS,
 	PROBE_FORCE_SYNCHRONOUS,
-};
-
-/**
- * struct device_driver_resvd - KABI extension struct
- */
-struct device_driver_resvd {
 };
 
 /**
@@ -126,11 +119,10 @@ struct device_driver {
 
 	struct driver_private *p;
 
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
-	KABI_RESERVE(3)
-	KABI_RESERVE(4)
-	KABI_AUX_PTR(device_driver)
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
+	ANDROID_KABI_RESERVE(3);
+	ANDROID_KABI_RESERVE(4);
 };
 
 

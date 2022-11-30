@@ -105,9 +105,6 @@
 #define KERNEL_HWCAP_RNG		__khwcap2_feature(RNG)
 #define KERNEL_HWCAP_BTI		__khwcap2_feature(BTI)
 #define KERNEL_HWCAP_MTE		__khwcap2_feature(MTE)
-#define KERNEL_HWCAP_ECV		__khwcap2_feature(ECV)
-#define KERNEL_HWCAP_AFP		__khwcap2_feature(AFP)
-#define KERNEL_HWCAP_RPRES		__khwcap2_feature(RPRES)
 
 /*
  * This yields a mask that user programs can use to figure out what
@@ -116,13 +113,15 @@
 #define ELF_HWCAP		cpu_get_elf_hwcap()
 #define ELF_HWCAP2		cpu_get_elf_hwcap2()
 
-#ifdef CONFIG_AARCH32_EL0
-extern unsigned int a32_elf_hwcap, a32_elf_hwcap2;
+#ifdef CONFIG_COMPAT
+#define COMPAT_ELF_HWCAP	(compat_elf_hwcap)
+#define COMPAT_ELF_HWCAP2	(compat_elf_hwcap2)
+extern unsigned int compat_elf_hwcap, compat_elf_hwcap2;
 #endif
 
 enum {
 	CAP_HWCAP = 1,
-#ifdef CONFIG_AARCH32_EL0
+#ifdef CONFIG_COMPAT
 	CAP_COMPAT_HWCAP,
 	CAP_COMPAT_HWCAP2,
 #endif

@@ -18,7 +18,6 @@
 #include <linux/screen_info.h>
 #include <linux/init.h>
 #include <linux/kexec.h>
-#include <linux/kfence.h>
 #include <linux/root_dev.h>
 #include <linux/cpu.h>
 #include <linux/interrupt.h>
@@ -31,7 +30,6 @@
 #include <linux/psci.h>
 #include <linux/sched/task.h>
 #include <linux/mm.h>
-#include <linux/pin_mem.h>
 
 #include <asm/acpi.h>
 #include <asm/fixmap.h>
@@ -53,23 +51,8 @@
 #include <asm/xen/hypervisor.h>
 #include <asm/mmu_context.h>
 
-#include "../mm/internal.h"
-
 static int num_standard_resources;
 static struct resource *standard_resources;
-
-#ifdef CONFIG_ARM64_BOOTPARAM_HOTPLUG_CPU0
-static int arm64_cpu0_hotpluggable = 1;
-#else
-static int arm64_cpu0_hotpluggable;
-static int __init arm64_enable_cpu0_hotplug(char *str)
-{
-	arm64_cpu0_hotpluggable = 1;
-	return 1;
-}
-
-__setup("arm64_cpu0_hotplug", arm64_enable_cpu0_hotplug);
-#endif
 
 phys_addr_t __fdt_pointer __initdata;
 
@@ -185,6 +168,21 @@ static void __init smp_build_mpidr_hash(void)
 		pr_warn("Large number of MPIDR hash buckets detected\n");
 }
 
+static void *early_fdt_ptr __initdata;
+
+void __init *get_early_fdt_ptr(void)
+{
+	return early_fdt_ptr;
+}
+
+asmlinkage void __init early_fdt_map(u64 dt_phys)
+{
+	int fdt_size;
+
+	early_fixmap_init();
+	early_fdt_ptr = fixmap_remap_fdt(dt_phys, &fdt_size, PAGE_KERNEL);
+}
+
 static void __init setup_machine_fdt(phys_addr_t dt_phys)
 {
 	int size;
@@ -214,22 +212,6 @@ static void __init setup_machine_fdt(phys_addr_t dt_phys)
 
 	pr_info("Machine model: %s\n", name);
 	dump_stack_set_arch_desc("%s (DT)", name);
-}
-
-static void __init request_memmap_resources(struct resource *res)
-{
-	struct resource *memmap_res;
-
-	memmap_res = memblock_alloc(sizeof(*memmap_res), SMP_CACHE_BYTES);
-	if (!memmap_res)
-		panic("%s: Failed to allocate memmap_res\n", __func__);
-
-	memmap_res->name = "memmap reserved";
-	memmap_res->flags = IORESOURCE_MEM;
-	memmap_res->start = res->start;
-	memmap_res->end = res->end;
-
-	request_resource(res, memmap_res);
 }
 
 static void __init request_standard_resources(void)
@@ -270,25 +252,13 @@ static void __init request_standard_resources(void)
 		if (kernel_data.start >= res->start &&
 		    kernel_data.end <= res->end)
 			request_resource(res, &kernel_data);
-		if (memblock_is_memmap(region))
-			request_memmap_resources(res);
-
 #ifdef CONFIG_KEXEC_CORE
 		/* Userspace will find "Crash kernel" region in /proc/iomem. */
-		if (crashk_low_res.end && crashk_low_res.start >= res->start &&
-				crashk_low_res.end <= res->end) {
-			request_resource(res, &crashk_low_res);
-		}
 		if (crashk_res.end && crashk_res.start >= res->start &&
 		    crashk_res.end <= res->end)
 			request_resource(res, &crashk_res);
 #endif
-
-		request_quick_kexec_res(res);
-		request_pin_mem_res(res);
 	}
-
-	request_pmem_res_resource();
 }
 
 static int __init reserve_memblock_reserved_regions(void)
@@ -321,7 +291,7 @@ arch_initcall(reserve_memblock_reserved_regions);
 
 u64 __cpu_logical_map[NR_CPUS] = { [0 ... NR_CPUS-1] = INVALID_HWID };
 
-u64 cpu_logical_map(int cpu)
+u64 cpu_logical_map(unsigned int cpu)
 {
 	return __cpu_logical_map[cpu];
 }
@@ -375,11 +345,6 @@ void __init __no_sanitize_address setup_arch(char **cmdline_p)
 
 	arm64_memblock_init();
 
-	kfence_early_alloc_pool();
-
-	efi_fake_memmap();
-	efi_find_mirror();
-
 	paging_init();
 
 	acpi_table_upgrade();
@@ -407,10 +372,8 @@ void __init __no_sanitize_address setup_arch(char **cmdline_p)
 	smp_init_cpus();
 	smp_build_mpidr_hash();
 
-	pv_sched_init();
-
 	/* Init percpu seeds for random tags after cpus are set up. */
-	kasan_init_tags();
+	kasan_init_sw_tags();
 
 #ifdef CONFIG_ARM64_SW_TTBR0_PAN
 	/*
@@ -434,12 +397,8 @@ static inline bool cpu_can_disable(unsigned int cpu)
 #ifdef CONFIG_HOTPLUG_CPU
 	const struct cpu_operations *ops = get_cpu_ops(cpu);
 
-	if (ops && ops->cpu_can_disable) {
-		if (cpu == 0)
-			return ops->cpu_can_disable(0) && arm64_cpu0_hotpluggable;
-		else
-			return ops->cpu_can_disable(cpu);
-	}
+	if (ops && ops->cpu_can_disable)
+		return ops->cpu_can_disable(cpu);
 #endif
 	return false;
 }
@@ -451,7 +410,7 @@ static int __init topology_init(void)
 	for_each_online_node(i)
 		register_one_node(i);
 
-	for_each_present_cpu(i) {
+	for_each_possible_cpu(i) {
 		struct cpu *cpu = &per_cpu(cpu_data.cpu, i);
 		cpu->hotpluggable = cpu_can_disable(i);
 		register_cpu(cpu, i);
@@ -494,24 +453,3 @@ static int __init register_arm64_panic_block(void)
 	return 0;
 }
 device_initcall(register_arm64_panic_block);
-
-#ifdef CONFIG_HOTPLUG_CPU
-
-int arch_register_cpu(int num)
-{
-	struct cpu *cpu = &per_cpu(cpu_data.cpu, num);
-
-	cpu->hotpluggable = 1;
-	return register_cpu(cpu, num);
-}
-EXPORT_SYMBOL(arch_register_cpu);
-
-void arch_unregister_cpu(int num)
-{
-	struct cpu *cpu = &per_cpu(cpu_data.cpu, num);
-
-	unregister_cpu(cpu);
-}
-EXPORT_SYMBOL(arch_unregister_cpu);
-
-#endif

@@ -973,9 +973,11 @@ ctnetlink_alloc_filter(const struct nlattr * const cda[], u8 family)
 						   CTA_TUPLE_REPLY,
 						   filter->family,
 						   &filter->zone,
-						   filter->reply_flags);
-		if (err < 0)
+						   filter->orig_flags);
+		if (err < 0) {
+			err = -EINVAL;
 			goto err_filter;
+		}
 	}
 
 	return filter;
@@ -1634,8 +1636,9 @@ static int ctnetlink_get_conntrack(struct net *net, struct sock *ctnl,
 
 	ct = nf_ct_tuplehash_to_ctrack(h);
 
+	err = -ENOMEM;
 	skb2 = nlmsg_new(NLMSG_DEFAULT_SIZE, GFP_KERNEL);
-	if (!skb2) {
+	if (skb2 == NULL) {
 		nf_ct_put(ct);
 		return -ENOMEM;
 	}
@@ -1643,12 +1646,20 @@ static int ctnetlink_get_conntrack(struct net *net, struct sock *ctnl,
 	err = ctnetlink_fill_info(skb2, NETLINK_CB(skb).portid, nlh->nlmsg_seq,
 				  NFNL_MSG_TYPE(nlh->nlmsg_type), ct, true, 0);
 	nf_ct_put(ct);
-	if (err <= 0) {
-		kfree_skb(skb2);
-		return -ENOMEM;
-	}
+	if (err <= 0)
+		goto free;
 
-	return nfnetlink_unicast(skb2, net, NETLINK_CB(skb).portid);
+	err = netlink_unicast(ctnl, skb2, NETLINK_CB(skb).portid, MSG_DONTWAIT);
+	if (err < 0)
+		goto out;
+
+	return 0;
+
+free:
+	kfree_skb(skb2);
+out:
+	/* this avoids a loop in nfnetlink. */
+	return err == -EAGAIN ? -ENOBUFS : err;
 }
 
 static int ctnetlink_done_list(struct netlink_callback *cb)
@@ -1962,7 +1973,7 @@ static int ctnetlink_change_timeout(struct nf_conn *ct,
 
 	if (timeout > INT_MAX)
 		timeout = INT_MAX;
-	WRITE_ONCE(ct->timeout, nfct_time_stamp + (u32)timeout);
+	ct->timeout = nfct_time_stamp + (u32)timeout;
 
 	if (test_bit(IPS_DYING_BIT, &ct->status))
 		return -ETIME;
@@ -2274,8 +2285,7 @@ ctnetlink_create_conntrack(struct net *net,
 			if (helper->from_nlattr)
 				helper->from_nlattr(helpinfo, ct);
 
-			/* disable helper auto-assignment for this entry */
-			ct->status |= IPS_HELPER;
+			/* not in hash table yet so not strictly necessary */
 			RCU_INIT_POINTER(help->helper, helper);
 		}
 	} else {
@@ -2604,12 +2614,20 @@ static int ctnetlink_stat_ct(struct net *net, struct sock *ctnl,
 					  nlh->nlmsg_seq,
 					  NFNL_MSG_TYPE(nlh->nlmsg_type),
 					  sock_net(skb->sk));
-	if (err <= 0) {
-		kfree_skb(skb2);
-		return -ENOMEM;
-	}
+	if (err <= 0)
+		goto free;
 
-	return nfnetlink_unicast(skb2, net, NETLINK_CB(skb).portid);
+	err = netlink_unicast(ctnl, skb2, NETLINK_CB(skb).portid, MSG_DONTWAIT);
+	if (err < 0)
+		goto out;
+
+	return 0;
+
+free:
+	kfree_skb(skb2);
+out:
+	/* this avoids a loop in nfnetlink. */
+	return err == -EAGAIN ? -ENOBUFS : err;
 }
 
 static const struct nla_policy exp_nla_policy[CTA_EXPECT_MAX+1] = {
@@ -3351,10 +3369,11 @@ static int ctnetlink_get_expect(struct net *net, struct sock *ctnl,
 		}
 	}
 
+	err = -ENOMEM;
 	skb2 = nlmsg_new(NLMSG_DEFAULT_SIZE, GFP_KERNEL);
-	if (!skb2) {
+	if (skb2 == NULL) {
 		nf_ct_expect_put(exp);
-		return -ENOMEM;
+		goto out;
 	}
 
 	rcu_read_lock();
@@ -3362,12 +3381,20 @@ static int ctnetlink_get_expect(struct net *net, struct sock *ctnl,
 				      nlh->nlmsg_seq, IPCTNL_MSG_EXP_NEW, exp);
 	rcu_read_unlock();
 	nf_ct_expect_put(exp);
-	if (err <= 0) {
-		kfree_skb(skb2);
-		return -ENOMEM;
-	}
+	if (err <= 0)
+		goto free;
 
-	return nfnetlink_unicast(skb2, net, NETLINK_CB(skb).portid);
+	err = netlink_unicast(ctnl, skb2, NETLINK_CB(skb).portid, MSG_DONTWAIT);
+	if (err < 0)
+		goto out;
+
+	return 0;
+
+free:
+	kfree_skb(skb2);
+out:
+	/* this avoids a loop in nfnetlink. */
+	return err == -EAGAIN ? -ENOBUFS : err;
 }
 
 static bool expect_iter_name(struct nf_conntrack_expect *exp, void *data)

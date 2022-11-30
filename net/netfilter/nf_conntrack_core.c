@@ -33,6 +33,7 @@
 #include <linux/mm.h>
 #include <linux/nsproxy.h>
 #include <linux/rculist_nulls.h>
+#include <trace/hooks/net.h>
 
 #include <net/netfilter/nf_conntrack.h>
 #include <net/netfilter/nf_conntrack_l4proto.h>
@@ -74,9 +75,6 @@ struct conntrack_gc_work {
 static __read_mostly struct kmem_cache *nf_conntrack_cachep;
 static DEFINE_SPINLOCK(nf_conntrack_locks_all_lock);
 static __read_mostly bool nf_conntrack_locks_all;
-
-/* serialize hash resizes and nf_ct_iterate_cleanup */
-static DEFINE_MUTEX(nf_conntrack_mutex);
 
 #define GC_SCAN_INTERVAL	(120u * HZ)
 #define GC_SCAN_MAX_DURATION	msecs_to_jiffies(10)
@@ -660,7 +658,7 @@ bool nf_ct_delete(struct nf_conn *ct, u32 portid, int report)
 
 	tstamp = nf_conn_tstamp_find(ct);
 	if (tstamp) {
-		s32 timeout = READ_ONCE(ct->timeout) - nfct_time_stamp;
+		s32 timeout = ct->timeout - nfct_time_stamp;
 
 		tstamp->stop = ktime_get_real_ns();
 		if (timeout < 0)
@@ -980,7 +978,7 @@ static int nf_ct_resolve_clash_harder(struct sk_buff *skb, u32 repl_idx)
 	}
 
 	/* We want the clashing entry to go away real soon: 1 second timeout. */
-	WRITE_ONCE(loser_ct->timeout, nfct_time_stamp + HZ);
+	loser_ct->timeout = nfct_time_stamp + HZ;
 
 	/* IPS_NAT_CLASH removes the entry automatically on the first
 	 * reply.  Also prevents UDP tracker from moving the entry to
@@ -1487,13 +1485,15 @@ __nf_conntrack_alloc(struct net *net,
 	/* save hash for reusing when confirming */
 	*(unsigned long *)(&ct->tuplehash[IP_CT_DIR_REPLY].hnnode.pprev) = hash;
 	ct->status = 0;
-	WRITE_ONCE(ct->timeout, 0);
+	ct->timeout = 0;
 	write_pnet(&ct->ct_net, net);
 	memset(&ct->__nfct_init_offset, 0,
 	       offsetof(struct nf_conn, proto) -
 	       offsetof(struct nf_conn, __nfct_init_offset));
 
 	nf_ct_zone_add(ct, zone);
+
+	trace_android_rvh_nf_conn_alloc(ct);
 
 	/* Because we use RCU lookups, we set ct_general.use to zero before
 	 * this is inserted in any list.
@@ -1527,6 +1527,7 @@ void nf_conntrack_free(struct nf_conn *ct)
 	nf_ct_ext_destroy(ct);
 	kmem_cache_free(nf_conntrack_cachep, ct);
 	smp_mb__before_atomic();
+	trace_android_rvh_nf_conn_free(ct);
 	atomic_dec(&net->ct.count);
 }
 EXPORT_SYMBOL_GPL(nf_conntrack_free);
@@ -1832,17 +1833,15 @@ repeat:
 		pr_debug("nf_conntrack_in: Can't track with proto module\n");
 		nf_conntrack_put(&ct->ct_general);
 		skb->_nfct = 0;
+		NF_CT_STAT_INC_ATOMIC(state->net, invalid);
+		if (ret == -NF_DROP)
+			NF_CT_STAT_INC_ATOMIC(state->net, drop);
 		/* Special case: TCP tracker reports an attempt to reopen a
 		 * closed/aborted connection. We have to go back and create a
 		 * fresh conntrack.
 		 */
 		if (ret == -NF_REPEAT)
 			goto repeat;
-
-		NF_CT_STAT_INC_ATOMIC(state->net, invalid);
-		if (ret == -NF_DROP)
-			NF_CT_STAT_INC_ATOMIC(state->net, drop);
-
 		ret = -ret;
 		goto out;
 	}
@@ -2178,31 +2177,28 @@ get_next_corpse(int (*iter)(struct nf_conn *i, void *data),
 	spinlock_t *lockp;
 
 	for (; *bucket < nf_conntrack_htable_size; (*bucket)++) {
-		struct hlist_nulls_head *hslot = &nf_conntrack_hash[*bucket];
-
-		if (hlist_nulls_empty(hslot))
-			continue;
-
 		lockp = &nf_conntrack_locks[*bucket % CONNTRACK_LOCKS];
 		local_bh_disable();
 		nf_conntrack_lock(lockp);
-		hlist_nulls_for_each_entry(h, n, hslot, hnnode) {
-			if (NF_CT_DIRECTION(h) != IP_CT_DIR_REPLY)
-				continue;
-			/* All nf_conn objects are added to hash table twice, one
-			 * for original direction tuple, once for the reply tuple.
-			 *
-			 * Exception: In the IPS_NAT_CLASH case, only the reply
-			 * tuple is added (the original tuple already existed for
-			 * a different object).
-			 *
-			 * We only need to call the iterator once for each
-			 * conntrack, so we just use the 'reply' direction
-			 * tuple while iterating.
-			 */
-			ct = nf_ct_tuplehash_to_ctrack(h);
-			if (iter(ct, data))
-				goto found;
+		if (*bucket < nf_conntrack_htable_size) {
+			hlist_nulls_for_each_entry(h, n, &nf_conntrack_hash[*bucket], hnnode) {
+				if (NF_CT_DIRECTION(h) != IP_CT_DIR_REPLY)
+					continue;
+				/* All nf_conn objects are added to hash table twice, one
+				 * for original direction tuple, once for the reply tuple.
+				 *
+				 * Exception: In the IPS_NAT_CLASH case, only the reply
+				 * tuple is added (the original tuple already existed for
+				 * a different object).
+				 *
+				 * We only need to call the iterator once for each
+				 * conntrack, so we just use the 'reply' direction
+				 * tuple while iterating.
+				 */
+				ct = nf_ct_tuplehash_to_ctrack(h);
+				if (iter(ct, data))
+					goto found;
+			}
 		}
 		spin_unlock(lockp);
 		local_bh_enable();
@@ -2220,20 +2216,26 @@ found:
 static void nf_ct_iterate_cleanup(int (*iter)(struct nf_conn *i, void *data),
 				  void *data, u32 portid, int report)
 {
-	unsigned int bucket = 0;
+	unsigned int bucket = 0, sequence;
 	struct nf_conn *ct;
 
 	might_sleep();
 
-	mutex_lock(&nf_conntrack_mutex);
-	while ((ct = get_next_corpse(iter, data, &bucket)) != NULL) {
-		/* Time to push up daises... */
+	for (;;) {
+		sequence = read_seqcount_begin(&nf_conntrack_generation);
 
-		nf_ct_delete(ct, portid, report);
-		nf_ct_put(ct);
-		cond_resched();
+		while ((ct = get_next_corpse(iter, data, &bucket)) != NULL) {
+			/* Time to push up daises... */
+
+			nf_ct_delete(ct, portid, report);
+			nf_ct_put(ct);
+			cond_resched();
+		}
+
+		if (!read_seqcount_retry(&nf_conntrack_generation, sequence))
+			break;
+		bucket = 0;
 	}
-	mutex_unlock(&nf_conntrack_mutex);
 }
 
 struct iter_data {
@@ -2463,10 +2465,8 @@ int nf_conntrack_hash_resize(unsigned int hashsize)
 	if (!hash)
 		return -ENOMEM;
 
-	mutex_lock(&nf_conntrack_mutex);
 	old_size = nf_conntrack_htable_size;
 	if (old_size == hashsize) {
-		mutex_unlock(&nf_conntrack_mutex);
 		kvfree(hash);
 		return 0;
 	}
@@ -2501,8 +2501,6 @@ int nf_conntrack_hash_resize(unsigned int hashsize)
 	write_seqcount_end(&nf_conntrack_generation);
 	nf_conntrack_all_unlock();
 	local_bh_enable();
-
-	mutex_unlock(&nf_conntrack_mutex);
 
 	synchronize_net();
 	kvfree(old_hash);

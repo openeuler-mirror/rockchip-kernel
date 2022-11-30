@@ -404,9 +404,7 @@ static int ionic_set_fecparam(struct net_device *netdev,
 }
 
 static int ionic_get_coalesce(struct net_device *netdev,
-			      struct ethtool_coalesce *coalesce,
-			      struct kernel_ethtool_coalesce *kernel_coal,
-			      struct netlink_ext_ack *extack)
+			      struct ethtool_coalesce *coalesce)
 {
 	struct ionic_lif *lif = netdev_priv(netdev);
 
@@ -424,9 +422,7 @@ static int ionic_get_coalesce(struct net_device *netdev,
 }
 
 static int ionic_set_coalesce(struct net_device *netdev,
-			      struct ethtool_coalesce *coalesce,
-			      struct kernel_ethtool_coalesce *kernel_coal,
-			      struct netlink_ext_ack *extack)
+			      struct ethtool_coalesce *coalesce)
 {
 	struct ionic_lif *lif = netdev_priv(netdev);
 	struct ionic_identity *ident;
@@ -511,9 +507,7 @@ static int ionic_set_coalesce(struct net_device *netdev,
 }
 
 static void ionic_get_ringparam(struct net_device *netdev,
-				struct ethtool_ringparam *ring,
-				struct kernel_ethtool_ringparam *kernel_ring,
-				struct netlink_ext_ack *extack)
+				struct ethtool_ringparam *ring)
 {
 	struct ionic_lif *lif = netdev_priv(netdev);
 
@@ -524,9 +518,7 @@ static void ionic_get_ringparam(struct net_device *netdev,
 }
 
 static int ionic_set_ringparam(struct net_device *netdev,
-			       struct ethtool_ringparam *ring,
-			       struct kernel_ethtool_ringparam *kernel_ring,
-			       struct netlink_ext_ack *extack)
+			       struct ethtool_ringparam *ring)
 {
 	struct ionic_lif *lif = netdev_priv(netdev);
 	struct ionic_queue_params qparam;

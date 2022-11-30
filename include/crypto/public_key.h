@@ -13,7 +13,6 @@
 #include <linux/keyctl.h>
 #include <linux/oid_registry.h>
 #include <crypto/akcipher.h>
-#include <linux/kabi.h>
 
 /*
  * Cryptographic data for the public-key subtype of the asymmetric key type.
@@ -30,11 +29,6 @@ struct public_key {
 	bool key_is_private;
 	const char *id_type;
 	const char *pkey_algo;
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
-	KABI_RESERVE(3)
-	KABI_RESERVE(4)
-	KABI_RESERVE(5)
 };
 
 extern void public_key_free(struct public_key *key);
@@ -45,17 +39,14 @@ extern void public_key_free(struct public_key *key);
 struct public_key_signature {
 	struct asymmetric_key_id *auth_ids[2];
 	u8 *s;			/* Signature */
-	u8 *digest;
 	u32 s_size;		/* Number of bytes in signature */
-	u32 digest_size;	/* Number of bytes in digest */
+	u8 *digest;
+	u8 digest_size;		/* Number of bytes in digest */
 	const char *pkey_algo;
 	const char *hash_algo;
 	const char *encoding;
 	const void *data;
 	unsigned int data_size;
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
-	KABI_RESERVE(3)
 };
 
 extern void public_key_signature_free(struct public_key_signature *sig);

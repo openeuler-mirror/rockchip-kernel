@@ -25,7 +25,6 @@
 #include <sound/core.h>
 #include <sound/initval.h>
 #include "hda_controller.h"
-#include "hda_local.h"
 
 #define CREATE_TRACE_POINTS
 #include "hda_controller_trace.h"
@@ -1058,16 +1057,6 @@ void azx_stop_chip(struct azx *chip)
 }
 EXPORT_SYMBOL_GPL(azx_stop_chip);
 
-static void azx_rirb_zxdelay(struct azx *chip, int enable)
-{
-	if (chip->remap_diu_addr) {
-		if (!enable)
-			writel(0x0, (char *)chip->remap_diu_addr + 0x490a8);
-		else
-			writel(0x1000000, (char *)chip->remap_diu_addr + 0x490a8);
-	}
-}
-
 /*
  * interrupt handler
  */
@@ -1127,14 +1116,9 @@ irqreturn_t azx_interrupt(int irq, void *dev_id)
 			azx_writeb(chip, RIRBSTS, RIRB_INT_MASK);
 			active = true;
 			if (status & RIRB_INT_RESPONSE) {
-				if ((chip->driver_caps & AZX_DCAPS_CTX_WORKAROUND) ||
-					(chip->driver_caps & AZX_DCAPS_RIRB_PRE_DELAY)) {
-					azx_rirb_zxdelay(chip, 1);
+				if (chip->driver_caps & AZX_DCAPS_CTX_WORKAROUND)
 					udelay(80);
-				}
 				snd_hdac_bus_update_rirb(bus);
-				if (chip->driver_caps & AZX_DCAPS_RIRB_PRE_DELAY)
-					azx_rirb_zxdelay(chip, 0);
 			}
 		}
 	} while (active && ++repeat < 10);
@@ -1275,24 +1259,17 @@ EXPORT_SYMBOL_GPL(azx_probe_codecs);
 int azx_codec_configure(struct azx *chip)
 {
 	struct hda_codec *codec, *next;
-	int success = 0;
 
-	list_for_each_codec(codec, &chip->bus) {
-		if (!snd_hda_codec_configure(codec))
-			success++;
+	/* use _safe version here since snd_hda_codec_configure() deregisters
+	 * the device upon error and deletes itself from the bus list.
+	 */
+	list_for_each_codec_safe(codec, next, &chip->bus) {
+		snd_hda_codec_configure(codec);
 	}
 
-	if (success) {
-		/* unregister failed codecs if any codec has been probed */
-		list_for_each_codec_safe(codec, next, &chip->bus) {
-			if (!codec->configured) {
-				codec_err(codec, "Unable to configure, disabling\n");
-				snd_hdac_device_unregister(&codec->core);
-			}
-		}
-	}
-
-	return success ? 0 : -ENODEV;
+	if (!azx_bus(chip)->num_codecs)
+		return -ENODEV;
+	return 0;
 }
 EXPORT_SYMBOL_GPL(azx_codec_configure);
 

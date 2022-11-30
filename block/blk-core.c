@@ -18,7 +18,6 @@
 #include <linux/bio.h>
 #include <linux/blkdev.h>
 #include <linux/blk-mq.h>
-#include <linux/blk-pm.h>
 #include <linux/highmem.h>
 #include <linux/mm.h>
 #include <linux/pagemap.h>
@@ -59,6 +58,13 @@ EXPORT_TRACEPOINT_SYMBOL_GPL(block_rq_remap);
 EXPORT_TRACEPOINT_SYMBOL_GPL(block_bio_complete);
 EXPORT_TRACEPOINT_SYMBOL_GPL(block_split);
 EXPORT_TRACEPOINT_SYMBOL_GPL(block_unplug);
+EXPORT_TRACEPOINT_SYMBOL_GPL(block_bio_queue);
+EXPORT_TRACEPOINT_SYMBOL_GPL(block_getrq);
+EXPORT_TRACEPOINT_SYMBOL_GPL(block_rq_insert);
+EXPORT_TRACEPOINT_SYMBOL_GPL(block_rq_issue);
+EXPORT_TRACEPOINT_SYMBOL_GPL(block_rq_merge);
+EXPORT_TRACEPOINT_SYMBOL_GPL(block_rq_requeue);
+EXPORT_TRACEPOINT_SYMBOL_GPL(block_rq_complete);
 
 DEFINE_IDA(blk_queue_ida);
 
@@ -398,10 +404,8 @@ void blk_cleanup_queue(struct request_queue *q)
 	del_timer_sync(&q->backing_dev_info->laptop_mode_wb_timer);
 	blk_sync_queue(q);
 
-	if (queue_is_mq(q)) {
-		blk_mq_cancel_work_sync(q);
+	if (queue_is_mq(q))
 		blk_mq_exit_queue(q);
-	}
 
 	/*
 	 * In theory, request pool of sched_tags belongs to request queue.
@@ -442,8 +446,7 @@ int blk_queue_enter(struct request_queue *q, blk_mq_req_flags_t flags)
 			 * responsible for ensuring that that counter is
 			 * globally visible before the queue is unfrozen.
 			 */
-			if ((pm && queue_rpm_status(q) != RPM_SUSPENDED) ||
-			    !blk_queue_pm_only(q)) {
+			if (pm || !blk_queue_pm_only(q)) {
 				success = true;
 			} else {
 				percpu_ref_put(&q->q_usage_counter);
@@ -468,7 +471,8 @@ int blk_queue_enter(struct request_queue *q, blk_mq_req_flags_t flags)
 
 		wait_event(q->mq_freeze_wq,
 			   (!q->mq_freeze_depth &&
-			    blk_pm_resume_queue(pm, q)) ||
+			    (pm || (blk_pm_request_resume(q),
+				    !blk_queue_pm_only(q)))) ||
 			   blk_queue_dying(q));
 		if (blk_queue_dying(q))
 			return -ENODEV;
@@ -519,15 +523,13 @@ static void blk_timeout_work(struct work_struct *work)
 struct request_queue *blk_alloc_queue(int node_id)
 {
 	struct request_queue *q;
-	struct request_queue_wrapper *q_wrapper;
 	int ret;
 
-	q_wrapper = kmem_cache_alloc_node(blk_requestq_cachep,
+	q = kmem_cache_alloc_node(blk_requestq_cachep,
 				GFP_KERNEL | __GFP_ZERO, node_id);
-	if (!q_wrapper)
+	if (!q)
 		return NULL;
 
-	q = &q_wrapper->q;
 	q->last_merge = NULL;
 
 	q->id = ida_simple_get(&blk_queue_ida, 0, 0, GFP_KERNEL);
@@ -598,7 +600,7 @@ fail_split:
 fail_id:
 	ida_simple_remove(&blk_queue_ida, q->id);
 fail_q:
-	kmem_cache_free(blk_requestq_cachep, q_wrapper);
+	kmem_cache_free(blk_requestq_cachep, q);
 	return NULL;
 }
 EXPORT_SYMBOL(blk_alloc_queue);
@@ -699,7 +701,7 @@ static inline bool bio_check_ro(struct bio *bio, struct hd_struct *part)
 {
 	const int op = bio_op(bio);
 
-	if (part->read_only && op_is_write(op)) {
+	if (part->policy && op_is_write(op)) {
 		char b[BDEVNAME_SIZE];
 
 		if (op_is_flush(bio->bi_opf) && !bio_sectors(bio))
@@ -901,8 +903,10 @@ static noinline_for_stack bool submit_bio_checks(struct bio *bio)
 	if (unlikely(!current->io_context))
 		create_task_io_context(current, GFP_ATOMIC, q->node);
 
-	if (blk_throtl_bio(bio))
+	if (blk_throtl_bio(bio)) {
+		blkcg_bio_issue_init(bio);
 		return false;
+	}
 
 	blk_cgroup_bio_start(bio);
 	blkcg_bio_issue_init(bio);
@@ -1099,6 +1103,15 @@ blk_qc_t submit_bio(struct bio *bio)
 			task_io_account_read(bio->bi_iter.bi_size);
 			count_vm_events(PGPGIN, count);
 		}
+
+		if (unlikely(block_dump)) {
+			char b[BDEVNAME_SIZE];
+			printk(KERN_DEBUG "%s(%d): %s block %Lu on %s (%u sectors)\n",
+			current->comm, task_pid_nr(current),
+				op_is_write(bio_op(bio)) ? "WRITE" : "READ",
+				(unsigned long long)bio->bi_iter.bi_sector,
+				bio_devname(bio, b), count);
+		}
 	}
 
 	/*
@@ -1253,12 +1266,12 @@ unsigned int blk_rq_err_bytes(const struct request *rq)
 }
 EXPORT_SYMBOL_GPL(blk_rq_err_bytes);
 
-void update_io_ticks(struct hd_struct *part, unsigned long now, bool end)
+static void update_io_ticks(struct hd_struct *part, unsigned long now, bool end)
 {
 	unsigned long stamp;
 again:
 	stamp = READ_ONCE(part->stamp);
-	if (unlikely(time_after(now, stamp))) {
+	if (unlikely(stamp != now)) {
 		if (likely(cmpxchg(&part->stamp, stamp, now) == stamp))
 			__part_stat_add(part, io_ticks, end ? now - stamp : 1);
 	}
@@ -1292,32 +1305,13 @@ void blk_account_io_done(struct request *req, u64 now)
 	    !(req->rq_flags & RQF_FLUSH_SEQ)) {
 		const int sgrp = op_stat_group(req_op(req));
 		struct hd_struct *part;
-#ifdef CONFIG_64BIT
-		u64 stat_time;
-		struct request_wrapper *rq_wrapper = request_to_wrapper(req);
-#endif
 
 		part_stat_lock();
 		part = req->part;
+
 		update_io_ticks(part, jiffies, true);
 		part_stat_inc(part, ios[sgrp]);
-#ifdef CONFIG_64BIT
-		stat_time = READ_ONCE(rq_wrapper->stat_time_ns);
-		/*
-		 * This might fail if 'stat_time_ns' is updated
-		 * in blk_mq_check_inflight_with_stat().
-		 */
-		if (likely(now > stat_time &&
-			   cmpxchg64(&rq_wrapper->stat_time_ns, stat_time, now)
-			   == stat_time)) {
-			u64 duation = stat_time ? now - stat_time :
-				now - req->start_time_ns;
-
-			part_stat_add(req->part, nsecs[sgrp], duation);
-		}
-#else
 		part_stat_add(part, nsecs[sgrp], now - req->start_time_ns);
-#endif
 		part_stat_unlock();
 
 		hd_struct_put(part);
@@ -1819,7 +1813,7 @@ int __init blk_dev_init(void)
 		panic("Failed to create kblockd\n");
 
 	blk_requestq_cachep = kmem_cache_create("request_queue",
-			sizeof(struct request_queue_wrapper), 0, SLAB_PANIC, NULL);
+			sizeof(struct request_queue), 0, SLAB_PANIC, NULL);
 
 	blk_debugfs_root = debugfs_create_dir("block", NULL);
 

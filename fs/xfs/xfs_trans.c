@@ -9,6 +9,7 @@
 #include "xfs_shared.h"
 #include "xfs_format.h"
 #include "xfs_log_format.h"
+#include "xfs_log_priv.h"
 #include "xfs_trans_resv.h"
 #include "xfs_mount.h"
 #include "xfs_extent_busy.h"
@@ -16,14 +17,9 @@
 #include "xfs_trans.h"
 #include "xfs_trans_priv.h"
 #include "xfs_log.h"
-#include "xfs_log_priv.h"
 #include "xfs_trace.h"
 #include "xfs_error.h"
 #include "xfs_defer.h"
-#include "xfs_inode.h"
-#include "xfs_dquot_item.h"
-#include "xfs_dquot.h"
-#include "xfs_icache.h"
 
 kmem_zone_t	*xfs_trans_zone;
 
@@ -260,7 +256,6 @@ xfs_trans_alloc(
 	struct xfs_trans	**tpp)
 {
 	struct xfs_trans	*tp;
-	bool			want_retry = true;
 	int			error;
 
 	/*
@@ -268,7 +263,6 @@ xfs_trans_alloc(
 	 * GFP_NOFS allocation context so that we avoid lockdep false positives
 	 * by doing GFP_KERNEL allocations inside sb_start_intwrite().
 	 */
-retry:
 	tp = kmem_cache_zalloc(xfs_trans_zone, GFP_KERNEL | __GFP_NOFAIL);
 	if (!(flags & XFS_TRANS_NO_WRITECOUNT))
 		sb_start_intwrite(mp->m_super);
@@ -291,19 +285,6 @@ retry:
 	tp->t_firstblock = NULLFSBLOCK;
 
 	error = xfs_trans_reserve(tp, resp, blocks, rtextents);
-	if (error == -ENOSPC && want_retry) {
-		xfs_trans_cancel(tp);
-
-		/*
-		 * We weren't able to reserve enough space for the transaction.
-		 * Flush the other speculative space allocations to free space.
-		 * Do not perform a synchronous scan because callers can hold
-		 * other locks.
-		 */
-		xfs_blockgc_flush_all(mp);
-		want_retry = false;
-		goto retry;
-	}
 	if (error) {
 		xfs_trans_cancel(tp);
 		return error;
@@ -491,6 +472,13 @@ xfs_trans_apply_sb_deltas(
 	sbp = bp->b_addr;
 
 	/*
+	 * Check that superblock mods match the mods made to AGF counters.
+	 */
+	ASSERT((tp->t_fdblocks_delta + tp->t_res_fdblocks_delta) ==
+	       (tp->t_ag_freeblks_delta + tp->t_ag_flist_delta +
+		tp->t_ag_btree_delta));
+
+	/*
 	 * Only update the superblock counters if we are logging them
 	 */
 	if (!xfs_sb_version_haslazysbcount(&(tp->t_mountp->m_sb))) {
@@ -632,9 +620,6 @@ xfs_trans_unreserve_and_mod_sb(
 
 	/* apply remaining deltas */
 	spin_lock(&mp->m_sb_lock);
-	mp->m_sb.sb_fdblocks += tp->t_fdblocks_delta + tp->t_res_fdblocks_delta;
-	mp->m_sb.sb_icount += idelta;
-	mp->m_sb.sb_ifree += ifreedelta;
 	mp->m_sb.sb_frextents += rtxdelta;
 	mp->m_sb.sb_dblocks += tp->t_dblocks_delta;
 	mp->m_sb.sb_agcount += tp->t_agcount_delta;
@@ -849,7 +834,7 @@ __xfs_trans_commit(
 	bool			regrant)
 {
 	struct xfs_mount	*mp = tp->t_mountp;
-	xfs_csn_t		commit_seq = 0;
+	xfs_lsn_t		commit_lsn = -1;
 	int			error = 0;
 	int			sync = tp->t_flags & XFS_TRANS_SYNC;
 
@@ -891,7 +876,7 @@ __xfs_trans_commit(
 		xfs_trans_apply_sb_deltas(tp);
 	xfs_trans_apply_dquot_deltas(tp);
 
-	xlog_cil_commit(mp->m_log, tp, &commit_seq, regrant);
+	xfs_log_commit_cil(mp, tp, &commit_lsn, regrant);
 
 	current_restore_flags_nested(&tp->t_pflags, PF_MEMALLOC_NOFS);
 	xfs_trans_free(tp);
@@ -901,7 +886,7 @@ __xfs_trans_commit(
 	 * log out now and wait for it.
 	 */
 	if (sync) {
-		error = xfs_log_force_seq(mp, commit_seq, XFS_LOG_SYNC, NULL);
+		error = xfs_log_force_lsn(mp, commit_lsn, XFS_LOG_SYNC, NULL);
 		XFS_STATS_INC(mp, xs_trans_sync);
 	} else {
 		XFS_STATS_INC(mp, xs_trans_async);
@@ -919,7 +904,7 @@ out_unreserve:
 	 */
 	xfs_trans_unreserve_and_mod_dquots(tp);
 	if (tp->t_ticket) {
-		if (regrant && !xlog_is_shutdown(mp->m_log))
+		if (regrant && !XLOG_FORCED_SHUTDOWN(mp->m_log))
 			xfs_log_ticket_regrant(mp->m_log, tp->t_ticket);
 		else
 			xfs_log_ticket_ungrant(mp->m_log, tp->t_ticket);
@@ -1038,184 +1023,4 @@ xfs_trans_roll(
 	 */
 	tres.tr_logflags = XFS_TRANS_PERM_LOG_RES;
 	return xfs_trans_reserve(*tpp, &tres, 0, 0);
-}
-
-/*
- * Allocate an transaction, lock and join the inode to it, and reserve quota.
- *
- * The caller must ensure that the on-disk dquots attached to this inode have
- * already been allocated and initialized.  The caller is responsible for
- * releasing ILOCK_EXCL if a new transaction is returned.
- */
-int
-xfs_trans_alloc_inode(
-	struct xfs_inode	*ip,
-	struct xfs_trans_res	*resv,
-	unsigned int		dblocks,
-	unsigned int		rblocks,
-	bool			force,
-	struct xfs_trans	**tpp)
-{
-	struct xfs_trans	*tp;
-	struct xfs_mount	*mp = ip->i_mount;
-	bool			retried = false;
-	int			error;
-
-retry:
-	error = xfs_trans_alloc(mp, resv, dblocks,
-			rblocks / mp->m_sb.sb_rextsize,
-			force ? XFS_TRANS_RESERVE : 0, &tp);
-	if (error)
-		return error;
-
-	xfs_ilock(ip, XFS_ILOCK_EXCL);
-	xfs_trans_ijoin(tp, ip, 0);
-
-	error = xfs_qm_dqattach_locked(ip, false);
-	if (error) {
-		/* Caller should have allocated the dquots! */
-		ASSERT(error != -ENOENT);
-		goto out_cancel;
-	}
-
-	error = xfs_trans_reserve_quota_nblks(tp, ip, dblocks, rblocks, force);
-	if ((error == -EDQUOT || error == -ENOSPC) && !retried) {
-		xfs_trans_cancel(tp);
-		xfs_iunlock(ip, XFS_ILOCK_EXCL);
-		xfs_blockgc_free_quota(ip, 0);
-		retried = true;
-		goto retry;
-	}
-	if (error)
-		goto out_cancel;
-
-	*tpp = tp;
-	return 0;
-
-out_cancel:
-	xfs_trans_cancel(tp);
-	xfs_iunlock(ip, XFS_ILOCK_EXCL);
-	return error;
-}
-
-/*
- * Allocate an transaction in preparation for inode creation by reserving quota
- * against the given dquots.  Callers are not required to hold any inode locks.
- */
-int
-xfs_trans_alloc_icreate(
-	struct xfs_mount	*mp,
-	struct xfs_trans_res	*resv,
-	struct xfs_dquot	*udqp,
-	struct xfs_dquot	*gdqp,
-	struct xfs_dquot	*pdqp,
-	unsigned int		dblocks,
-	struct xfs_trans	**tpp)
-{
-	struct xfs_trans	*tp;
-	bool			retried = false;
-	int			error;
-
-retry:
-	error = xfs_trans_alloc(mp, resv, dblocks, 0, 0, &tp);
-	if (error)
-		return error;
-
-	error = xfs_trans_reserve_quota_icreate(tp, udqp, gdqp, pdqp, dblocks);
-	if ((error == -EDQUOT || error == -ENOSPC) && !retried) {
-		xfs_trans_cancel(tp);
-		xfs_blockgc_free_dquots(mp, udqp, gdqp, pdqp, 0);
-		retried = true;
-		goto retry;
-	}
-	if (error) {
-		xfs_trans_cancel(tp);
-		return error;
-	}
-
-	*tpp = tp;
-	return 0;
-}
-
-/*
- * Allocate an transaction, lock and join the inode to it, and reserve quota
- * in preparation for inode attribute changes that include uid, gid, or prid
- * changes.
- *
- * The caller must ensure that the on-disk dquots attached to this inode have
- * already been allocated and initialized.  The ILOCK will be dropped when the
- * transaction is committed or cancelled.
- */
-int
-xfs_trans_alloc_ichange(
-	struct xfs_inode	*ip,
-	struct xfs_dquot	*new_udqp,
-	struct xfs_dquot	*new_gdqp,
-	struct xfs_dquot	*new_pdqp,
-	bool			force,
-	struct xfs_trans	**tpp)
-{
-	struct xfs_trans	*tp;
-	struct xfs_mount	*mp = ip->i_mount;
-	struct xfs_dquot	*udqp;
-	struct xfs_dquot	*gdqp;
-	struct xfs_dquot	*pdqp;
-	bool			retried = false;
-	int			error;
-
-retry:
-	error = xfs_trans_alloc(mp, &M_RES(mp)->tr_ichange, 0, 0, 0, &tp);
-	if (error)
-		return error;
-
-	xfs_ilock(ip, XFS_ILOCK_EXCL);
-	xfs_trans_ijoin(tp, ip, XFS_ILOCK_EXCL);
-
-	error = xfs_qm_dqattach_locked(ip, false);
-	if (error) {
-		/* Caller should have allocated the dquots! */
-		ASSERT(error != -ENOENT);
-		goto out_cancel;
-	}
-
-	/*
-	 * For each quota type, skip quota reservations if the inode's dquots
-	 * now match the ones that came from the caller, or the caller didn't
-	 * pass one in.  The inode's dquots can change if we drop the ILOCK to
-	 * perform a blockgc scan, so we must preserve the caller's arguments.
-	 */
-	udqp = (new_udqp != ip->i_udquot) ? new_udqp : NULL;
-	gdqp = (new_gdqp != ip->i_gdquot) ? new_gdqp : NULL;
-	pdqp = (new_pdqp != ip->i_pdquot) ? new_pdqp : NULL;
-	if (udqp || gdqp || pdqp) {
-		unsigned int	qflags = XFS_QMOPT_RES_REGBLKS;
-
-		if (force)
-			qflags |= XFS_QMOPT_FORCE_RES;
-
-		/*
-		 * Reserve enough quota to handle blocks on disk and reserved
-		 * for a delayed allocation.  We'll actually transfer the
-		 * delalloc reservation between dquots at chown time, even
-		 * though that part is only semi-transactional.
-		 */
-		error = xfs_trans_reserve_quota_bydquots(tp, mp, udqp, gdqp,
-				pdqp, ip->i_d.di_nblocks + ip->i_delayed_blks,
-				1, qflags);
-		if ((error == -EDQUOT || error == -ENOSPC) && !retried) {
-			xfs_trans_cancel(tp);
-			xfs_blockgc_free_dquots(mp, udqp, gdqp, pdqp, 0);
-			retried = true;
-			goto retry;
-		}
-		if (error)
-			goto out_cancel;
-	}
-
-	*tpp = tp;
-	return 0;
-
-out_cancel:
-	xfs_trans_cancel(tp);
-	return error;
 }

@@ -148,29 +148,17 @@ enum print_line_t {
 
 enum print_line_t trace_handle_return(struct trace_seq *s);
 
-static inline void tracing_generic_entry_update(struct trace_entry *entry,
-						unsigned short type,
-						unsigned int trace_ctx)
-{
-	struct task_struct *tsk = current;
-
-	entry->preempt_count		= trace_ctx & 0xff;
-	entry->pid			= (tsk) ? tsk->pid : 0;
-	entry->type			= type;
-	entry->flags =			trace_ctx >> 16;
-}
-
-unsigned int tracing_gen_ctx_flags(unsigned long irqflags);
-unsigned int tracing_gen_ctx(void);
-unsigned int tracing_gen_ctx_dec(void);
-
+void tracing_generic_entry_update(struct trace_entry *entry,
+				  unsigned short type,
+				  unsigned long flags,
+				  int pc);
 struct trace_event_file;
 
 struct ring_buffer_event *
 trace_event_buffer_lock_reserve(struct trace_buffer **current_buffer,
 				struct trace_event_file *trace_file,
 				int type, unsigned long len,
-				unsigned int trace_ctx);
+				unsigned long flags, int pc);
 
 #define TRACE_RECORD_CMDLINE	BIT(0)
 #define TRACE_RECORD_TGID	BIT(1)
@@ -244,7 +232,8 @@ struct trace_event_buffer {
 	struct ring_buffer_event	*event;
 	struct trace_event_file		*trace_file;
 	void				*entry;
-	unsigned int			trace_ctx;
+	unsigned long			flags;
+	int				pc;
 	struct pt_regs			*regs;
 };
 
@@ -582,7 +571,7 @@ struct trace_event_file {
 
 #define PERF_MAX_TRACE_SIZE	2048
 
-#define MAX_FILTER_STR_VAL	256U	/* Should handle KSYM_SYMBOL_LEN */
+#define MAX_FILTER_STR_VAL	256	/* Should handle KSYM_SYMBOL_LEN */
 
 enum event_trigger_type {
 	ETT_NONE		= (0),

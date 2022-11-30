@@ -108,9 +108,14 @@ static void trace_hwlat_sample(struct hwlat_sample *sample)
 	struct trace_buffer *buffer = tr->array_buffer.buffer;
 	struct ring_buffer_event *event;
 	struct hwlat_entry *entry;
+	unsigned long flags;
+	int pc;
+
+	pc = preempt_count();
+	local_save_flags(flags);
 
 	event = trace_buffer_lock_reserve(buffer, TRACE_HWLAT, sizeof(*entry),
-					  tracing_gen_ctx());
+					  flags, pc);
 	if (!event)
 		return;
 	entry	= ring_buffer_event_data(event);
@@ -544,14 +549,14 @@ static int init_tracefs(void)
 	if (!top_dir)
 		return -ENOMEM;
 
-	hwlat_sample_window = tracefs_create_file("window", TRACE_MODE_WRITE,
+	hwlat_sample_window = tracefs_create_file("window", 0640,
 						  top_dir,
 						  &hwlat_data.sample_window,
 						  &window_fops);
 	if (!hwlat_sample_window)
 		goto err;
 
-	hwlat_sample_width = tracefs_create_file("width", TRACE_MODE_WRITE,
+	hwlat_sample_width = tracefs_create_file("width", 0644,
 						 top_dir,
 						 &hwlat_data.sample_width,
 						 &width_fops);

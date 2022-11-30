@@ -45,13 +45,10 @@
 #include <linux/memcontrol.h>
 #include <linux/bpf-cgroup.h>
 #include <linux/siphash.h>
-#include <linux/kabi.h>
 
 extern struct inet_hashinfo tcp_hashinfo;
 
-DECLARE_PER_CPU(unsigned int, tcp_orphan_count);
-int tcp_orphan_count_sum(void);
-
+extern struct percpu_counter tcp_orphan_count;
 void tcp_time_wait(struct sock *sk, int state, int timeo);
 
 #define MAX_TCP_HEADER	L1_CACHE_ALIGN(128 + MAX_HEADER)
@@ -195,7 +192,6 @@ void tcp_time_wait(struct sock *sk, int state, int timeo);
  */
 #define TCPOPT_FASTOPEN_MAGIC	0xF989
 #define TCPOPT_SMC_MAGIC	0xE2D4C3D9
-#define TCPOPT_COMP_MAGIC	0x7954
 
 /*
  *     TCP option lengths
@@ -209,7 +205,6 @@ void tcp_time_wait(struct sock *sk, int state, int timeo);
 #define TCPOLEN_FASTOPEN_BASE  2
 #define TCPOLEN_EXP_FASTOPEN_BASE  4
 #define TCPOLEN_EXP_SMC_BASE   6
-#define TCPOLEN_EXP_COMP_BASE  4
 
 /* But this is what stacks really send out. */
 #define TCPOLEN_TSTAMP_ALIGNED		12
@@ -294,6 +289,19 @@ static inline bool tcp_out_of_memory(struct sock *sk)
 }
 
 void sk_forced_mem_schedule(struct sock *sk, int size);
+
+static inline bool tcp_too_many_orphans(struct sock *sk, int shift)
+{
+	struct percpu_counter *ocp = sk->sk_prot->orphan_count;
+	int orphans = percpu_counter_read_positive(ocp);
+
+	if (orphans << shift > sysctl_tcp_max_orphans) {
+		orphans = percpu_counter_sum_positive(ocp);
+		if (orphans << shift > sysctl_tcp_max_orphans)
+			return true;
+	}
+	return false;
+}
 
 bool tcp_check_oom(struct sock *sk, int shift);
 
@@ -463,7 +471,6 @@ int __cookie_v4_check(const struct iphdr *iph, const struct tcphdr *th,
 		      u32 cookie);
 struct sock *cookie_v4_check(struct sock *sk, struct sk_buff *skb);
 struct request_sock *cookie_tcp_reqsk_alloc(const struct request_sock_ops *ops,
-					    const struct tcp_request_sock_ops *af_ops,
 					    struct sock *sk, struct sk_buff *skb);
 #ifdef CONFIG_SYN_COOKIES
 
@@ -602,7 +609,6 @@ void tcp_synack_rtt_meas(struct sock *sk, struct request_sock *req);
 void tcp_reset(struct sock *sk);
 void tcp_skb_mark_lost_uncond_verify(struct tcp_sock *tp, struct sk_buff *skb);
 void tcp_fin(struct sock *sk);
-void tcp_check_space(struct sock *sk);
 
 /* tcp_timer.c */
 void tcp_init_xmit_timers(struct sock *);
@@ -1089,11 +1095,6 @@ struct tcp_congestion_ops {
 
 	char 		name[TCP_CA_NAME_MAX];
 	struct module 	*owner;
-
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
-	KABI_RESERVE(3)
-	KABI_RESERVE(4)
 };
 
 int tcp_register_congestion_control(struct tcp_congestion_ops *type);
@@ -2381,43 +2382,5 @@ static inline u64 tcp_transmit_time(const struct sock *sk)
 	}
 	return 0;
 }
-
-#if IS_ENABLED(CONFIG_TCP_COMP)
-extern struct static_key_false tcp_have_comp;
-
-extern unsigned long *sysctl_tcp_compression_ports;
-extern int sysctl_tcp_compression_local;
-
-bool tcp_syn_comp_enabled(const struct sock *sk);
-bool tcp_synack_comp_enabled(const struct sock *sk,
-			     const struct inet_request_sock *ireq);
-void tcp_init_compression(struct sock *sk);
-void tcp_cleanup_compression(struct sock *sk);
-int tcp_comp_init(void);
-#else
-static inline bool tcp_syn_comp_enabled(const struct tcp_sock *tp)
-{
-	return false;
-}
-
-static inline bool tcp_synack_comp_enabled(const struct sock *sk,
-					   const struct inet_request_sock *ireq)
-{
-	return false;
-}
-
-static inline void tcp_init_compression(struct sock *sk)
-{
-}
-
-static inline void tcp_cleanup_compression(struct sock *sk)
-{
-}
-
-static inline int tcp_comp_init(void)
-{
-	return 0;
-}
-#endif
 
 #endif	/* _TCP_H */

@@ -492,9 +492,7 @@ static void skge_get_strings(struct net_device *dev, u32 stringset, u8 *data)
 }
 
 static void skge_get_ring_param(struct net_device *dev,
-				struct ethtool_ringparam *p,
-				struct kernel_ethtool_ringparam *kernel_p,
-				struct netlink_ext_ack *extack)
+				struct ethtool_ringparam *p)
 {
 	struct skge_port *skge = netdev_priv(dev);
 
@@ -506,9 +504,7 @@ static void skge_get_ring_param(struct net_device *dev,
 }
 
 static int skge_set_ring_param(struct net_device *dev,
-			       struct ethtool_ringparam *p,
-			       struct kernel_ethtool_ringparam *kernel_p,
-			       struct netlink_ext_ack *extack)
+			       struct ethtool_ringparam *p)
 {
 	struct skge_port *skge = netdev_priv(dev);
 	int err = 0;
@@ -619,9 +615,7 @@ static inline u32 skge_usecs2clk(const struct skge_hw *hw, u32 usec)
 }
 
 static int skge_get_coalesce(struct net_device *dev,
-			     struct ethtool_coalesce *ecmd,
-			     struct kernel_ethtool_coalesce *kernel_coal,
-			     struct netlink_ext_ack *extack)
+			     struct ethtool_coalesce *ecmd)
 {
 	struct skge_port *skge = netdev_priv(dev);
 	struct skge_hw *hw = skge->hw;
@@ -645,9 +639,7 @@ static int skge_get_coalesce(struct net_device *dev,
 
 /* Note: interrupt timer is per board, but can turn on/off per port */
 static int skge_set_coalesce(struct net_device *dev,
-			     struct ethtool_coalesce *ecmd,
-			     struct kernel_ethtool_coalesce *kernel_coal,
-			     struct netlink_ext_ack *extack)
+			     struct ethtool_coalesce *ecmd)
 {
 	struct skge_port *skge = netdev_priv(dev);
 	struct skge_hw *hw = skge->hw;

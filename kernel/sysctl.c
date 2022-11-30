@@ -71,7 +71,6 @@
 #include <linux/coredump.h>
 #include <linux/latencytop.h>
 #include <linux/pid.h>
-#include <linux/share_pool.h>
 
 #include "../lib/kstrtox.h"
 
@@ -107,6 +106,9 @@
 
 #if defined(CONFIG_SYSCTL)
 
+/* External variables not in a header file. */
+extern int extra_free_kbytes;
+
 /* Constants used for minimum and  maximum */
 #ifdef CONFIG_LOCKUP_DETECTOR
 static int sixty = 60;
@@ -114,9 +116,7 @@ static int sixty = 60;
 
 static int __maybe_unused neg_one = -1;
 static int __maybe_unused two = 2;
-static int __maybe_unused three = 3;
 static int __maybe_unused four = 4;
-static int __maybe_unused five = 5;
 static unsigned long zero_ul;
 static unsigned long one_ul = 1;
 static unsigned long long_max = LONG_MAX;
@@ -125,9 +125,6 @@ static int two_hundred = 200;
 static int one_thousand = 1000;
 #ifdef CONFIG_PRINTK
 static int ten_thousand = 10000;
-#endif
-#ifdef CONFIG_QOS_SCHED
-static int hundred_thousand = 100000;
 #endif
 #ifdef CONFIG_PERF_EVENTS
 static int six_hundred_forty_kb = 640 * 1024;
@@ -239,34 +236,7 @@ static int bpf_stats_handler(struct ctl_table *table, int write,
 	mutex_unlock(&bpf_stats_enabled_mutex);
 	return ret;
 }
-
-void __weak unpriv_ebpf_notify(int new_state)
-{
-}
-
-static int bpf_unpriv_handler(struct ctl_table *table, int write,
-			      void *buffer, size_t *lenp, loff_t *ppos)
-{
-	int ret, unpriv_enable = *(int *)table->data;
-	bool locked_state = unpriv_enable == 1;
-	struct ctl_table tmp = *table;
-
-	if (write && !capable(CAP_SYS_ADMIN))
-		return -EPERM;
-
-	tmp.data = &unpriv_enable;
-	ret = proc_dointvec_minmax(&tmp, write, buffer, lenp, ppos);
-	if (write && !ret) {
-		if (locked_state && unpriv_enable != 1)
-			return -EPERM;
-		*(int *)table->data = unpriv_enable;
-	}
-
-	unpriv_ebpf_notify(unpriv_enable);
-
-	return ret;
-}
-#endif /* CONFIG_BPF_SYSCALL && CONFIG_SYSCTL */
+#endif
 
 /*
  * /proc/sys support
@@ -1190,11 +1160,10 @@ static int __do_proc_doulongvec_minmax(void *data, struct ctl_table *table,
 			err = proc_get_long(&p, &left, &val, &neg,
 					     proc_wspace_sep,
 					     sizeof(proc_wspace_sep), NULL);
-			if (err || neg) {
-				err = -EINVAL;
+			if (err)
 				break;
-			}
-
+			if (neg)
+				continue;
 			val = convmul * val / convdiv;
 			if ((min && val < *min) || (max && val > *max)) {
 				err = -EINVAL;
@@ -2215,6 +2184,15 @@ static struct ctl_table kern_table[] = {
 	},
 #endif /* CONFIG_SMP */
 	{
+		.procname	= "pid_max",
+		.data		= &pid_max,
+		.maxlen		= sizeof (int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &pid_max_min,
+		.extra2		= &pid_max_max,
+	},
+	{
 		.procname	= "panic_on_oops",
 		.data		= &panic_on_oops,
 		.maxlen		= sizeof(int),
@@ -2386,17 +2364,6 @@ static struct ctl_table kern_table[] = {
 		.extra2		= SYSCTL_ONE,
 	},
 #endif /* CONFIG_SMP */
-#endif
-#ifdef CONFIG_CORELOCKUP_DETECTOR
-	{
-		.procname	= "corelockup_thresh",
-		.data		= &corelockup_miss_thresh,
-		.maxlen		= sizeof(int),
-		.mode		= 0644,
-		.proc_handler	= proc_dointvec_minmax,
-		.extra1		= &three,
-		.extra2		= &five,
-	},
 #endif
 #endif
 
@@ -2662,9 +2629,10 @@ static struct ctl_table kern_table[] = {
 		.data		= &sysctl_unprivileged_bpf_disabled,
 		.maxlen		= sizeof(sysctl_unprivileged_bpf_disabled),
 		.mode		= 0644,
-		.proc_handler	= bpf_unpriv_handler,
-		.extra1		= SYSCTL_ZERO,
-		.extra2		= &two,
+		/* only handle a transition from default "0" to "1" */
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ONE,
+		.extra2		= SYSCTL_ONE,
 	},
 	{
 		.procname	= "bpf_stats_enabled",
@@ -2696,26 +2664,6 @@ static struct ctl_table kern_table[] = {
 		.extra2		= SYSCTL_ONE,
 	},
 #endif
-#ifdef CONFIG_QOS_SCHED
-	{
-		.procname	= "qos_overload_detect_period_ms",
-		.data		= &sysctl_overload_detect_period,
-		.maxlen		= sizeof(unsigned int),
-		.mode		= 0644,
-		.proc_handler	= proc_dointvec_minmax,
-		.extra1		= &one_hundred,
-		.extra2		= &hundred_thousand,
-	},
-	{
-		.procname	= "qos_offline_wait_interval_ms",
-		.data		= &sysctl_offline_wait_interval,
-		.maxlen		= sizeof(unsigned int),
-		.mode		= 0644,
-		.proc_handler	= proc_dointvec_minmax,
-		.extra1		= &one_hundred,
-		.extra2		= &one_thousand,
-	},
-#endif
 	{ }
 };
 
@@ -2738,17 +2686,6 @@ static struct ctl_table vm_table[] = {
 		.extra1		= SYSCTL_ZERO,
 		.extra2		= &two,
 	},
-#ifdef CONFIG_ASCEND_OOM
-	{
-		.procname	= "enable_oom_killer",
-		.data		= &sysctl_enable_oom_killer,
-		.maxlen		= sizeof(sysctl_enable_oom_killer),
-		.mode		= 0644,
-		.proc_handler	= proc_dointvec_minmax,
-		.extra1		= SYSCTL_ZERO,
-		.extra2		= SYSCTL_ONE,
-	},
-#endif
 	{
 		.procname	= "oom_kill_allocating_task",
 		.data		= &sysctl_oom_kill_allocating_task,
@@ -2892,17 +2829,6 @@ static struct ctl_table vm_table[] = {
 		.proc_handler	= hugetlb_overcommit_handler,
 	},
 #endif
-#ifdef CONFIG_MEMCG_QOS
-	{
-		.procname	= "memcg_qos_enable",
-		.data		= &sysctl_memcg_qos_stat,
-		.maxlen		= sizeof(int),
-		.mode		= 0644,
-		.proc_handler	= sysctl_memcg_qos_handler,
-		.extra1		= SYSCTL_ZERO,
-		.extra2		= SYSCTL_ONE,
-	},
-#endif
 	{
 		.procname	= "lowmem_reserve_ratio",
 		.data		= &sysctl_lowmem_reserve_ratio,
@@ -2932,7 +2858,7 @@ static struct ctl_table vm_table[] = {
 		.data		= &sysctl_compaction_proactiveness,
 		.maxlen		= sizeof(sysctl_compaction_proactiveness),
 		.mode		= 0644,
-		.proc_handler	= proc_dointvec_minmax,
+		.proc_handler	= compaction_proactiveness_sysctl_handler,
 		.extra1		= SYSCTL_ZERO,
 		.extra2		= &one_hundred,
 	},
@@ -2982,6 +2908,14 @@ static struct ctl_table vm_table[] = {
 		.extra2		= &one_thousand,
 	},
 	{
+		.procname	= "extra_free_kbytes",
+		.data		= &extra_free_kbytes,
+		.maxlen		= sizeof(extra_free_kbytes),
+		.mode		= 0644,
+		.proc_handler	= min_free_kbytes_sysctl_handler,
+		.extra1		= SYSCTL_ZERO,
+	},
+	{
 		.procname	= "percpu_pagelist_fraction",
 		.data		= &percpu_pagelist_fraction,
 		.maxlen		= sizeof(percpu_pagelist_fraction),
@@ -3022,6 +2956,14 @@ static struct ctl_table vm_table[] = {
 		.maxlen		= sizeof(laptop_mode),
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec_jiffies,
+	},
+	{
+		.procname	= "block_dump",
+		.data		= &block_dump,
+		.maxlen		= sizeof(block_dump),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ZERO,
 	},
 	{
 		.procname	= "vfs_cache_pressure",
@@ -3196,92 +3138,6 @@ static struct ctl_table vm_table[] = {
 		.proc_handler	= proc_dointvec_minmax,
 		.extra1		= SYSCTL_ZERO,
 		.extra2		= SYSCTL_ONE,
-	},
-#endif
-#ifdef CONFIG_ASCEND_SHARE_POOL
-	{
-		.procname	= "sharepool_debug_mode",
-		.data		= &sysctl_sp_debug_mode,
-		.maxlen		= sizeof(sysctl_sp_debug_mode),
-		.mode		= 0600,
-		.proc_handler	= proc_dointvec_minmax,
-		.extra1		= SYSCTL_ZERO,
-		.extra2		= SYSCTL_ONE,
-	},
-	{
-		.procname	= "sharepool_compact_enable",
-		.data		= &sysctl_sp_compact_enable,
-		.maxlen		= sizeof(sysctl_sp_compact_enable),
-		.mode		= 0600,
-		.proc_handler	= proc_dointvec_minmax,
-		.extra1		= SYSCTL_ZERO,
-		.extra2		= SYSCTL_ONE,
-	},
-	{
-		.procname	= "sharepool_compact_interval",
-		.data		= &sysctl_sp_compact_interval,
-		.maxlen		= sizeof(sysctl_sp_compact_interval),
-		.mode		= 0600,
-		.proc_handler	= proc_doulongvec_minmax,
-		.extra1		= &zero_ul,
-		.extra2		= &sysctl_sp_compact_interval_max,
-	},
-	{
-		/* 0: map_unlock, 1: map_lock */
-		.procname	= "share_pool_map_lock_enable",
-		.data		= &sysctl_share_pool_map_lock_enable,
-		.maxlen		= sizeof(int),
-		.mode		= 0644,
-		.proc_handler	= proc_dointvec_minmax,
-		.extra1		= SYSCTL_ZERO,
-		.extra2		= SYSCTL_ONE,
-	},
-	{
-		.procname	= "sharepool_perf_k2u",
-		.data		= &sysctl_sp_perf_k2u,
-		.maxlen		= sizeof(sysctl_sp_perf_k2u),
-		.mode		= 0600,
-		.proc_handler	= proc_dointvec_minmax,
-		.extra1		= SYSCTL_ZERO,
-		.extra2		= &ten_thousand,
-	},
-	{
-		.procname	= "sharepool_perf_alloc",
-		.data		= &sysctl_sp_perf_alloc,
-		.maxlen		= sizeof(sysctl_sp_perf_alloc),
-		.mode		= 0600,
-		.proc_handler	= proc_dointvec_minmax,
-		.extra1		= SYSCTL_ZERO,
-		.extra2		= &ten_thousand,
-	},
-	{
-		.procname	= "sharepool_ac_mode",
-		.data		= &sysctl_ac_mode,
-		.maxlen		= sizeof(sysctl_ac_mode),
-		.mode		= 0600,
-		.proc_handler	= proc_dointvec_minmax,
-		.extra1		= SYSCTL_ZERO,
-		.extra2		= SYSCTL_ONE,
-	},
-#endif
-#ifdef CONFIG_HUGETLBFS
-	{
-		.procname       = "hugepage_mig_noalloc",
-		.data           = &sysctl_hugetlb_mig_noalloc,
-		.maxlen         = sizeof(sysctl_hugetlb_mig_noalloc),
-		.mode           = 0600,
-		.proc_handler   = proc_dointvec_minmax,
-		.extra1         = SYSCTL_ZERO,
-		.extra2         = SYSCTL_ONE,
-	},
-	{
-		.procname       = "hugepage_pmem_allocall",
-		.data           = &sysctl_hugetlb_pmem_allocall,
-		.maxlen         = sizeof(sysctl_hugetlb_pmem_allocall),
-		.mode           = 0600,
-		.proc_handler   = proc_dointvec_minmax,
-		.extra1         = SYSCTL_ZERO,
-		.extra2         = SYSCTL_ONE,
 	},
 #endif
 	{ }

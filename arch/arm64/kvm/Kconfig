@@ -28,7 +28,6 @@ menuconfig KVM
 	select HAVE_KVM_ARCH_TLB_FLUSH_ALL
 	select KVM_MMIO
 	select KVM_GENERIC_DIRTYLOG_READ_PROTECT
-	select KVM_XFER_TO_GUEST_WORK
 	select SRCU
 	select KVM_VFIO
 	select HAVE_KVM_EVENTFD
@@ -49,14 +48,6 @@ menuconfig KVM
 if KVM
 
 source "virt/kvm/Kconfig"
-
-config KVM_ARM_PMU
-	bool "Virtual Performance Monitoring Unit (PMU) support"
-	depends on HW_PERF_EVENTS
-	default y
-	help
-	  Adds support for a virtual Performance Monitoring Unit (PMU) in
-	  virtual machines.
 
 endif # KVM
 

@@ -549,30 +549,6 @@ static ssize_t node_read_distance(struct device *dev,
 }
 static DEVICE_ATTR(distance, 0444, node_read_distance, NULL);
 
-static ssize_t type_show(struct device *dev,
-		struct device_attribute *attr, char *buf)
-{
-	int nid = dev->id;
-	char *type_str;
-	enum node_type type;
-
-	type = get_node_type(nid);
-	switch (type) {
-	case NODE_TYPE_DRAM:
-		type_str = "dram\n";
-		break;
-	case NODE_TYPE_PMEM:
-		type_str = "pmem\n";
-		break;
-	default:
-		type_str = "unknown\n";
-		break;
-	}
-
-	return sprintf(buf, type_str);
-}
-static DEVICE_ATTR_RO(type);
-
 static struct attribute *node_dev_attrs[] = {
 	&dev_attr_cpumap.attr,
 	&dev_attr_cpulist.attr,
@@ -580,7 +556,6 @@ static struct attribute *node_dev_attrs[] = {
 	&dev_attr_numastat.attr,
 	&dev_attr_distance.attr,
 	&dev_attr_vmstat.attr,
-	&dev_attr_type.attr,
 	NULL
 };
 ATTRIBUTE_GROUPS(node_dev);
@@ -680,7 +655,6 @@ static int register_node(struct node *node, int num)
  */
 void unregister_node(struct node *node)
 {
-	compaction_unregister_node(node);
 	hugetlb_unregister_node(node);		/* no-op, if memoryless node */
 	node_remove_accesses(node);
 	node_remove_caches(node);
@@ -1042,9 +1016,6 @@ static struct node_attr node_state_attr[] = {
 	[N_CPU] = _NODE_ATTR(has_cpu, N_CPU),
 	[N_GENERIC_INITIATOR] = _NODE_ATTR(has_generic_initiator,
 					   N_GENERIC_INITIATOR),
-#ifdef CONFIG_COHERENT_DEVICE
-	[N_COHERENT_DEVICE] = _NODE_ATTR(is_cdm_node, N_COHERENT_DEVICE),
-#endif
 };
 
 static struct attribute *node_state_attrs[] = {
@@ -1057,9 +1028,6 @@ static struct attribute *node_state_attrs[] = {
 	&node_state_attr[N_MEMORY].attr.attr,
 	&node_state_attr[N_CPU].attr.attr,
 	&node_state_attr[N_GENERIC_INITIATOR].attr.attr,
-#ifdef CONFIG_COHERENT_DEVICE
-	&node_state_attr[N_COHERENT_DEVICE].attr.attr,
-#endif
 	NULL
 };
 

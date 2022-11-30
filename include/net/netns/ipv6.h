@@ -7,9 +7,9 @@
 
 #ifndef __NETNS_IPV6_H__
 #define __NETNS_IPV6_H__
+#include <linux/android_kabi.h>
 #include <net/dst_ops.h>
 #include <uapi/linux/icmpv6.h>
-#include <linux/kabi.h>
 
 struct ctl_table_header;
 
@@ -79,15 +79,10 @@ struct netns_ipv6 {
 	struct dst_ops		ip6_dst_ops;
 	rwlock_t		fib6_walker_lock;
 	spinlock_t		fib6_gc_lock;
-	KABI_REPLACE(unsigned int ip6_rt_gc_expire, atomic_t ip6_rt_gc_expire)
-	unsigned long		ip6_rt_last_gc;
+	unsigned int		 ip6_rt_gc_expire;
+	unsigned long		 ip6_rt_last_gc;
 #ifdef CONFIG_IPV6_MULTIPLE_TABLES
 	unsigned int		fib6_rules_require_fldissect;
-#endif
-#ifndef __GENKSYMS__
-	unsigned char		flowlabel_has_excl;
-#endif
-#ifdef CONFIG_IPV6_MULTIPLE_TABLES
 	bool			fib6_has_custom_rules;
 #ifdef CONFIG_IPV6_SUBTREES
 	unsigned int		fib6_routes_require_src;
@@ -122,7 +117,7 @@ struct netns_ipv6 {
 		u32		seq;
 	} ip6addrlbl_table;
 
-	KABI_RESERVE(1)
+	ANDROID_KABI_RESERVE(1);
 };
 
 #if IS_ENABLED(CONFIG_NF_DEFRAG_IPV6)

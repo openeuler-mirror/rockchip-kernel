@@ -15,6 +15,7 @@
 #include <asm-generic/export.h>
 
 #include <asm/asm-offsets.h>
+#include <asm/asm-bug.h>
 #include <asm/alternative.h>
 #include <asm/cpufeature.h>
 #include <asm/cputype.h>
@@ -104,13 +105,6 @@
  */
 	.macro	csdb
 	hint	#20
-	.endm
-
-/*
- * Clear Branch History instruction
- */
-	.macro clearbhb
-	hint	#22
 	.endm
 
 /*
@@ -286,12 +280,24 @@ alternative_endif
  * provide the system wide safe value from arm64_ftr_reg_ctrel0.sys_val
  */
 	.macro	read_ctr, reg
+#ifndef __KVM_NVHE_HYPERVISOR__
 alternative_if_not ARM64_MISMATCHED_CACHE_TYPE
 	mrs	\reg, ctr_el0			// read CTR
 	nop
 alternative_else
 	ldr_l	\reg, arm64_ftr_reg_ctrel0 + ARM64_FTR_SYSVAL
 alternative_endif
+#else
+alternative_if_not ARM64_KVM_PROTECTED_MODE
+	ASM_BUG()
+alternative_else_nop_endif
+alternative_cb kvm_compute_final_ctr_el0
+	movz	\reg, #0
+	movk	\reg, #0, lsl #16
+	movk	\reg, #0, lsl #32
+	movk	\reg, #0, lsl #48
+alternative_cb_end
+#endif
 	.endm
 
 
@@ -489,7 +495,7 @@ USER(\label, ic	ivau, \tmp2)			// invalidate I line PoU
 #define NOKPROBE(x)
 #endif
 
-#ifdef CONFIG_KASAN
+#if defined(CONFIG_KASAN_GENERIC) || defined(CONFIG_KASAN_SW_TAGS)
 #define EXPORT_SYMBOL_NOKASAN(name)
 #else
 #define EXPORT_SYMBOL_NOKASAN(name)	EXPORT_SYMBOL(name)
@@ -691,6 +697,31 @@ USER(\label, ic	ivau, \tmp2)			// invalidate I line PoU
 	.endif
 	.endm
 
+/*
+ * Set SCTLR_ELx to the @reg value, and invalidate the local icache
+ * in the process. This is called when setting the MMU on.
+ */
+.macro set_sctlr, sreg, reg
+	msr	\sreg, \reg
+	isb
+	/*
+	 * Invalidate the local I-cache so that any instructions fetched
+	 * speculatively from the PoC are discarded, since they may have
+	 * been dynamically patched at the PoU.
+	 */
+	ic	iallu
+	dsb	nsh
+	isb
+.endm
+
+.macro set_sctlr_el1, reg
+	set_sctlr sctlr_el1, \reg
+.endm
+
+.macro set_sctlr_el2, reg
+	set_sctlr sctlr_el2, \reg
+.endm
+
 	/*
 	 * Check whether preempt/bh-disabled asm code should yield as soon as
 	 * it is able. This is the case if we are currently running in task
@@ -770,30 +801,4 @@ USER(\label, ic	ivau, \tmp2)			// invalidate I line PoU
 
 #endif /* GNU_PROPERTY_AARCH64_FEATURE_1_DEFAULT */
 
-	.macro __mitigate_spectre_bhb_loop      tmp
-#ifdef CONFIG_MITIGATE_SPECTRE_BRANCH_HISTORY
-alternative_cb  spectre_bhb_patch_loop_iter
-	mov	\tmp, #32		// Patched to correct the immediate
-alternative_cb_end
-.Lspectre_bhb_loop\@:
-	b	. + 4
-	subs	\tmp, \tmp, #1
-	b.ne	.Lspectre_bhb_loop\@
-	sb
-#endif /* CONFIG_MITIGATE_SPECTRE_BRANCH_HISTORY */
-	.endm
-
-	/* Save/restores x0-x3 to the stack */
-	.macro __mitigate_spectre_bhb_fw
-#ifdef CONFIG_MITIGATE_SPECTRE_BRANCH_HISTORY
-	stp	x0, x1, [sp, #-16]!
-	stp	x2, x3, [sp, #-16]!
-	mov	w0, #ARM_SMCCC_ARCH_WORKAROUND_3
-alternative_cb	smccc_patch_fw_mitigation_conduit
-	nop					// Patched to SMC/HVC #0
-alternative_cb_end
-	ldp	x2, x3, [sp], #16
-	ldp	x0, x1, [sp], #16
-#endif /* CONFIG_MITIGATE_SPECTRE_BRANCH_HISTORY */
-	.endm
 #endif	/* __ASM_ASSEMBLER_H */

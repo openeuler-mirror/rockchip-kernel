@@ -7,7 +7,6 @@
  * the information ethtool needs.
  */
 
-#include <linux/compat.h>
 #include <linux/module.h>
 #include <linux/types.h>
 #include <linux/capability.h>
@@ -808,120 +807,6 @@ out:
 	return ret;
 }
 
-static noinline_for_stack int
-ethtool_rxnfc_copy_from_compat(struct ethtool_rxnfc *rxnfc,
-			       const struct compat_ethtool_rxnfc __user *useraddr,
-			       size_t size)
-{
-	struct compat_ethtool_rxnfc crxnfc = {};
-
-	/* We expect there to be holes between fs.m_ext and
-	 * fs.ring_cookie and at the end of fs, but nowhere else.
-	 * On non-x86, no conversion should be needed.
-	 */
-	BUILD_BUG_ON(!IS_ENABLED(CONFIG_X86_64) &&
-		     sizeof(struct compat_ethtool_rxnfc) !=
-		     sizeof(struct ethtool_rxnfc));
-	BUILD_BUG_ON(offsetof(struct compat_ethtool_rxnfc, fs.m_ext) +
-		     sizeof(useraddr->fs.m_ext) !=
-		     offsetof(struct ethtool_rxnfc, fs.m_ext) +
-		     sizeof(rxnfc->fs.m_ext));
-	BUILD_BUG_ON(offsetof(struct compat_ethtool_rxnfc, fs.location) -
-		     offsetof(struct compat_ethtool_rxnfc, fs.ring_cookie) !=
-		     offsetof(struct ethtool_rxnfc, fs.location) -
-		     offsetof(struct ethtool_rxnfc, fs.ring_cookie));
-
-	if (copy_from_user(&crxnfc, useraddr, min(size, sizeof(crxnfc))))
-		return -EFAULT;
-
-	*rxnfc = (struct ethtool_rxnfc) {
-		.cmd		= crxnfc.cmd,
-		.flow_type	= crxnfc.flow_type,
-		.data		= crxnfc.data,
-		.fs		= {
-			.flow_type	= crxnfc.fs.flow_type,
-			.h_u		= crxnfc.fs.h_u,
-			.h_ext		= crxnfc.fs.h_ext,
-			.m_u		= crxnfc.fs.m_u,
-			.m_ext		= crxnfc.fs.m_ext,
-			.ring_cookie	= crxnfc.fs.ring_cookie,
-			.location	= crxnfc.fs.location,
-		},
-		.rule_cnt	= crxnfc.rule_cnt,
-	};
-
-	return 0;
-}
-
-static int ethtool_rxnfc_copy_from_user(struct ethtool_rxnfc *rxnfc,
-					const void __user *useraddr,
-					size_t size)
-{
-	if (compat_need_64bit_alignment_fixup())
-		return ethtool_rxnfc_copy_from_compat(rxnfc, useraddr, size);
-
-	if (copy_from_user(rxnfc, useraddr, size))
-		return -EFAULT;
-
-	return 0;
-}
-
-static int ethtool_rxnfc_copy_to_compat(void __user *useraddr,
-					const struct ethtool_rxnfc *rxnfc,
-					size_t size, const u32 *rule_buf)
-{
-	struct compat_ethtool_rxnfc crxnfc;
-
-	memset(&crxnfc, 0, sizeof(crxnfc));
-	crxnfc = (struct compat_ethtool_rxnfc) {
-		.cmd		= rxnfc->cmd,
-		.flow_type	= rxnfc->flow_type,
-		.data		= rxnfc->data,
-		.fs		= {
-			.flow_type	= rxnfc->fs.flow_type,
-			.h_u		= rxnfc->fs.h_u,
-			.h_ext		= rxnfc->fs.h_ext,
-			.m_u		= rxnfc->fs.m_u,
-			.m_ext		= rxnfc->fs.m_ext,
-			.ring_cookie	= rxnfc->fs.ring_cookie,
-			.location	= rxnfc->fs.location,
-		},
-		.rule_cnt	= rxnfc->rule_cnt,
-	};
-
-	if (copy_to_user(useraddr, &crxnfc, min(size, sizeof(crxnfc))))
-		return -EFAULT;
-
-	return 0;
-}
-
-static int ethtool_rxnfc_copy_to_user(void __user *useraddr,
-				      const struct ethtool_rxnfc *rxnfc,
-				      size_t size, const u32 *rule_buf)
-{
-	int ret;
-
-	if (compat_need_64bit_alignment_fixup()) {
-		ret = ethtool_rxnfc_copy_to_compat(useraddr, rxnfc, size,
-						   rule_buf);
-		useraddr += offsetof(struct compat_ethtool_rxnfc, rule_locs);
-	} else {
-		ret = copy_to_user(useraddr, rxnfc, size);
-		useraddr += offsetof(struct ethtool_rxnfc, rule_locs);
-	}
-
-	if (ret)
-		return -EFAULT;
-
-	if (rule_buf) {
-		if (copy_to_user(useraddr, rule_buf,
-				 rxnfc->rule_cnt * sizeof(u32)))
-			return -EFAULT;
-	}
-
-	return 0;
-}
-
 static noinline_for_stack int ethtool_set_rxnfc(struct net_device *dev,
 						u32 cmd, void __user *useraddr)
 {
@@ -940,7 +825,7 @@ static noinline_for_stack int ethtool_set_rxnfc(struct net_device *dev,
 		info_size = (offsetof(struct ethtool_rxnfc, data) +
 			     sizeof(info.data));
 
-	if (ethtool_rxnfc_copy_from_user(&info, useraddr, info_size))
+	if (copy_from_user(&info, useraddr, info_size))
 		return -EFAULT;
 
 	rc = dev->ethtool_ops->set_rxnfc(dev, &info);
@@ -948,7 +833,7 @@ static noinline_for_stack int ethtool_set_rxnfc(struct net_device *dev,
 		return rc;
 
 	if (cmd == ETHTOOL_SRXCLSRLINS &&
-	    ethtool_rxnfc_copy_to_user(useraddr, &info, info_size, NULL))
+	    copy_to_user(useraddr, &info, info_size))
 		return -EFAULT;
 
 	return 0;
@@ -974,7 +859,7 @@ static noinline_for_stack int ethtool_get_rxnfc(struct net_device *dev,
 		info_size = (offsetof(struct ethtool_rxnfc, data) +
 			     sizeof(info.data));
 
-	if (ethtool_rxnfc_copy_from_user(&info, useraddr, info_size))
+	if (copy_from_user(&info, useraddr, info_size))
 		return -EFAULT;
 
 	/* If FLOW_RSS was requested then user-space must be using the
@@ -982,7 +867,7 @@ static noinline_for_stack int ethtool_get_rxnfc(struct net_device *dev,
 	 */
 	if (cmd == ETHTOOL_GRXFH && info.flow_type & FLOW_RSS) {
 		info_size = sizeof(info);
-		if (ethtool_rxnfc_copy_from_user(&info, useraddr, info_size))
+		if (copy_from_user(&info, useraddr, info_size))
 			return -EFAULT;
 		/* Since malicious users may modify the original data,
 		 * we need to check whether FLOW_RSS is still requested.
@@ -1008,7 +893,18 @@ static noinline_for_stack int ethtool_get_rxnfc(struct net_device *dev,
 	if (ret < 0)
 		goto err_out;
 
-	ret = ethtool_rxnfc_copy_to_user(useraddr, &info, info_size, rule_buf);
+	ret = -EFAULT;
+	if (copy_to_user(useraddr, &info, info_size))
+		goto err_out;
+
+	if (rule_buf) {
+		useraddr += offsetof(struct ethtool_rxnfc, rule_locs);
+		if (copy_to_user(useraddr, rule_buf,
+				 info.rule_cnt * sizeof(u32)))
+			goto err_out;
+	}
+	ret = 0;
+
 err_out:
 	kfree(rule_buf);
 
@@ -1618,14 +1514,12 @@ static noinline_for_stack int ethtool_get_coalesce(struct net_device *dev,
 						   void __user *useraddr)
 {
 	struct ethtool_coalesce coalesce = { .cmd = ETHTOOL_GCOALESCE };
-	struct kernel_ethtool_coalesce kernel_coalesce = {};
 	int ret;
 
 	if (!dev->ethtool_ops->get_coalesce)
 		return -EOPNOTSUPP;
 
-	ret = dev->ethtool_ops->get_coalesce(dev, &coalesce, &kernel_coalesce,
-					     NULL);
+	ret = dev->ethtool_ops->get_coalesce(dev, &coalesce);
 	if (ret)
 		return ret;
 
@@ -1692,17 +1586,11 @@ ethtool_set_coalesce_supported(struct net_device *dev,
 static noinline_for_stack int ethtool_set_coalesce(struct net_device *dev,
 						   void __user *useraddr)
 {
-	struct kernel_ethtool_coalesce kernel_coalesce = {};
 	struct ethtool_coalesce coalesce;
 	int ret;
 
-	if (!dev->ethtool_ops->set_coalesce && !dev->ethtool_ops->get_coalesce)
+	if (!dev->ethtool_ops->set_coalesce)
 		return -EOPNOTSUPP;
-
-	ret = dev->ethtool_ops->get_coalesce(dev, &coalesce, &kernel_coalesce,
-					     NULL);
-	if (ret)
-		return ret;
 
 	if (copy_from_user(&coalesce, useraddr, sizeof(coalesce)))
 		return -EFAULT;
@@ -1710,8 +1598,7 @@ static noinline_for_stack int ethtool_set_coalesce(struct net_device *dev,
 	if (!ethtool_set_coalesce_supported(dev, &coalesce))
 		return -EOPNOTSUPP;
 
-	ret = dev->ethtool_ops->set_coalesce(dev, &coalesce, &kernel_coalesce,
-					     NULL);
+	ret = dev->ethtool_ops->set_coalesce(dev, &coalesce);
 	if (!ret)
 		ethtool_notify(dev, ETHTOOL_MSG_COALESCE_NTF, NULL);
 	return ret;
@@ -1720,13 +1607,11 @@ static noinline_for_stack int ethtool_set_coalesce(struct net_device *dev,
 static int ethtool_get_ringparam(struct net_device *dev, void __user *useraddr)
 {
 	struct ethtool_ringparam ringparam = { .cmd = ETHTOOL_GRINGPARAM };
-	struct kernel_ethtool_ringparam kernel_ringparam = {};
 
 	if (!dev->ethtool_ops->get_ringparam)
 		return -EOPNOTSUPP;
 
-	dev->ethtool_ops->get_ringparam(dev, &ringparam,
-					&kernel_ringparam, NULL);
+	dev->ethtool_ops->get_ringparam(dev, &ringparam);
 
 	if (copy_to_user(useraddr, &ringparam, sizeof(ringparam)))
 		return -EFAULT;
@@ -1736,7 +1621,6 @@ static int ethtool_get_ringparam(struct net_device *dev, void __user *useraddr)
 static int ethtool_set_ringparam(struct net_device *dev, void __user *useraddr)
 {
 	struct ethtool_ringparam ringparam, max = { .cmd = ETHTOOL_GRINGPARAM };
-	struct kernel_ethtool_ringparam kernel_ringparam;
 	int ret;
 
 	if (!dev->ethtool_ops->set_ringparam || !dev->ethtool_ops->get_ringparam)
@@ -1745,7 +1629,7 @@ static int ethtool_set_ringparam(struct net_device *dev, void __user *useraddr)
 	if (copy_from_user(&ringparam, useraddr, sizeof(ringparam)))
 		return -EFAULT;
 
-	dev->ethtool_ops->get_ringparam(dev, &max, &kernel_ringparam, NULL);
+	dev->ethtool_ops->get_ringparam(dev, &max);
 
 	/* ensure new ring parameters are within the maximums */
 	if (ringparam.rx_pending > max.rx_max_pending ||
@@ -1754,8 +1638,7 @@ static int ethtool_set_ringparam(struct net_device *dev, void __user *useraddr)
 	    ringparam.tx_pending > max.tx_max_pending)
 		return -EINVAL;
 
-	ret = dev->ethtool_ops->set_ringparam(dev, &ringparam,
-					      &kernel_ringparam, NULL);
+	ret = dev->ethtool_ops->set_ringparam(dev, &ringparam);
 	if (!ret)
 		ethtool_notify(dev, ETHTOOL_MSG_RINGS_NTF, NULL);
 	return ret;
@@ -2368,7 +2251,6 @@ static int ethtool_tunable_valid(const struct ethtool_tunable *tuna)
 	switch (tuna->id) {
 	case ETHTOOL_RX_COPYBREAK:
 	case ETHTOOL_TX_COPYBREAK:
-	case ETHTOOL_TX_COPYBREAK_BUF_SIZE:
 		if (tuna->len != sizeof(u32) ||
 		    tuna->type_id != ETHTOOL_TUNABLE_U32)
 			return -EINVAL;
