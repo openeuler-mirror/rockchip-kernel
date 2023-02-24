@@ -55,7 +55,7 @@
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
-//#include "../../staging/android/fiq_debugger/fiq_debugger_priv.h"
+#include "../../staging/android/fiq_debugger/fiq_debugger_priv.h"
 #include "rockchip_debug.h"
 
 #define EDPCSR_LO			0x0a0
