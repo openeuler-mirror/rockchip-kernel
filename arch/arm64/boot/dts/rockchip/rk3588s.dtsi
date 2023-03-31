@@ -2888,6 +2888,27 @@
 		status = "disabled";
 	};
 
+	vepu: vepu@fdb50000 {
+		compatible = "rockchip,vpu-encoder-v2";
+		reg = <0x0 0xfdb50000 0x0 0x400>;
+		interrupts = <GIC_SPI 120 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-names = "irq_vepu";
+		clocks = <&cru ACLK_VPU>, <&cru HCLK_VPU>;
+		clock-names = "aclk_vcodec", "hclk_vcodec";
+		rockchip,normal-rates = <594000000>, <0>;
+		assigned-clocks = <&cru ACLK_VPU>;
+		assigned-clock-rates = <594000000>;
+		resets = <&cru SRST_A_VPU>, <&cru SRST_H_VPU>;
+		reset-names = "shared_video_a", "shared_video_h";
+		rockchip,skip-pmu-idle-request;
+		iommus = <&vdpu_mmu>;
+		rockchip,srv = <&mpp_srv>;
+		rockchip,taskqueue-node = <0>;
+		rockchip,resetgroup-node = <0>;
+		power-domains = <&power RK3588_PD_VDPU>;
+		status = "disabled";
+	};
+
 	vdpu: vdpu@fdb50400 {
 		compatible = "rockchip,vpu-decoder-v2";
 		reg = <0x0 0xfdb50400 0x0 0x400>;
