@@ -66,7 +66,6 @@ const char * const attach_type_name[__MAX_BPF_ATTACH_TYPE] = {
 	[BPF_MODIFY_RETURN]		= "mod_ret",
 	[BPF_LSM_MAC]			= "lsm_mac",
 	[BPF_SK_LOOKUP]			= "sk_lookup",
-	[BPF_SCHED]			= "sched",
 };
 
 void p_err(const char *fmt, ...)
@@ -271,9 +270,6 @@ int do_pin_any(int argc, char **argv, int (*get_fd)(int *, char ***))
 {
 	int err;
 	int fd;
-
-	if (!REQ_ARGS(3))
-		return -EINVAL;
 
 	fd = get_fd(&argc, &argv);
 	if (fd < 0)
