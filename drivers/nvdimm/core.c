@@ -400,7 +400,9 @@ static ssize_t capability_show(struct device *dev,
 	if (!nd_desc->fw_ops)
 		return -EOPNOTSUPP;
 
+	nvdimm_bus_lock(dev);
 	cap = nd_desc->fw_ops->capability(nd_desc);
+	nvdimm_bus_unlock(dev);
 
 	switch (cap) {
 	case NVDIMM_FWA_CAP_QUIESCE:
@@ -425,8 +427,10 @@ static ssize_t activate_show(struct device *dev,
 	if (!nd_desc->fw_ops)
 		return -EOPNOTSUPP;
 
+	nvdimm_bus_lock(dev);
 	cap = nd_desc->fw_ops->capability(nd_desc);
 	state = nd_desc->fw_ops->activate_state(nd_desc);
+	nvdimm_bus_unlock(dev);
 
 	if (cap < NVDIMM_FWA_CAP_QUIESCE)
 		return -EOPNOTSUPP;
@@ -471,6 +475,7 @@ static ssize_t activate_store(struct device *dev,
 	else
 		return -EINVAL;
 
+	nvdimm_bus_lock(dev);
 	state = nd_desc->fw_ops->activate_state(nd_desc);
 
 	switch (state) {
@@ -488,6 +493,7 @@ static ssize_t activate_store(struct device *dev,
 	default:
 		rc = -ENXIO;
 	}
+	nvdimm_bus_unlock(dev);
 
 	if (rc == 0)
 		rc = len;
@@ -510,7 +516,10 @@ static umode_t nvdimm_bus_firmware_visible(struct kobject *kobj, struct attribut
 	if (!nd_desc->fw_ops)
 		return 0;
 
+	nvdimm_bus_lock(dev);
 	cap = nd_desc->fw_ops->capability(nd_desc);
+	nvdimm_bus_unlock(dev);
+
 	if (cap < NVDIMM_FWA_CAP_QUIESCE)
 		return 0;
 
