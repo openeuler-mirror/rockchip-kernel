@@ -113,7 +113,6 @@ static int com20020_probe(struct pcmcia_device *p_dev)
 	struct com20020_dev *info;
 	struct net_device *dev;
 	struct arcnet_local *lp;
-	int ret = -ENOMEM;
 
 	dev_dbg(&p_dev->dev, "com20020_attach()\n");
 
@@ -143,18 +142,12 @@ static int com20020_probe(struct pcmcia_device *p_dev)
 	info->dev = dev;
 	p_dev->priv = info;
 
-	ret = com20020_config(p_dev);
-	if (ret)
-		goto fail_config;
+	return com20020_config(p_dev);
 
-	return 0;
-
-fail_config:
-	free_arcdev(dev);
 fail_alloc_dev:
 	kfree(info);
 fail_alloc_info:
-	return ret;
+	return -ENOMEM;
 } /* com20020_attach */
 
 static void com20020_detach(struct pcmcia_device *link)
@@ -184,7 +177,7 @@ static void com20020_detach(struct pcmcia_device *link)
 		dev = info->dev;
 		if (dev) {
 			dev_dbg(&link->dev, "kfree...\n");
-			free_arcdev(dev);
+			free_netdev(dev);
 		}
 		dev_dbg(&link->dev, "kfree2...\n");
 		kfree(info);

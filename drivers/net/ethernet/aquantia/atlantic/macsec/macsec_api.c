@@ -757,7 +757,6 @@ set_ingress_sakey_record(struct aq_hw_s *hw,
 			 u16 table_index)
 {
 	u16 packed_record[18];
-	int ret;
 
 	if (table_index >= NUMROWS_INGRESSSAKEYRECORD)
 		return -EINVAL;
@@ -790,12 +789,9 @@ set_ingress_sakey_record(struct aq_hw_s *hw,
 
 	packed_record[16] = rec->key_len & 0x3;
 
-	ret = set_raw_ingress_record(hw, packed_record, 18, 2,
-				     ROWOFFSET_INGRESSSAKEYRECORD +
-				     table_index);
-
-	memzero_explicit(packed_record, sizeof(packed_record));
-	return ret;
+	return set_raw_ingress_record(hw, packed_record, 18, 2,
+				      ROWOFFSET_INGRESSSAKEYRECORD +
+					      table_index);
 }
 
 int aq_mss_set_ingress_sakey_record(struct aq_hw_s *hw,
@@ -1743,14 +1739,14 @@ static int set_egress_sakey_record(struct aq_hw_s *hw,
 	ret = set_raw_egress_record(hw, packed_record, 8, 2,
 				    ROWOFFSET_EGRESSSAKEYRECORD + table_index);
 	if (unlikely(ret))
-		goto clear_key;
+		return ret;
 	ret = set_raw_egress_record(hw, packed_record + 8, 8, 2,
 				    ROWOFFSET_EGRESSSAKEYRECORD + table_index -
 					    32);
+	if (unlikely(ret))
+		return ret;
 
-clear_key:
-	memzero_explicit(packed_record, sizeof(packed_record));
-	return ret;
+	return 0;
 }
 
 int aq_mss_set_egress_sakey_record(struct aq_hw_s *hw,

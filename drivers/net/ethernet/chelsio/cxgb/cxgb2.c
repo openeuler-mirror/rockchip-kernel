@@ -709,9 +709,7 @@ static int set_pauseparam(struct net_device *dev,
 	return 0;
 }
 
-static void get_sge_param(struct net_device *dev, struct ethtool_ringparam *e,
-			  struct kernel_ethtool_ringparam *kernel_e,
-			  struct netlink_ext_ack *extack)
+static void get_sge_param(struct net_device *dev, struct ethtool_ringparam *e)
 {
 	struct adapter *adapter = dev->ml_priv;
 	int jumbo_fl = t1_is_T1B(adapter) ? 1 : 0;
@@ -725,9 +723,7 @@ static void get_sge_param(struct net_device *dev, struct ethtool_ringparam *e,
 	e->tx_pending = adapter->params.sge.cmdQ_size[0];
 }
 
-static int set_sge_param(struct net_device *dev, struct ethtool_ringparam *e,
-			 struct kernel_ethtool_ringparam *kernel_e,
-			 struct netlink_ext_ack *extack)
+static int set_sge_param(struct net_device *dev, struct ethtool_ringparam *e)
 {
 	struct adapter *adapter = dev->ml_priv;
 	int jumbo_fl = t1_is_T1B(adapter) ? 1 : 0;
@@ -751,9 +747,7 @@ static int set_sge_param(struct net_device *dev, struct ethtool_ringparam *e,
 	return 0;
 }
 
-static int set_coalesce(struct net_device *dev, struct ethtool_coalesce *c,
-			struct kernel_ethtool_coalesce *kernel_coal,
-			struct netlink_ext_ack *extack)
+static int set_coalesce(struct net_device *dev, struct ethtool_coalesce *c)
 {
 	struct adapter *adapter = dev->ml_priv;
 
@@ -764,9 +758,7 @@ static int set_coalesce(struct net_device *dev, struct ethtool_coalesce *c,
 	return 0;
 }
 
-static int get_coalesce(struct net_device *dev, struct ethtool_coalesce *c,
-			struct kernel_ethtool_coalesce *kernel_coal,
-			struct netlink_ext_ack *extack)
+static int get_coalesce(struct net_device *dev, struct ethtool_coalesce *c)
 {
 	struct adapter *adapter = dev->ml_priv;
 
@@ -1161,7 +1153,6 @@ static int init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	if (!adapter->registered_device_map) {
 		pr_err("%s: could not register any net devices\n",
 		       pci_name(pdev));
-		err = -EINVAL;
 		goto out_release_adapter_res;
 	}
 

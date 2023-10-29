@@ -721,9 +721,7 @@ static void xgbe_stop_timers(struct xgbe_prv_data *pdata)
 		if (!channel->tx_ring)
 			break;
 
-		/* Deactivate the Tx timer */
 		del_timer_sync(&channel->tx_timer);
-		channel->tx_timer_active = 0;
 	}
 }
 
@@ -1063,9 +1061,6 @@ static void xgbe_free_irqs(struct xgbe_prv_data *pdata)
 	unsigned int i;
 
 	devm_free_irq(pdata->dev, pdata->dev_irq, pdata);
-
-	tasklet_kill(&pdata->tasklet_dev);
-	tasklet_kill(&pdata->tasklet_ecc);
 
 	if (pdata->vdata->ecc_support && (pdata->dev_irq != pdata->ecc_irq))
 		devm_free_irq(pdata->dev, pdata->ecc_irq, pdata);
@@ -2562,14 +2557,6 @@ read_again:
 			buf2_len = xgbe_rx_buf2_len(rdata, packet, len);
 			len += buf2_len;
 
-			if (buf2_len > rdata->rx.buf.dma_len) {
-				/* Hardware inconsistency within the descriptors
-				 * that has resulted in a length underflow.
-				 */
-				error = 1;
-				goto skip_data;
-			}
-
 			if (!skb) {
 				skb = xgbe_create_skb(pdata, napi, rdata,
 						      buf1_len);
@@ -2599,10 +2586,8 @@ skip_data:
 		if (!last || context_next)
 			goto read_again;
 
-		if (!skb || error) {
-			dev_kfree_skb(skb);
+		if (!skb)
 			goto next_packet;
-		}
 
 		/* Be sure we don't exceed the configured MTU */
 		max_len = netdev->mtu + ETH_HLEN;

@@ -4,7 +4,6 @@
 #
 
 obj-$(CONFIG_NET_VENDOR_3COM) += 3com/
-obj-$(CONFIG_NET_VENDOR_3SNIC) += 3snic/
 obj-$(CONFIG_NET_VENDOR_8390) += 8390/
 obj-$(CONFIG_NET_VENDOR_ADAPTEC) += adaptec/
 obj-$(CONFIG_GRETH) += aeroflex/
@@ -96,5 +95,3 @@ obj-$(CONFIG_NET_VENDOR_XILINX) += xilinx/
 obj-$(CONFIG_NET_VENDOR_XIRCOM) += xircom/
 obj-$(CONFIG_NET_VENDOR_SYNOPSYS) += synopsys/
 obj-$(CONFIG_NET_VENDOR_PENSANDO) += pensando/
-obj-$(CONFIG_NET_VENDOR_NETSWIFT) += netswift/
-obj-$(CONFIG_NET_VENDOR_NEBULA_MATRIX) += nebula-matrix/

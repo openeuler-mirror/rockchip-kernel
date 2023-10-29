@@ -1182,9 +1182,7 @@ static void ravb_get_strings(struct net_device *ndev, u32 stringset, u8 *data)
 }
 
 static void ravb_get_ringparam(struct net_device *ndev,
-			       struct ethtool_ringparam *ring,
-			       struct kernel_ethtool_ringparam *kernel_ring,
-			       struct netlink_ext_ack *extack)
+			       struct ethtool_ringparam *ring)
 {
 	struct ravb_private *priv = netdev_priv(ndev);
 
@@ -1195,9 +1193,7 @@ static void ravb_get_ringparam(struct net_device *ndev,
 }
 
 static int ravb_set_ringparam(struct net_device *ndev,
-			      struct ethtool_ringparam *ring,
-			      struct kernel_ethtool_ringparam *kernel_ring,
-			      struct netlink_ext_ack *extack)
+			      struct ethtool_ringparam *ring)
 {
 	struct ravb_private *priv = netdev_priv(ndev);
 	int error;
@@ -2257,11 +2253,11 @@ static int ravb_remove(struct platform_device *pdev)
 			  priv->desc_bat_dma);
 	/* Set reset mode */
 	ravb_write(ndev, CCC_OPC_RESET, CCC);
+	pm_runtime_put_sync(&pdev->dev);
 	unregister_netdev(ndev);
 	netif_napi_del(&priv->napi[RAVB_NC]);
 	netif_napi_del(&priv->napi[RAVB_BE]);
 	ravb_mdio_release(priv);
-	pm_runtime_put_sync(&pdev->dev);
 	pm_runtime_disable(&pdev->dev);
 	free_netdev(ndev);
 	platform_set_drvdata(pdev, NULL);
@@ -2368,7 +2364,6 @@ static int __maybe_unused ravb_resume(struct device *dev)
 		ret = ravb_open(ndev);
 		if (ret < 0)
 			return ret;
-		ravb_set_rx_mode(ndev);
 		netif_device_attach(ndev);
 	}
 

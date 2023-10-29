@@ -532,9 +532,7 @@ static void netsec_et_get_drvinfo(struct net_device *net_device,
 }
 
 static int netsec_et_get_coalesce(struct net_device *net_device,
-				  struct ethtool_coalesce *et_coalesce,
-				  struct kernel_ethtool_coalesce *kernel_coal,
-				  struct netlink_ext_ack *extack)
+				  struct ethtool_coalesce *et_coalesce)
 {
 	struct netsec_priv *priv = netdev_priv(net_device);
 
@@ -544,9 +542,7 @@ static int netsec_et_get_coalesce(struct net_device *net_device,
 }
 
 static int netsec_et_set_coalesce(struct net_device *net_device,
-				  struct ethtool_coalesce *et_coalesce,
-				  struct kernel_ethtool_coalesce *kernel_coal,
-				  struct netlink_ext_ack *extack)
+				  struct ethtool_coalesce *et_coalesce)
 {
 	struct netsec_priv *priv = netdev_priv(net_device);
 
@@ -1544,7 +1540,7 @@ static int netsec_start_gmac(struct netsec_priv *priv)
 	netsec_write(priv, NETSEC_REG_NRM_RX_INTEN_CLR, ~0);
 	netsec_write(priv, NETSEC_REG_NRM_TX_INTEN_CLR, ~0);
 
-	netsec_et_set_coalesce(priv->ndev, &priv->et_coalesce, NULL, NULL);
+	netsec_et_set_coalesce(priv->ndev, &priv->et_coalesce);
 
 	if (netsec_mac_write(priv, GMAC_REG_OMR, value))
 		return -ETIMEDOUT;
@@ -1962,13 +1958,11 @@ static int netsec_register_mdio(struct netsec_priv *priv, u32 phy_addr)
 			ret = PTR_ERR(priv->phydev);
 			dev_err(priv->dev, "get_phy_device err(%d)\n", ret);
 			priv->phydev = NULL;
-			mdiobus_unregister(bus);
 			return -ENODEV;
 		}
 
 		ret = phy_device_register(priv->phydev);
 		if (ret) {
-			phy_device_free(priv->phydev);
 			mdiobus_unregister(bus);
 			dev_err(priv->dev,
 				"phy_device_register err(%d)\n", ret);

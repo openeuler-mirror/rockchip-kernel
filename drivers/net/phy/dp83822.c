@@ -243,7 +243,9 @@ static int dp83822_config_intr(struct phy_device *phydev)
 		if (misr_status < 0)
 			return misr_status;
 
-		misr_status |= (DP83822_LINK_STAT_INT_EN |
+		misr_status |= (DP83822_RX_ERR_HF_INT_EN |
+				DP83822_FALSE_CARRIER_HF_INT_EN |
+				DP83822_LINK_STAT_INT_EN |
 				DP83822_ENERGY_DET_INT_EN |
 				DP83822_LINK_QUAL_INT_EN);
 
@@ -268,7 +270,8 @@ static int dp83822_config_intr(struct phy_device *phydev)
 				DP83822_EEE_ERROR_CHANGE_INT_EN);
 
 		if (!dp83822->fx_enabled)
-			misr_status |= DP83822_ANEG_ERR_INT_EN |
+			misr_status |= DP83822_MDI_XOVER_INT_EN |
+				       DP83822_ANEG_ERR_INT_EN |
 				       DP83822_WOL_PKT_INT_EN;
 
 		err = phy_write(phydev, MII_DP83822_MISR2, misr_status);
@@ -286,7 +289,7 @@ static int dp83822_config_intr(struct phy_device *phydev)
 		if (err < 0)
 			return err;
 
-		err = phy_write(phydev, MII_DP83822_MISR2, 0);
+		err = phy_write(phydev, MII_DP83822_MISR1, 0);
 		if (err < 0)
 			return err;
 
@@ -302,9 +305,11 @@ static int dp83822_config_intr(struct phy_device *phydev)
 
 static int dp8382x_disable_wol(struct phy_device *phydev)
 {
-	return phy_clear_bits_mmd(phydev, DP83822_DEVADDR, MII_DP83822_WOL_CFG,
-				  DP83822_WOL_EN | DP83822_WOL_MAGIC_EN |
-				  DP83822_WOL_SECURE_ON);
+	int value = DP83822_WOL_EN | DP83822_WOL_MAGIC_EN |
+		    DP83822_WOL_SECURE_ON;
+
+	return phy_clear_bits_mmd(phydev, DP83822_DEVADDR,
+				  MII_DP83822_WOL_CFG, value);
 }
 
 static int dp83822_read_status(struct phy_device *phydev)

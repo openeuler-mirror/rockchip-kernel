@@ -723,20 +723,12 @@ static int cfv_probe(struct virtio_device *vdev)
 	/* Carrier is off until netdevice is opened */
 	netif_carrier_off(netdev);
 
-	/* serialize netdev register + virtio_device_ready() with ndo_open() */
-	rtnl_lock();
-
 	/* register Netdev */
-	err = register_netdevice(netdev);
+	err = register_netdev(netdev);
 	if (err) {
-		rtnl_unlock();
 		dev_err(&vdev->dev, "Unable to register netdev (%d)\n", err);
 		goto err;
 	}
-
-	virtio_device_ready(vdev);
-
-	rtnl_unlock();
 
 	debugfs_init(cfv);
 
@@ -764,7 +756,7 @@ static void cfv_remove(struct virtio_device *vdev)
 	debugfs_remove_recursive(cfv->debugfs);
 
 	vringh_kiov_cleanup(&cfv->ctx.riov);
-	virtio_reset_device(vdev);
+	vdev->config->reset(vdev);
 	vdev->vringh_config->del_vrhs(cfv->vdev);
 	cfv->vr_rx = NULL;
 	vdev->config->del_vqs(cfv->vdev);
