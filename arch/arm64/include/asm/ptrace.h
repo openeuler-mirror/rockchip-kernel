@@ -16,6 +16,11 @@
 #define CurrentEL_EL1		(1 << 2)
 #define CurrentEL_EL2		(2 << 2)
 
+#define INIT_PSTATE_EL1 \
+	(PSR_D_BIT | PSR_A_BIT | PSR_I_BIT | PSR_F_BIT | PSR_MODE_EL1h)
+#define INIT_PSTATE_EL2 \
+	(PSR_D_BIT | PSR_A_BIT | PSR_I_BIT | PSR_F_BIT | PSR_MODE_EL2h)
+
 /*
  * PMR values used to mask/unmask interrupts.
  *
@@ -188,7 +193,8 @@ struct pt_regs {
 	s32 syscallno;
 	u32 unused2;
 #endif
-	u64 sdei_ttbr1;
+
+	u64 orig_addr_limit;
 	/* Only valid when ARM64_HAS_IRQ_PRIO_MASKING is enabled. */
 	u64 pmr_save;
 	u64 stackframe[2];
@@ -212,23 +218,19 @@ static inline void forget_syscall(struct pt_regs *regs)
 
 #define arch_has_single_step()	(1)
 
-#ifdef CONFIG_AARCH32_EL0
-#define a32_thumb_mode(regs) \
+#ifdef CONFIG_COMPAT
+#define compat_thumb_mode(regs) \
 	(((regs)->pstate & PSR_AA32_T_BIT))
 #else
-#define a32_thumb_mode(regs) (0)
+#define compat_thumb_mode(regs) (0)
 #endif
-
-#define compat_thumb_mode(regs) a32_thumb_mode(regs)
 
 #define user_mode(regs)	\
 	(((regs)->pstate & PSR_MODE_MASK) == PSR_MODE_EL0t)
 
-#define a32_user_mode(regs)	\
+#define compat_user_mode(regs)	\
 	(((regs)->pstate & (PSR_MODE32_BIT | PSR_MODE_MASK)) == \
 	 (PSR_MODE32_BIT | PSR_MODE_EL0t))
-
-#define compat_user_mode(regs) a32_user_mode(regs)
 
 #define processor_mode(regs) \
 	((regs)->pstate & PSR_MODE_MASK)
@@ -246,7 +248,7 @@ static inline void forget_syscall(struct pt_regs *regs)
 
 static inline unsigned long user_stack_pointer(struct pt_regs *regs)
 {
-	if (a32_user_mode(regs))
+	if (compat_user_mode(regs))
 		return regs->compat_sp;
 	return regs->sp;
 }
@@ -326,7 +328,7 @@ static inline unsigned long regs_return_value(struct pt_regs *regs)
 	 * syscall_get_return_value(). Apply the same sign-extension here until
 	 * audit is updated to use syscall_get_return_value().
 	 */
-	if (a32_user_mode(regs))
+	if (compat_user_mode(regs))
 		val = sign_extend64(val, 31);
 
 	return val;

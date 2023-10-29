@@ -14,24 +14,26 @@
 #include <asm/cpufeature.h>
 #include <asm/mte.h>
 
-static void do_mte(struct page *to, struct page *from, void *kto, void *kfrom, bool mc)
-{
-	if (system_supports_mte() && test_bit(PG_mte_tagged, &from->flags)) {
-		set_bit(PG_mte_tagged, &to->flags);
-		if (mc)
-			mte_copy_page_tags_mc(kto, kfrom);
-		else
-			mte_copy_page_tags(kto, kfrom);
-	}
-}
-
 void copy_highpage(struct page *to, struct page *from)
 {
-	void *kto = page_address(to);
-	void *kfrom = page_address(from);
+	struct page *kto = page_address(to);
+	struct page *kfrom = page_address(from);
 
 	copy_page(kto, kfrom);
-	do_mte(to, from, kto, kfrom, false);
+
+	if (system_supports_mte() && test_bit(PG_mte_tagged, &from->flags)) {
+		set_bit(PG_mte_tagged, &to->flags);
+		page_kasan_tag_reset(to);
+		/*
+		 * We need smp_wmb() in between setting the flags and clearing the
+		 * tags because if another thread reads page->flags and builds a
+		 * tagged address out of it, there is an actual dependency to the
+		 * memory access, but on the current thread we do not guarantee that
+		 * the new page->flags are visible before the tags were updated.
+		 */
+		smp_wmb();
+		mte_copy_page_tags(kto, kfrom);
+	}
 }
 EXPORT_SYMBOL(copy_highpage);
 
@@ -42,23 +44,3 @@ void copy_user_highpage(struct page *to, struct page *from,
 	flush_dcache_page(to);
 }
 EXPORT_SYMBOL_GPL(copy_user_highpage);
-
-#ifdef CONFIG_ARCH_HAS_COPY_MC
-void copy_highpage_mc(struct page *to, struct page *from)
-{
-	void *kto = page_address(to);
-	void *kfrom = page_address(from);
-
-	copy_page_mc(kto, kfrom);
-	do_mte(to, from, kto, kfrom, true);
-}
-EXPORT_SYMBOL(copy_highpage_mc);
-
-void copy_user_highpage_mc(struct page *to, struct page *from,
-			unsigned long vaddr, struct vm_area_struct *vma)
-{
-	copy_highpage_mc(to, from);
-	flush_dcache_page(to);
-}
-EXPORT_SYMBOL_GPL(copy_user_highpage_mc);
-#endif

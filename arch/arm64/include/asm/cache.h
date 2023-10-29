@@ -31,12 +31,6 @@
 #define L1_CACHE_SHIFT		(6)
 #define L1_CACHE_BYTES		(1 << L1_CACHE_SHIFT)
 
-#ifdef CONFIG_ARCH_LLC_128_LINE_SIZE
-#ifndef ____cacheline_aligned_128
-#define ____cacheline_aligned_128  __attribute__((__aligned__(128)))
-#endif
-#endif
-
 
 #define CLIDR_LOUU_SHIFT	27
 #define CLIDR_LOC_SHIFT		24
@@ -57,6 +51,8 @@
 
 #ifdef CONFIG_KASAN_SW_TAGS
 #define ARCH_SLAB_MINALIGN	(1ULL << KASAN_SHADOW_SCALE_SHIFT)
+#elif defined(CONFIG_KASAN_HW_TAGS)
+#define ARCH_SLAB_MINALIGN	MTE_GRANULE_SIZE
 #endif
 
 #ifndef __ASSEMBLY__
@@ -116,15 +112,6 @@ int cache_line_size(void);
 static inline u32 __attribute_const__ read_cpuid_effective_cachetype(void)
 {
 	u32 ctr = read_cpuid_cachetype();
-#ifdef CONFIG_HISILICON_ERRATUM_1980005
-	static const struct midr_range idc_support_list[] = {
-		MIDR_ALL_VERSIONS(MIDR_HISI_TSV110),
-		MIDR_REV(MIDR_HISI_TSV200, 1, 0),
-		{ /* sentinel */ }
-	};
-	if (is_midr_in_range_list(read_cpuid_id(), idc_support_list))
-		ctr |= BIT(CTR_IDC_SHIFT);
-#endif
 
 	if (!(ctr & BIT(CTR_IDC_SHIFT))) {
 		u64 clidr = read_sysreg(clidr_el1);

@@ -27,9 +27,12 @@ int efi_set_mapping_permissions(struct mm_struct *mm, efi_memory_desc_t *md);
 	__efi_fpsimd_begin();						\
 })
 
-#undef arch_efi_call_virt
 #define arch_efi_call_virt(p, f, args...)				\
-	__efi_rt_asm_wrapper((p)->f, #f, args)
+({									\
+	efi_##f##_t *__f;						\
+	__f = p->f;							\
+	__efi_rt_asm_wrapper(__f, #f, args);				\
+})
 
 #define arch_efi_call_virt_teardown()					\
 ({									\
