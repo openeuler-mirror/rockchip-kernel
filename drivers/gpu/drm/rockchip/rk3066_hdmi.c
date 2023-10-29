@@ -383,7 +383,7 @@ rk3066_hdmi_encoder_mode_set(struct drm_encoder *encoder,
 	struct rk3066_hdmi *hdmi = to_rk3066_hdmi(encoder);
 
 	/* Store the display mode for plugin/DPMS poweron events. */
-	drm_mode_copy(&hdmi->previous_mode, adj_mode);
+	memcpy(&hdmi->previous_mode, adj_mode, sizeof(hdmi->previous_mode));
 }
 
 static void rk3066_hdmi_encoder_enable(struct drm_encoder *encoder)
@@ -542,7 +542,7 @@ rk3066_hdmi_register(struct drm_device *drm, struct rk3066_hdmi *hdmi)
 	struct device *dev = hdmi->dev;
 
 	encoder->possible_crtcs =
-		drm_of_find_possible_crtcs(drm, dev->of_node);
+		rockchip_drm_of_find_possible_crtcs(drm, dev->of_node);
 
 	/*
 	 * If we failed to find the CRTC(s) which this encoder is

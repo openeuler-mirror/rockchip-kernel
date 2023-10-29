@@ -398,10 +398,6 @@ static void drm_fb_helper_dirty_blit_real(struct drm_fb_helper *fb_helper,
 	size_t len = (clip->x2 - clip->x1) * cpp;
 	unsigned int y;
 
-#ifdef CONFIG_SW64
-	fb_helper->dev->mode_config.fbdev_use_iomem = true;
-#endif
-
 	for (y = clip->y1; y < clip->y2; y++) {
 		if (!fb_helper->dev->mode_config.fbdev_use_iomem)
 			memcpy(dst, src, len);
@@ -2275,3 +2271,24 @@ void drm_fbdev_generic_setup(struct drm_device *dev,
 	drm_client_register(&fb_helper->client);
 }
 EXPORT_SYMBOL(drm_fbdev_generic_setup);
+
+/* The Kconfig DRM_KMS_HELPER selects FRAMEBUFFER_CONSOLE (if !EXPERT)
+ * but the module doesn't depend on any fb console symbols.  At least
+ * attempt to load fbcon to avoid leaving the system without a usable console.
+ */
+int __init drm_fb_helper_modinit(void)
+{
+#if defined(CONFIG_FRAMEBUFFER_CONSOLE_MODULE) && !defined(CONFIG_EXPERT)
+	const char name[] = "fbcon";
+	struct module *fbcon;
+
+	mutex_lock(&module_mutex);
+	fbcon = find_module(name);
+	mutex_unlock(&module_mutex);
+
+	if (!fbcon)
+		request_module_nowait(name);
+#endif
+	return 0;
+}
+EXPORT_SYMBOL(drm_fb_helper_modinit);
