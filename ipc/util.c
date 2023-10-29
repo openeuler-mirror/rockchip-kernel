@@ -446,8 +446,8 @@ static int ipcget_public(struct ipc_namespace *ns, struct ipc_ids *ids,
 static void ipc_kht_remove(struct ipc_ids *ids, struct kern_ipc_perm *ipcp)
 {
 	if (ipcp->key != IPC_PRIVATE)
-		WARN_ON_ONCE(rhashtable_remove_fast(&ids->key_ht, &ipcp->khtnode,
-				       ipc_kht_params));
+		rhashtable_remove_fast(&ids->key_ht, &ipcp->khtnode,
+				       ipc_kht_params);
 }
 
 /**
@@ -462,7 +462,7 @@ void ipc_rmid(struct ipc_ids *ids, struct kern_ipc_perm *ipcp)
 {
 	int idx = ipcid_to_idx(ipcp->id);
 
-	WARN_ON_ONCE(idr_remove(&ids->ipcs_idr, idx) != ipcp);
+	idr_remove(&ids->ipcs_idr, idx);
 	ipc_kht_remove(ids, ipcp);
 	ids->in_use--;
 	ipcp->deleted = true;
@@ -754,13 +754,21 @@ struct pid_namespace *ipc_seq_pid_ns(struct seq_file *s)
 static struct kern_ipc_perm *sysvipc_find_ipc(struct ipc_ids *ids, loff_t pos,
 					      loff_t *new_pos)
 {
-	struct kern_ipc_perm *ipc = NULL;
-	int max_idx = ipc_get_maxidx(ids);
+	struct kern_ipc_perm *ipc;
+	int total, id;
 
-	if (max_idx == -1 || pos > max_idx)
+	total = 0;
+	for (id = 0; id < pos && total < ids->in_use; id++) {
+		ipc = idr_find(&ids->ipcs_idr, id);
+		if (ipc != NULL)
+			total++;
+	}
+
+	ipc = NULL;
+	if (total >= ids->in_use)
 		goto out;
 
-	for (; pos <= max_idx; pos++) {
+	for (; pos < ipc_mni; pos++) {
 		ipc = idr_find(&ids->ipcs_idr, pos);
 		if (ipc != NULL) {
 			rcu_read_lock();
