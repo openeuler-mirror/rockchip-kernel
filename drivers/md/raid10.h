@@ -124,7 +124,6 @@ struct r10bio {
 	sector_t		sector;	/* virtual sector number */
 	int			sectors;
 	unsigned long		state;
-	unsigned long		start_time;
 	struct mddev		*mddev;
 	/*
 	 * original bio going to /dev/mdx
@@ -146,12 +145,12 @@ struct r10bio {
 	 */
 	struct r10dev {
 		struct bio	*bio;
-		/* Currently just used for normal reads and writes */
-		struct md_rdev	*rdev;
-		/* used for resync and writes */
-		struct bio	*repl_bio;
-		/* Currently just used for normal writes */
-		struct md_rdev	*replacement;
+		union {
+			struct bio	*repl_bio; /* used for resync and
+						    * writes */
+			struct md_rdev	*rdev;	   /* used for reads
+						    * (read_slot >= 0) */
+		};
 		sector_t	addr;
 		int		devnum;
 	} devs[];

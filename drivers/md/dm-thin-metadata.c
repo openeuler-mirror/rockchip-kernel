@@ -574,8 +574,6 @@ static int __format_metadata(struct dm_pool_metadata *pmd)
 	r = dm_tm_create_with_sm(pmd->bm, THIN_SUPERBLOCK_LOCATION,
 				 &pmd->tm, &pmd->metadata_sm);
 	if (r < 0) {
-		pmd->tm = NULL;
-		pmd->metadata_sm = NULL;
 		DMERR("tm_create_with_sm failed");
 		return r;
 	}
@@ -584,7 +582,6 @@ static int __format_metadata(struct dm_pool_metadata *pmd)
 	if (IS_ERR(pmd->data_sm)) {
 		DMERR("sm_disk_create failed");
 		r = PTR_ERR(pmd->data_sm);
-		pmd->data_sm = NULL;
 		goto bad_cleanup_tm;
 	}
 
@@ -615,15 +612,11 @@ static int __format_metadata(struct dm_pool_metadata *pmd)
 
 bad_cleanup_nb_tm:
 	dm_tm_destroy(pmd->nb_tm);
-	pmd->nb_tm = NULL;
 bad_cleanup_data_sm:
 	dm_sm_destroy(pmd->data_sm);
-	pmd->data_sm = NULL;
 bad_cleanup_tm:
 	dm_tm_destroy(pmd->tm);
-	pmd->tm = NULL;
 	dm_sm_destroy(pmd->metadata_sm);
-	pmd->metadata_sm = NULL;
 
 	return r;
 }
@@ -689,8 +682,6 @@ static int __open_metadata(struct dm_pool_metadata *pmd)
 			       sizeof(disk_super->metadata_space_map_root),
 			       &pmd->tm, &pmd->metadata_sm);
 	if (r < 0) {
-		pmd->tm = NULL;
-		pmd->metadata_sm = NULL;
 		DMERR("tm_open_with_sm failed");
 		goto bad_unlock_sblock;
 	}
@@ -700,7 +691,6 @@ static int __open_metadata(struct dm_pool_metadata *pmd)
 	if (IS_ERR(pmd->data_sm)) {
 		DMERR("sm_disk_open failed");
 		r = PTR_ERR(pmd->data_sm);
-		pmd->data_sm = NULL;
 		goto bad_cleanup_tm;
 	}
 
@@ -711,15 +701,6 @@ static int __open_metadata(struct dm_pool_metadata *pmd)
 		goto bad_cleanup_data_sm;
 	}
 
-	/*
-	 * For pool metadata opening process, root setting is redundant
-	 * because it will be set again in __begin_transaction(). But dm
-	 * pool aborting process really needs to get last transaction's
-	 * root to avoid accessing broken btree.
-	 */
-	pmd->root = le64_to_cpu(disk_super->data_mapping_root);
-	pmd->details_root = le64_to_cpu(disk_super->device_details_root);
-
 	__setup_btree_details(pmd);
 	dm_bm_unlock(sblock);
 
@@ -727,12 +708,9 @@ static int __open_metadata(struct dm_pool_metadata *pmd)
 
 bad_cleanup_data_sm:
 	dm_sm_destroy(pmd->data_sm);
-	pmd->data_sm = NULL;
 bad_cleanup_tm:
 	dm_tm_destroy(pmd->tm);
-	pmd->tm = NULL;
 	dm_sm_destroy(pmd->metadata_sm);
-	pmd->metadata_sm = NULL;
 bad_unlock_sblock:
 	dm_bm_unlock(sblock);
 
@@ -775,19 +753,13 @@ static int __create_persistent_data_objects(struct dm_pool_metadata *pmd, bool f
 	return r;
 }
 
-static void __destroy_persistent_data_objects(struct dm_pool_metadata *pmd,
-					      bool destroy_bm)
+static void __destroy_persistent_data_objects(struct dm_pool_metadata *pmd)
 {
 	dm_sm_destroy(pmd->data_sm);
-	pmd->data_sm = NULL;
 	dm_sm_destroy(pmd->metadata_sm);
-	pmd->metadata_sm = NULL;
 	dm_tm_destroy(pmd->nb_tm);
-	pmd->nb_tm = NULL;
 	dm_tm_destroy(pmd->tm);
-	pmd->tm = NULL;
-	if (destroy_bm)
-		dm_block_manager_destroy(pmd->bm);
+	dm_block_manager_destroy(pmd->bm);
 }
 
 static int __begin_transaction(struct dm_pool_metadata *pmd)
@@ -993,7 +965,8 @@ int dm_pool_metadata_close(struct dm_pool_metadata *pmd)
 			       __func__, r);
 	}
 	pmd_write_unlock(pmd);
-	__destroy_persistent_data_objects(pmd, true);
+	if (!pmd->fail_io)
+		__destroy_persistent_data_objects(pmd);
 
 	kfree(pmd);
 	return 0;
@@ -1771,15 +1744,13 @@ int dm_thin_remove_range(struct dm_thin_device *td,
 
 int dm_pool_block_is_shared(struct dm_pool_metadata *pmd, dm_block_t b, bool *result)
 {
-	int r = -EINVAL;
+	int r;
 	uint32_t ref_count;
 
 	down_read(&pmd->root_lock);
-	if (!pmd->fail_io) {
-		r = dm_sm_get_count(pmd->data_sm, b, &ref_count);
-		if (!r)
-			*result = (ref_count > 1);
-	}
+	r = dm_sm_get_count(pmd->data_sm, b, &ref_count);
+	if (!r)
+		*result = (ref_count > 1);
 	up_read(&pmd->root_lock);
 
 	return r;
@@ -1790,14 +1761,10 @@ int dm_pool_inc_data_range(struct dm_pool_metadata *pmd, dm_block_t b, dm_block_
 	int r = 0;
 
 	pmd_write_lock(pmd);
-	if (!pmd->fail_io) {
-		for (; b != e; b++) {
-			r = dm_sm_inc_block(pmd->data_sm, b);
-			if (r)
-				break;
-		}
-	} else {
-		r = -EINVAL;
+	for (; b != e; b++) {
+		r = dm_sm_inc_block(pmd->data_sm, b);
+		if (r)
+			break;
 	}
 	pmd_write_unlock(pmd);
 
@@ -1809,14 +1776,10 @@ int dm_pool_dec_data_range(struct dm_pool_metadata *pmd, dm_block_t b, dm_block_
 	int r = 0;
 
 	pmd_write_lock(pmd);
-	if (!pmd->fail_io) {
-		for (; b != e; b++) {
-			r = dm_sm_dec_block(pmd->data_sm, b);
-			if (r)
-				break;
-		}
-	} else {
-		r = -EINVAL;
+	for (; b != e; b++) {
+		r = dm_sm_dec_block(pmd->data_sm, b);
+		if (r)
+			break;
 	}
 	pmd_write_unlock(pmd);
 
@@ -1911,29 +1874,19 @@ int dm_pool_abort_metadata(struct dm_pool_metadata *pmd)
 {
 	int r = -EINVAL;
 
-	/* fail_io is double-checked with pmd->root_lock held below */
-	if (unlikely(pmd->fail_io))
-		return r;
-
 	pmd_write_lock(pmd);
-	if (pmd->fail_io) {
-		pmd_write_unlock(pmd);
-		return r;
-	}
+	if (pmd->fail_io)
+		goto out;
+
 	__set_abort_with_changes_flags(pmd);
-
-	/* destroy data_sm/metadata_sm/nb_tm/tm */
-	__destroy_persistent_data_objects(pmd, false);
-
-	/* reset bm */
-	dm_block_manager_reset(pmd->bm);
-
-	/* rebuild data_sm/metadata_sm/nb_tm/tm */
-	r = __open_or_format_metadata(pmd, false);
+	__destroy_persistent_data_objects(pmd);
+	r = __create_persistent_data_objects(pmd, false);
 	if (r)
 		pmd->fail_io = true;
 
+out:
 	pmd_write_unlock(pmd);
+
 	return r;
 }
 
@@ -2105,13 +2058,10 @@ int dm_pool_register_metadata_threshold(struct dm_pool_metadata *pmd,
 					dm_sm_threshold_fn fn,
 					void *context)
 {
-	int r = -EINVAL;
+	int r;
 
 	pmd_write_lock_in_core(pmd);
-	if (!pmd->fail_io) {
-		r = dm_sm_register_threshold_callback(pmd->metadata_sm,
-						      threshold, fn, context);
-	}
+	r = dm_sm_register_threshold_callback(pmd->metadata_sm, threshold, fn, context);
 	pmd_write_unlock(pmd);
 
 	return r;
