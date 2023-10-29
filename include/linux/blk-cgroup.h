@@ -14,7 +14,6 @@
  * 	              Nauman Rafique <nauman@google.com>
  */
 
-#include <linux/kabi.h>
 #include <linux/cgroup.h>
 #include <linux/percpu.h>
 #include <linux/percpu_counter.h>
@@ -59,14 +58,6 @@ struct blkcg {
 #ifdef CONFIG_CGROUP_WRITEBACK
 	struct list_head		cgwb_list;
 #endif
-#if defined(CONFIG_CGROUP_V1_WRITEBACK) && !defined(__GENKSYMS__)
-	struct list_head		memcg_list;
-#else
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
-#endif
-	KABI_RESERVE(3)
-	KABI_RESERVE(4)
 };
 
 struct blkg_iostat {
@@ -178,11 +169,6 @@ struct blkcg_policy {
 	blkcg_pol_free_pd_fn		*pd_free_fn;
 	blkcg_pol_reset_pd_stats_fn	*pd_reset_stats_fn;
 	blkcg_pol_stat_pd_fn		*pd_stat_fn;
-
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
-	KABI_RESERVE(3)
-	KABI_RESERVE(4)
 };
 
 extern struct blkcg blkcg_root;
@@ -297,6 +283,22 @@ static inline bool blk_cgroup_congested(void)
 	}
 	rcu_read_unlock();
 	return ret;
+}
+
+/**
+ * bio_issue_as_root_blkg - see if this bio needs to be issued as root blkg
+ * @return: true if this bio needs to be submitted with the root blkg context.
+ *
+ * In order to avoid priority inversions we sometimes need to issue a bio as if
+ * it were attached to the root blkg, and then backcharge to the actual owning
+ * blkg.  The idea is we do bio_blkcg() to look up the actual context for the
+ * bio and attach the appropriate blkg to the bio.  Then we call this helper and
+ * if it is true run with the root blkg for that queue and then do any
+ * backcharging to the originating cgroup once the io is complete.
+ */
+static inline bool bio_issue_as_root_blkg(struct bio *bio)
+{
+	return (bio->bi_opf & (REQ_META | REQ_SWAP)) != 0;
 }
 
 /**

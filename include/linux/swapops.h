@@ -281,7 +281,7 @@ static inline pmd_t swp_entry_to_pmd(swp_entry_t entry)
 
 static inline int is_pmd_migration_entry(pmd_t pmd)
 {
-	return is_swap_pmd(pmd) && is_migration_entry(pmd_to_swp_entry(pmd));
+	return !pmd_present(pmd) && is_migration_entry(pmd_to_swp_entry(pmd));
 }
 #else
 static inline void set_pmd_migration_entry(struct page_vma_mapped_walk *pvmw,
@@ -330,11 +330,6 @@ static inline swp_entry_t make_hwpoison_entry(struct page *page)
 static inline int is_hwpoison_entry(swp_entry_t entry)
 {
 	return swp_type(entry) == SWP_HWPOISON;
-}
-
-static inline unsigned long hwpoison_entry_to_pfn(swp_entry_t entry)
-{
-	return swp_offset(entry);
 }
 
 static inline void num_poisoned_pages_inc(void)

@@ -4,12 +4,10 @@
 
 #ifndef __ASSEMBLY__
 
-#include <linux/bitops.h>
-#include <linux/kernel.h>
-#include <linux/string.h>
 #include <linux/types.h>
-
-struct device;
+#include <linux/bitops.h>
+#include <linux/string.h>
+#include <linux/kernel.h>
 
 /*
  * bitmaps provide bit arrays that consume one or more unsigned
@@ -122,15 +120,7 @@ struct device;
  */
 extern unsigned long *bitmap_alloc(unsigned int nbits, gfp_t flags);
 extern unsigned long *bitmap_zalloc(unsigned int nbits, gfp_t flags);
-extern unsigned long *bitmap_alloc_node(unsigned int nbits, gfp_t flags, int node);
-extern unsigned long *bitmap_zalloc_node(unsigned int nbits, gfp_t flags, int node);
 extern void bitmap_free(const unsigned long *bitmap);
-
-/* Managed variants of the above. */
-unsigned long *devm_bitmap_alloc(struct device *dev,
-				 unsigned int nbits, gfp_t flags);
-unsigned long *devm_bitmap_zalloc(struct device *dev,
-				  unsigned int nbits, gfp_t flags);
 
 /*
  * lib/bitmap.c provides these functions:
@@ -233,6 +223,14 @@ extern int bitmap_print_to_pagebuf(bool list, char *buf,
 
 #define BITMAP_FIRST_WORD_MASK(start) (~0UL << ((start) & (BITS_PER_LONG - 1)))
 #define BITMAP_LAST_WORD_MASK(nbits) (~0UL >> (-(nbits) & (BITS_PER_LONG - 1)))
+
+/*
+ * The static inlines below do not handle constant nbits==0 correctly,
+ * so make such users (should any ever turn up) call the out-of-line
+ * versions.
+ */
+#define small_const_nbits(nbits) \
+	(__builtin_constant_p(nbits) && (nbits) <= BITS_PER_LONG && (nbits) > 0)
 
 static inline void bitmap_zero(unsigned long *dst, unsigned int nbits)
 {

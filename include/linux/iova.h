@@ -26,7 +26,7 @@ struct iova_magazine;
 struct iova_cpu_rcache;
 
 #define IOVA_RANGE_CACHE_MAX_SIZE 6	/* log of max cached IOVA range size (in pages) */
-#define MAX_GLOBAL_MAGS CONFIG_IOVA_MAX_GLOBAL_MAGS	/* magazines per bin */
+#define MAX_GLOBAL_MAGS 32	/* magazines per bin */
 
 struct iova_rcache {
 	spinlock_t lock;
@@ -95,7 +95,7 @@ struct iova_domain {
 						   flush-queues */
 	atomic_t fq_timer_on;			/* 1 when timer is active, 0
 						   when not */
-	struct work_struct free_iova_work;
+	bool best_fit;
 };
 
 static inline unsigned long iova_size(struct iova *iova)
@@ -133,7 +133,7 @@ static inline unsigned long iova_pfn(struct iova_domain *iovad, dma_addr_t iova)
 	return iova >> iova_shift(iovad);
 }
 
-#if IS_REACHABLE(CONFIG_IOMMU_IOVA)
+#if IS_ENABLED(CONFIG_IOMMU_IOVA)
 int iova_cache_get(void);
 void iova_cache_put(void);
 
@@ -164,6 +164,7 @@ void put_iova_domain(struct iova_domain *iovad);
 struct iova *split_and_remove_iova(struct iova_domain *iovad,
 	struct iova *iova, unsigned long pfn_lo, unsigned long pfn_hi);
 void free_cpu_cached_iovas(unsigned int cpu, struct iova_domain *iovad);
+void free_global_cached_iovas(struct iova_domain *iovad);
 #else
 static inline int iova_cache_get(void)
 {
@@ -271,6 +272,11 @@ static inline void free_cpu_cached_iovas(unsigned int cpu,
 					 struct iova_domain *iovad)
 {
 }
+
+static inline void free_global_cached_iovas(struct iova_domain *iovad)
+{
+}
+
 #endif
 
 #endif

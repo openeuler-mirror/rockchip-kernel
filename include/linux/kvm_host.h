@@ -146,7 +146,6 @@ static inline bool is_error_page(struct page *page)
 #define KVM_REQ_MMU_RELOAD        (1 | KVM_REQUEST_WAIT | KVM_REQUEST_NO_WAKEUP)
 #define KVM_REQ_PENDING_TIMER     2
 #define KVM_REQ_UNHALT            3
-#define KVM_REQ_VM_BUGGED         (4 | KVM_REQUEST_WAIT | KVM_REQUEST_NO_WAKEUP)
 #define KVM_REQUEST_ARCH_BASE     8
 
 #define KVM_ARCH_REQ_FLAGS(nr, flags) ({ \
@@ -506,7 +505,6 @@ struct kvm {
 	struct srcu_struct irq_srcu;
 	pid_t userspace_pid;
 	unsigned int max_halt_poll_ns;
-	bool vm_bugged;
 };
 
 #define kvm_err(fmt, ...) \
@@ -534,31 +532,6 @@ struct kvm {
 			      ## __VA_ARGS__)
 #define vcpu_err(vcpu, fmt, ...)					\
 	kvm_err("vcpu%i " fmt, (vcpu)->vcpu_id, ## __VA_ARGS__)
-
-bool kvm_make_all_cpus_request(struct kvm *kvm, unsigned int req);
-static inline void kvm_vm_bugged(struct kvm *kvm)
-{
-	kvm->vm_bugged = true;
-	kvm_make_all_cpus_request(kvm, KVM_REQ_VM_BUGGED);
-}
-
-#define KVM_BUG(cond, kvm, fmt...)				\
-({								\
-	int __ret = (cond);					\
-								\
-	if (WARN_ONCE(__ret && !(kvm)->vm_bugged, fmt))		\
-		kvm_vm_bugged(kvm);				\
-	unlikely(__ret);					\
-})
-
-#define KVM_BUG_ON(cond, kvm)					\
-({								\
-	int __ret = (cond);					\
-								\
-	if (WARN_ON_ONCE(__ret && !(kvm)->vm_bugged))		\
-		kvm_vm_bugged(kvm);				\
-	unlikely(__ret);					\
-})
 
 static inline bool kvm_dirty_log_manual_protect_and_init_set(struct kvm *kvm)
 {
@@ -877,6 +850,7 @@ void *kvm_mmu_memory_cache_alloc(struct kvm_mmu_memory_cache *mc);
 bool kvm_make_vcpus_request_mask(struct kvm *kvm, unsigned int req,
 				 struct kvm_vcpu *except,
 				 unsigned long *vcpu_bitmap, cpumask_var_t tmp);
+bool kvm_make_all_cpus_request(struct kvm *kvm, unsigned int req);
 bool kvm_make_all_cpus_request_except(struct kvm *kvm, unsigned int req,
 				      struct kvm_vcpu *except);
 bool kvm_make_cpus_request_mask(struct kvm *kvm, unsigned int req,
@@ -911,8 +885,6 @@ int kvm_vm_ioctl_enable_cap(struct kvm *kvm,
 			    struct kvm_enable_cap *cap);
 long kvm_arch_vm_ioctl(struct file *filp,
 		       unsigned int ioctl, unsigned long arg);
-long kvm_arch_vm_compat_ioctl(struct file *filp, unsigned int ioctl,
-			      unsigned long arg);
 
 int kvm_arch_vcpu_ioctl_get_fpu(struct kvm_vcpu *vcpu, struct kvm_fpu *fpu);
 int kvm_arch_vcpu_ioctl_set_fpu(struct kvm_vcpu *vcpu, struct kvm_fpu *fpu);
@@ -1016,7 +988,7 @@ static inline void kvm_arch_end_assignment(struct kvm *kvm)
 {
 }
 
-static __always_inline bool kvm_arch_has_assigned_device(struct kvm *kvm)
+static inline bool kvm_arch_has_assigned_device(struct kvm *kvm)
 {
 	return false;
 }
@@ -1187,7 +1159,6 @@ static inline bool kvm_is_error_gpa(struct kvm *kvm, gpa_t gpa)
 enum kvm_stat_kind {
 	KVM_STAT_VM,
 	KVM_STAT_VCPU,
-	KVM_STAT_DFX,   /* Detail For vcpu stat EXtension */
 };
 
 struct kvm_stat_data {
@@ -1209,25 +1180,9 @@ struct kvm_stats_debugfs_item {
 	{ n, offsetof(struct kvm, stat.x), KVM_STAT_VM, ## __VA_ARGS__ }
 #define VCPU_STAT(n, x, ...)							\
 	{ n, offsetof(struct kvm_vcpu, stat.x), KVM_STAT_VCPU, ## __VA_ARGS__ }
-#define DFX_STAT(n, x, ...)							\
-	{ n, offsetof(struct kvm_vcpu_stat, x), DFX_STAT_U64, ## __VA_ARGS__ }
 
 extern struct kvm_stats_debugfs_item debugfs_entries[];
 extern struct dentry *kvm_debugfs_dir;
-
-enum dfx_stat_kind {
-	DFX_STAT_U64,
-	DFX_STAT_CPUTIME,
-};
-
-/* Detail For vcpu stat EXtension debugfs item */
-struct dfx_kvm_stats_debugfs_item {
-	const char *name;
-	int offset;
-	enum dfx_stat_kind dfx_kind;
-	struct dentry *dentry;
-};
-extern struct dfx_kvm_stats_debugfs_item dfx_debugfs_entries[];
 
 #if defined(CONFIG_MMU_NOTIFIER) && defined(KVM_ARCH_WANT_MMU_NOTIFIER)
 static inline int mmu_notifier_retry(struct kvm *kvm, unsigned long mmu_seq)
@@ -1508,8 +1463,6 @@ static inline long kvm_arch_vcpu_async_ioctl(struct file *filp,
 void kvm_arch_mmu_notifier_invalidate_range(struct kvm *kvm,
 					    unsigned long start, unsigned long end);
 
-void kvm_arch_guest_memory_reclaimed(struct kvm *kvm);
-
 #ifdef CONFIG_HAVE_KVM_VCPU_RUN_PID_CHANGE
 int kvm_arch_vcpu_run_pid_change(struct kvm_vcpu *vcpu);
 #else
@@ -1518,8 +1471,6 @@ static inline int kvm_arch_vcpu_run_pid_change(struct kvm_vcpu *vcpu)
 	return 0;
 }
 #endif /* CONFIG_HAVE_KVM_VCPU_RUN_PID_CHANGE */
-
-void kvm_arch_vcpu_stat_reset(struct kvm_vcpu_stat *vcpu_stat);
 
 typedef int (*kvm_vm_thread_fn_t)(struct kvm *kvm, uintptr_t data);
 

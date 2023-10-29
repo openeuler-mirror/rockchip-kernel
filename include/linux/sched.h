@@ -34,15 +34,14 @@
 #include <linux/rseq.h>
 #include <linux/seqlock.h>
 #include <linux/kcsan.h>
-#include <linux/thread_bits.h>
-#include <linux/kabi.h>
+#include <linux/android_vendor.h>
+#include <linux/android_kabi.h>
 
 /* task_struct member predeclarations (sorted alphabetically): */
 struct audit_context;
 struct backing_dev_info;
 struct bio_list;
 struct blk_plug;
-struct bpf_run_ctx;
 struct capture_control;
 struct cfs_rq;
 struct fs_struct;
@@ -308,10 +307,6 @@ struct sched_info {
 	/* When were we last queued to run? */
 	unsigned long long		last_queued;
 
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
-	KABI_RESERVE(3)
-	KABI_RESERVE(4)
 #endif /* CONFIG_SCHED_INFO */
 };
 
@@ -460,22 +455,6 @@ struct sched_statistics {
 	u64				nr_wakeups_affine_attempts;
 	u64				nr_wakeups_passive;
 	u64				nr_wakeups_idle;
-
-#if defined(CONFIG_QOS_SCHED_SMT_EXPELLER) && !defined(__GENKSYMS__)
-	u64				nr_qos_smt_send_ipi;
-	u64				nr_qos_smt_expelled;
-#else
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
-#endif
-
-#if defined(CONFIG_QOS_SCHED_DYNAMIC_AFFINITY) && !defined(__GENKSYMS__)
-	u64				nr_wakeups_preferred_cpus;
-	u64				nr_wakeups_force_preferred_cpus;
-#else
-	KABI_RESERVE(3)
-	KABI_RESERVE(4)
-#endif
 #endif
 };
 
@@ -516,10 +495,10 @@ struct sched_entity {
 	struct sched_avg		avg;
 #endif
 
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
-	KABI_RESERVE(3)
-	KABI_RESERVE(4)
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
+	ANDROID_KABI_RESERVE(3);
+	ANDROID_KABI_RESERVE(4);
 };
 
 struct sched_rt_entity {
@@ -539,8 +518,10 @@ struct sched_rt_entity {
 	struct rt_rq			*my_q;
 #endif
 
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
+	ANDROID_KABI_RESERVE(3);
+	ANDROID_KABI_RESERVE(4);
 } __randomize_layout;
 
 struct sched_dl_entity {
@@ -572,6 +553,10 @@ struct sched_dl_entity {
 	 * @dl_throttled tells if we exhausted the runtime. If so, the
 	 * task has to wait for a replenishment to be performed at the
 	 * next firing of dl_timer.
+	 *
+	 * @dl_boosted tells if we are boosted due to DI. If so we are
+	 * outside bandwidth enforcement mechanism (but only until we
+	 * exit the critical section);
 	 *
 	 * @dl_yielded tells if task gave up the CPU before consuming
 	 * all its available runtime during the last job.
@@ -614,9 +599,6 @@ struct sched_dl_entity {
 	 */
 	struct sched_dl_entity *pi_se;
 #endif
-
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
 };
 
 #ifdef CONFIG_UCLAMP_TASK
@@ -675,18 +657,6 @@ struct wake_q_node {
 	struct wake_q_node *next;
 };
 
-/**
-* struct task_struct_resvd - KABI extension struct
-*/
-struct task_struct_resvd {
-	/* pointer back to the main task_struct */
-	struct task_struct	*task;
-
-#ifdef CONFIG_MMU
-	struct timer_list	oom_reaper_timer;
-#endif
-};
-
 struct task_struct {
 #ifdef CONFIG_THREAD_INFO_IN_TASK
 	/*
@@ -713,6 +683,10 @@ struct task_struct {
 #ifdef CONFIG_SMP
 	int				on_cpu;
 	struct __call_single_node	wake_entry;
+#ifdef CONFIG_THREAD_INFO_IN_TASK
+	/* Current CPU: */
+	unsigned int			cpu;
+#endif
 	unsigned int			wakee_flips;
 	unsigned long			wakee_flip_decay_ts;
 	struct task_struct		*last_wakee;
@@ -737,7 +711,6 @@ struct task_struct {
 	const struct sched_class	*sched_class;
 	struct sched_entity		se;
 	struct sched_rt_entity		rt;
-
 #ifdef CONFIG_CGROUP_SCHED
 	struct task_group		*sched_task_group;
 #endif
@@ -754,6 +727,10 @@ struct task_struct {
 	 * Must be updated with task_rq_lock() held.
 	 */
 	struct uclamp_se		uclamp[UCLAMP_CNT];
+#endif
+
+#ifdef CONFIG_HOTPLUG_CPU
+	struct list_head		percpu_kthread_node;
 #endif
 
 #ifdef CONFIG_PREEMPT_NOTIFIERS
@@ -874,9 +851,6 @@ struct task_struct {
 	/* Stalled due to lack of memory */
 	unsigned			in_memstall:1;
 #endif
-#ifdef CONFIG_IOMMU_SVA
-	KABI_FILL_HOLE(unsigned		pasid_activated:1)
-#endif
 
 	unsigned long			atomic_flags; /* Flags requiring atomic access. */
 
@@ -938,6 +912,10 @@ struct task_struct {
 	u64				stimescaled;
 #endif
 	u64				gtime;
+#ifdef CONFIG_CPU_FREQ_TIMES
+	u64				*time_in_state;
+	unsigned int			max_state;
+#endif
 	struct prev_cputime		prev_cputime;
 #ifdef CONFIG_VIRT_CPU_ACCOUNTING_GEN
 	struct vtime			vtime;
@@ -1049,6 +1027,7 @@ struct task_struct {
 	raw_spinlock_t			pi_lock;
 
 	struct wake_q_node		wake_q;
+	int				wake_q_count;
 
 #ifdef CONFIG_RT_MUTEXES
 	/* PI waiters blocked on a rt_mutex held by this task: */
@@ -1141,7 +1120,7 @@ struct task_struct {
 	/* cg_list protected by css_set_lock and tsk->alloc_lock: */
 	struct list_head		cg_list;
 #endif
-#if defined(CONFIG_RESCTRL) || defined(CONFIG_X86_CPU_RESCTRL)
+#ifdef CONFIG_X86_CPU_RESCTRL
 	u32				closid;
 	u32				rmid;
 #endif
@@ -1269,7 +1248,7 @@ struct task_struct {
 	u64				timer_slack_ns;
 	u64				default_timer_slack_ns;
 
-#ifdef CONFIG_KASAN
+#if defined(CONFIG_KASAN_GENERIC) || defined(CONFIG_KASAN_SW_TAGS)
 	unsigned int			kasan_depth;
 #endif
 
@@ -1357,7 +1336,7 @@ struct task_struct {
 #ifdef CONFIG_UPROBES
 	struct uprobe_task		*utask;
 #endif
-#if (defined(CONFIG_BCACHE) || defined(CONFIG_BCACHE_MODULE)) && !defined(CONFIG_X86)
+#if defined(CONFIG_BCACHE) || defined(CONFIG_BCACHE_MODULE)
 	unsigned int			sequential_io;
 	unsigned int			sequential_io_avg;
 #endif
@@ -1382,10 +1361,6 @@ struct task_struct {
 	/* Used by LSM modules for access restriction: */
 	void				*security;
 #endif
-#ifdef CONFIG_BPF_SYSCALL
-	/* Used for BPF run context */
-	struct bpf_run_ctx		*bpf_ctx;
-#endif
 
 #ifdef CONFIG_GCC_PLUGIN_STACKLEAK
 	unsigned long			lowest_stack;
@@ -1400,54 +1375,24 @@ struct task_struct {
 					mce_whole_page : 1,
 					__mce_reserved : 62;
 	struct callback_head		mce_kill_me;
-	int				mce_count;
 #endif
+	ANDROID_VENDOR_DATA_ARRAY(1, 64);
+	ANDROID_OEM_DATA_ARRAY(1, 32);
+
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
+	ANDROID_KABI_RESERVE(3);
+	ANDROID_KABI_RESERVE(4);
+	ANDROID_KABI_RESERVE(5);
+	ANDROID_KABI_RESERVE(6);
+	ANDROID_KABI_RESERVE(7);
+	ANDROID_KABI_RESERVE(8);
 
 	/*
 	 * New fields for task_struct should be added above here, so that
 	 * they are included in the randomized portion of task_struct.
 	 */
 	randomized_struct_fields_end
-
-#if defined CONFIG_SCHED_CORE && !defined(__GENKSYMS__)
-	struct rb_node			core_node;
-	unsigned long			core_cookie;
-	unsigned int			core_occupation;
-	KABI_FILL_HOLE(unsigned int kabi_hole)
-#else
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
-	KABI_RESERVE(3)
-	KABI_RESERVE(4)
-	KABI_RESERVE(5)
-#endif
-#ifdef CONFIG_BPF_SCHED
-	/* Used to pad the tag of a task */
-	KABI_USE(6, long tag)
-#else
-	KABI_RESERVE(6)
-#endif
-	KABI_USE(7, void *pf_io_worker)
-#if defined(CONFIG_QOS_SCHED_DYNAMIC_AFFINITY) && !defined(__GENKSYMS__)
-	KABI_USE(8, cpumask_t *prefer_cpus)
-	KABI_USE(9, const cpumask_t *select_cpus)
-#else
-	KABI_RESERVE(8)
-	KABI_RESERVE(9)
-#endif
-#if (defined(CONFIG_BCACHE) || defined(CONFIG_BCACHE_MODULE)) && defined(CONFIG_X86)
-	KABI_USE(10, unsigned int sequential_io)
-	KABI_USE(11, unsigned int sequential_io_avg)
-#else
-	KABI_RESERVE(10)
-	KABI_RESERVE(11)
-#endif
-	KABI_RESERVE(12)
-	KABI_RESERVE(13)
-	KABI_RESERVE(14)
-	KABI_RESERVE(15)
-	KABI_RESERVE(16)
-	KABI_AUX_PTR(task_struct)
 
 	/* CPU-specific state of this task: */
 	struct thread_struct		thread;
@@ -1620,7 +1565,6 @@ extern struct pid *cad_pid;
 #define PF_VCPU			0x00000001	/* I'm a virtual CPU */
 #define PF_IDLE			0x00000002	/* I am an IDLE thread */
 #define PF_EXITING		0x00000004	/* Getting shut down */
-#define PF_RELIABLE		0x00000008	/* Allocate from reliable memory */
 #define PF_IO_WORKER		0x00000010	/* Task is an IO worker */
 #define PF_WQ_WORKER		0x00000020	/* I'm a workqueue worker */
 #define PF_FORKNOEXEC		0x00000040	/* Forked but didn't exec */
@@ -1631,6 +1575,7 @@ extern struct pid *cad_pid;
 #define PF_MEMALLOC		0x00000800	/* Allocating memory */
 #define PF_NPROC_EXCEEDED	0x00001000	/* set_user() noticed that RLIMIT_NPROC was exceeded */
 #define PF_USED_MATH		0x00002000	/* If unset the fpu must be initialized before use */
+#define PF_USED_ASYNC		0x00004000	/* Used async_schedule*(), used by module init */
 #define PF_NOFREEZE		0x00008000	/* This thread should not be frozen */
 #define PF_FROZEN		0x00010000	/* Frozen for system suspend */
 #define PF_KSWAPD		0x00020000	/* I am kswapd */
@@ -1641,7 +1586,6 @@ extern struct pid *cad_pid;
 #define PF_KTHREAD		0x00200000	/* I am a kernel thread */
 #define PF_RANDOMIZE		0x00400000	/* Randomize virtual address space */
 #define PF_SWAPWRITE		0x00800000	/* Allowed to write to swap */
-#define PF_COREDUMP_MCS		0x01000000      /* Task coredump support machine check safe */
 #define PF_NO_SETAFFINITY	0x04000000	/* Userland is not allowed to meddle with cpus_mask */
 #define PF_MCE_EARLY		0x08000000      /* Early kill for mce process policy */
 #define PF_MEMALLOC_NOCMA	0x10000000	/* All allocation request will have _GFP_MOVABLE cleared */
@@ -1676,7 +1620,7 @@ extern struct pid *cad_pid;
 #define tsk_used_math(p)			((p)->flags & PF_USED_MATH)
 #define used_math()				tsk_used_math(current)
 
-static __always_inline bool is_percpu_thread(void)
+static inline bool is_percpu_thread(void)
 {
 #ifdef CONFIG_SMP
 	return (current->flags & PF_NO_SETAFFINITY) &&
@@ -1745,10 +1689,21 @@ current_restore_flags(unsigned long orig_flags, unsigned long flags)
 }
 
 extern int cpuset_cpumask_can_shrink(const struct cpumask *cur, const struct cpumask *trial);
-extern int task_can_attach(struct task_struct *p, const struct cpumask *cs_effective_cpus);
+extern int task_can_attach(struct task_struct *p, const struct cpumask *cs_cpus_allowed);
+
+#ifdef CONFIG_RT_SOFTINT_OPTIMIZATION
+extern bool cpupri_check_rt(void);
+#else
+static inline bool cpupri_check_rt(void)
+{
+	return false;
+}
+#endif
+
 #ifdef CONFIG_SMP
 extern void do_set_cpus_allowed(struct task_struct *p, const struct cpumask *new_mask);
 extern int set_cpus_allowed_ptr(struct task_struct *p, const struct cpumask *new_mask);
+extern void force_compatible_cpus_allowed_ptr(struct task_struct *p);
 #else
 static inline void do_set_cpus_allowed(struct task_struct *p, const struct cpumask *new_mask)
 {
@@ -1822,7 +1777,10 @@ extern struct thread_info init_thread_info;
 extern unsigned long init_stack[THREAD_SIZE / sizeof(unsigned long)];
 
 #ifdef CONFIG_THREAD_INFO_IN_TASK
-# define task_thread_info(task)	(&(task)->thread_info)
+static inline struct thread_info *task_thread_info(struct task_struct *task)
+{
+	return &task->thread_info;
+}
 #elif !defined(__HAVE_THREAD_FUNCTIONS)
 # define task_thread_info(task)	((struct thread_info *)(task)->stack)
 #endif
@@ -1869,16 +1827,9 @@ extern char *__get_task_comm(char *to, size_t len, struct task_struct *tsk);
 	__get_task_comm(buf, sizeof(buf), tsk);		\
 })
 
-#ifdef CONFIG_QOS_SCHED_SMT_EXPELLER
-void qos_smt_check_need_resched(void);
-#endif
-
 #ifdef CONFIG_SMP
 static __always_inline void scheduler_ipi(void)
 {
-#ifdef CONFIG_QOS_SCHED_SMT_EXPELLER
-	qos_smt_check_need_resched();
-#endif
 	/*
 	 * Fold TIF_NEED_RESCHED into the preempt_count; anybody setting
 	 * TIF_NEED_RESCHED remotely (for the first time) will also send
@@ -1951,32 +1902,11 @@ static inline int test_tsk_need_resched(struct task_struct *tsk)
  * value indicates whether a reschedule was done in fact.
  * cond_resched_lock() will drop the spinlock before scheduling,
  */
-#if !defined(CONFIG_PREEMPTION) || defined(CONFIG_PREEMPT_DYNAMIC)
-extern int __cond_resched(void);
-
-#ifdef CONFIG_PREEMPT_DYNAMIC
-
-DECLARE_STATIC_CALL(cond_resched, __cond_resched);
-
-static __always_inline int _cond_resched(void)
-{
-	return static_call(cond_resched)();
-}
-
+#ifndef CONFIG_PREEMPTION
+extern int _cond_resched(void);
 #else
-
-static inline int _cond_resched(void)
-{
-	return __cond_resched();
-}
-
-#endif /* CONFIG_PREEMPT_DYNAMIC */
-
-#else
-
 static inline int _cond_resched(void) { return 0; }
-
-#endif /* !defined(CONFIG_PREEMPTION) || defined(CONFIG_PREEMPT_DYNAMIC) */
+#endif
 
 #define cond_resched() ({			\
 	___might_sleep(__FILE__, __LINE__, 0);	\
@@ -2025,7 +1955,11 @@ static __always_inline bool need_resched(void)
 
 static inline unsigned int task_cpu(const struct task_struct *p)
 {
+#ifdef CONFIG_THREAD_INFO_IN_TASK
+	return READ_ONCE(p->cpu);
+#else
 	return READ_ONCE(task_thread_info(p)->cpu);
+#endif
 }
 
 extern void set_task_cpu(struct task_struct *p, unsigned int cpu);
@@ -2042,8 +1976,6 @@ static inline void set_task_cpu(struct task_struct *p, unsigned int cpu)
 }
 
 #endif /* CONFIG_SMP */
-
-extern bool sched_task_on_rq(struct task_struct *p);
 
 /*
  * In order to reduce various lock holder preemption latencies provide an
@@ -2201,124 +2133,4 @@ int sched_trace_rq_nr_running(struct rq *rq);
 
 const struct cpumask *sched_trace_rd_span(struct root_domain *rd);
 
-#ifdef CONFIG_SCHED_CORE
-extern void sched_core_free(struct task_struct *tsk);
-extern void sched_core_fork(struct task_struct *p);
-extern int sched_core_share_pid(unsigned int cmd, pid_t pid, enum pid_type type,
-				unsigned long uaddr);
-#else
-static inline void sched_core_free(struct task_struct *tsk) { }
-static inline void sched_core_fork(struct task_struct *p) { }
-#endif
-
-#ifdef CONFIG_QOS_SCHED
-void sched_move_offline_task(struct task_struct *p);
-void sched_qos_offline_wait(void);
-int sched_qos_cpu_overload(void);
-#else
-static inline int sched_qos_cpu_overload(void)
-{
-	return 0;
-}
-#endif
-
-#ifdef CONFIG_QOS_SCHED_DYNAMIC_AFFINITY
-int set_prefer_cpus_ptr(struct task_struct *p,
-			const struct cpumask *new_mask);
-int sched_prefer_cpus_fork(struct task_struct *p, struct cpumask *mask);
-void sched_prefer_cpus_free(struct task_struct *p);
-void dynamic_affinity_enable(void);
-#endif
-
-#ifdef CONFIG_BPF_SCHED
-extern void sched_settag(struct task_struct *tsk, s64 tag);
-
-struct bpf_sched_cpu_stats {
-	/* load/util */
-	unsigned long cfs_load_avg;
-	unsigned long cfs_runnable_avg;
-	unsigned long cfs_util_avg;
-	unsigned long rt_load_avg;
-	unsigned long rt_runnable_avg;
-	unsigned long rt_util_avg;
-	unsigned long irq_load_avg;
-	unsigned long irq_runnable_avg;
-	unsigned long irq_util_avg;
-
-	/* nr_running */
-	unsigned int nr_running;
-	unsigned int cfs_nr_running;
-	unsigned int cfs_h_nr_running;
-	unsigned int cfs_idle_h_nr_running;
-	unsigned int rt_nr_running;
-	unsigned int rr_nr_running;
-
-	/* idle statistics */
-	int available_idle;
-	unsigned int exit_latency;
-	unsigned long idle_stamp;
-	unsigned long avg_idle;
-
-	/* capacity */
-	unsigned long capacity;
-	unsigned long capacity_orig;
-
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
-	KABI_RESERVE(3)
-	KABI_RESERVE(4)
-};
-
-struct cpumask_op_args {
-	unsigned int op_type;
-	void *arg1;
-	void *arg2;
-	void *arg3;
-	void *arg4;
-};
-
-enum cpumask_op_type {
-	CPUMASK_EMPTY,
-	CPUMASK_AND,
-	CPUMASK_ANDNOT,
-	CPUMASK_SUBSET,
-	CPUMASK_EQUAL,
-	CPUMASK_TEST_CPU,
-	CPUMASK_COPY,
-	CPUMASK_WEIGHT,
-	CPUMASK_NEXT,
-	CPUMASK_NEXT_WRAP,
-	CPUMASK_NEXT_AND,
-	CPUMASK_CPULIST_PARSE
-};
-
-struct sched_migrate_ctx {
-	struct task_struct *task;
-	struct cpumask *select_idle_mask;
-	int prev_cpu;
-	int curr_cpu;
-	int is_sync;
-	int want_affine;
-	int wake_flags;
-	int sd_flag;
-	int new_cpu;
-
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
-	KABI_RESERVE(3)
-	KABI_RESERVE(4)
-};
-
-struct sched_affine_ctx {
-	struct task_struct *task;
-	int prev_cpu;
-	int curr_cpu;
-	int is_sync;
-
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
-	KABI_RESERVE(3)
-	KABI_RESERVE(4)
-};
-#endif
 #endif

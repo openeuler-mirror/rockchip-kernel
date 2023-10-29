@@ -12,7 +12,6 @@
 #include <net/sock.h>
 #include <net/tcp.h>
 #include <net/strparser.h>
-#include <linux/kabi.h>
 
 #define MAX_MSG_FRAGS			MAX_SKB_FRAGS
 #define NR_MSG_FRAG_IDS			(MAX_MSG_FRAGS + 1)
@@ -59,11 +58,6 @@ struct sk_psock_progs {
 	struct bpf_prog			*msg_parser;
 	struct bpf_prog			*skb_parser;
 	struct bpf_prog			*skb_verdict;
-
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
-	KABI_RESERVE(3)
-	KABI_RESERVE(4)
 };
 
 enum sk_psock_state_bits {
@@ -94,34 +88,25 @@ struct sk_psock {
 	u32				apply_bytes;
 	u32				cork_bytes;
 	u32				eval;
-	bool				redir_ingress; /* undefined if sk_redir is null */
 	struct sk_msg			*cork;
 	struct sk_psock_progs		progs;
 	struct sk_psock_parser		parser;
 	struct sk_buff_head		ingress_skb;
 	struct list_head		ingress_msg;
-	spinlock_t			ingress_lock;
 	unsigned long			state;
 	struct list_head		link;
 	spinlock_t			link_lock;
 	refcount_t			refcnt;
 	void (*saved_unhash)(struct sock *sk);
-	void (*saved_destroy)(struct sock *sk);
 	void (*saved_close)(struct sock *sk, long timeout);
 	void (*saved_write_space)(struct sock *sk);
 	struct proto			*sk_proto;
-	struct mutex			work_mutex;
 	struct sk_psock_work_state	work_state;
 	struct work_struct		work;
 	union {
 		struct rcu_head		rcu;
 		struct work_struct	gc;
 	};
-
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
-	KABI_RESERVE(3)
-	KABI_RESERVE(4)
 };
 
 int sk_msg_alloc(struct sock *sk, struct sk_msg *msg, int len,
@@ -296,93 +281,18 @@ static inline void sk_msg_sg_copy_clear(struct sk_msg *msg, u32 start)
 
 static inline struct sk_psock *sk_psock(const struct sock *sk)
 {
-	return __rcu_dereference_sk_user_data_with_flags(sk,
-							 SK_USER_DATA_PSOCK);
-}
-
-static inline void sk_psock_set_state(struct sk_psock *psock,
-				      enum sk_psock_state_bits bit)
-{
-	set_bit(bit, &psock->state);
-}
-
-static inline void sk_psock_clear_state(struct sk_psock *psock,
-					enum sk_psock_state_bits bit)
-{
-	clear_bit(bit, &psock->state);
-}
-
-static inline bool sk_psock_test_state(const struct sk_psock *psock,
-				       enum sk_psock_state_bits bit)
-{
-	return test_bit(bit, &psock->state);
-}
-
-static inline void sock_drop(struct sock *sk, struct sk_buff *skb)
-{
-	sk_drops_add(sk, skb);
-	kfree_skb(skb);
+	return rcu_dereference_sk_user_data(sk);
 }
 
 static inline void sk_psock_queue_msg(struct sk_psock *psock,
 				      struct sk_msg *msg)
 {
-	spin_lock_bh(&psock->ingress_lock);
-	if (sk_psock_test_state(psock, SK_PSOCK_TX_ENABLED))
-		list_add_tail(&msg->list, &psock->ingress_msg);
-	else {
-		sk_msg_free(psock->sk, msg);
-		kfree(msg);
-	}
-	spin_unlock_bh(&psock->ingress_lock);
-}
-
-static inline struct sk_msg *sk_psock_dequeue_msg(struct sk_psock *psock)
-{
-	struct sk_msg *msg;
-
-	spin_lock_bh(&psock->ingress_lock);
-	msg = list_first_entry_or_null(&psock->ingress_msg, struct sk_msg, list);
-	if (msg)
-		list_del(&msg->list);
-	spin_unlock_bh(&psock->ingress_lock);
-	return msg;
-}
-
-static inline struct sk_msg *sk_psock_peek_msg(struct sk_psock *psock)
-{
-	struct sk_msg *msg;
-
-	spin_lock_bh(&psock->ingress_lock);
-	msg = list_first_entry_or_null(&psock->ingress_msg, struct sk_msg, list);
-	spin_unlock_bh(&psock->ingress_lock);
-	return msg;
-}
-
-static inline struct sk_msg *sk_psock_next_msg(struct sk_psock *psock,
-					       struct sk_msg *msg)
-{
-	struct sk_msg *ret;
-
-	spin_lock_bh(&psock->ingress_lock);
-	if (list_is_last(&msg->list, &psock->ingress_msg))
-		ret = NULL;
-	else
-		ret = list_next_entry(msg, list);
-	spin_unlock_bh(&psock->ingress_lock);
-	return ret;
+	list_add_tail(&msg->list, &psock->ingress_msg);
 }
 
 static inline bool sk_psock_queue_empty(const struct sk_psock *psock)
 {
 	return psock ? list_empty(&psock->ingress_msg) : true;
-}
-
-static inline void kfree_sk_msg(struct sk_msg *msg)
-{
-	if (msg->skb)
-		consume_skb(msg->skb);
-	kfree(msg);
 }
 
 static inline void sk_psock_report_error(struct sk_psock *psock, int err)
@@ -394,7 +304,6 @@ static inline void sk_psock_report_error(struct sk_psock *psock, int err)
 }
 
 struct sk_psock *sk_psock_init(struct sock *sk, int node);
-void sk_psock_stop(struct sk_psock *psock);
 
 int sk_psock_init_strp(struct sock *sk, struct sk_psock *psock);
 void sk_psock_start_strp(struct sock *sk, struct sk_psock *psock);
@@ -455,6 +364,24 @@ static inline void sk_psock_restore_proto(struct sock *sk,
 	}
 }
 
+static inline void sk_psock_set_state(struct sk_psock *psock,
+				      enum sk_psock_state_bits bit)
+{
+	set_bit(bit, &psock->state);
+}
+
+static inline void sk_psock_clear_state(struct sk_psock *psock,
+					enum sk_psock_state_bits bit)
+{
+	clear_bit(bit, &psock->state);
+}
+
+static inline bool sk_psock_test_state(const struct sk_psock *psock,
+				       enum sk_psock_state_bits bit)
+{
+	return test_bit(bit, &psock->state);
+}
+
 static inline struct sk_psock *sk_psock_get(struct sock *sk)
 {
 	struct sk_psock *psock;
@@ -467,6 +394,7 @@ static inline struct sk_psock *sk_psock_get(struct sock *sk)
 	return psock;
 }
 
+void sk_psock_stop(struct sock *sk, struct sk_psock *psock);
 void sk_psock_drop(struct sock *sk, struct sk_psock *psock);
 
 static inline void sk_psock_put(struct sock *sk, struct sk_psock *psock)

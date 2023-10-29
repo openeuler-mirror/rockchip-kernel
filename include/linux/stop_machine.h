@@ -6,7 +6,6 @@
 #include <linux/cpumask.h>
 #include <linux/smp.h>
 #include <linux/list.h>
-#include <linux/kabi.h>
 
 /*
  * stop_cpu[s]() is simplistic per-cpu maximum priority cpu
@@ -27,7 +26,16 @@ struct cpu_stop_work {
 	cpu_stop_fn_t		fn;
 	void			*arg;
 	struct cpu_stop_done	*done;
-	KABI_RESERVE(1)
+};
+
+/*
+ * Structure to determine completion condition and record errors.  May
+ * be shared by works on different cpus.
+ */
+struct cpu_stop_done {
+	atomic_t		nr_todo;	/* nr left to execute */
+	int			ret;		/* collected return value */
+	struct completion	completion;	/* fired if nr_todo reaches 0 */
 };
 
 int stop_one_cpu(unsigned int cpu, cpu_stop_fn_t fn, void *arg);
@@ -37,6 +45,10 @@ bool stop_one_cpu_nowait(unsigned int cpu, cpu_stop_fn_t fn, void *arg,
 void stop_machine_park(int cpu);
 void stop_machine_unpark(int cpu);
 void stop_machine_yield(const struct cpumask *cpumask);
+int stop_one_cpu_async(unsigned int cpu, cpu_stop_fn_t fn, void *arg,
+		       struct cpu_stop_work *work_buf,
+		       struct cpu_stop_done *done);
+void cpu_stop_work_wait(struct cpu_stop_work *work_buf);
 
 #else	/* CONFIG_SMP */
 
@@ -120,22 +132,6 @@ int stop_machine(cpu_stop_fn_t fn, void *data, const struct cpumask *cpus);
  * region. Avoids nested calls to cpus_read_lock().
  */
 int stop_machine_cpuslocked(cpu_stop_fn_t fn, void *data, const struct cpumask *cpus);
-
-/**
- * stop_core_cpuslocked: - stop all threads on just one core
- * @cpu: any cpu in the targeted core
- * @fn: the function to run
- * @data: the data ptr for @fn()
- *
- * Same as above, but instead of every CPU, only the logical CPUs of a
- * single core are affected.
- *
- * Context: Must be called from within a cpus_read_lock() protected region.
- *
- * Return: 0 if all executions of @fn returned 0, any non zero return
- * value if any returned non zero.
- */
-int stop_core_cpuslocked(unsigned int cpu, cpu_stop_fn_t fn, void *data);
 
 int stop_machine_from_inactive_cpu(cpu_stop_fn_t fn, void *data,
 				   const struct cpumask *cpus);

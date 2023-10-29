@@ -74,7 +74,6 @@ struct uart_8250_port;
 struct uart_8250_ops {
 	int		(*setup_irq)(struct uart_8250_port *);
 	void		(*release_irq)(struct uart_8250_port *);
-	void		(*setup_timer)(struct uart_8250_port *);
 };
 
 struct uart_8250_em485 {
@@ -187,10 +186,5 @@ int serial8250_console_exit(struct uart_port *port);
 extern void serial8250_set_isa_configurator(void (*v)
 					(int port, struct uart_port *up,
 						u32 *capabilities));
-
-#ifdef CONFIG_SERIAL_8250_RT288X
-unsigned int au_serial_in(struct uart_port *p, int offset);
-void au_serial_out(struct uart_port *p, int offset, int value);
-#endif
 
 #endif

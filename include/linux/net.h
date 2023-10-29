@@ -23,9 +23,9 @@
 #include <linux/fs.h>
 #include <linux/mm.h>
 #include <linux/sockptr.h>
+#include <linux/android_kabi.h>
 
 #include <uapi/linux/net.h>
-#include <linux/kabi.h>
 
 struct poll_table_struct;
 struct pipe_inode_info;
@@ -205,10 +205,10 @@ struct proto_ops {
 					  size_t size);
 	int		(*set_rcvlowat)(struct sock *sk, int val);
 
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
-	KABI_RESERVE(3)
-	KABI_RESERVE(4)
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
+	ANDROID_KABI_RESERVE(3);
+	ANDROID_KABI_RESERVE(4);
 };
 
 #define DECLARE_SOCKADDR(type, dst, src)	\

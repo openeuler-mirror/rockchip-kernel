@@ -6,7 +6,6 @@
 #ifndef __LINUX_KERNFS_H
 #define __LINUX_KERNFS_H
 
-#include <linux/kabi.h>
 #include <linux/kernel.h>
 #include <linux/err.h>
 #include <linux/list.h>
@@ -17,6 +16,7 @@
 #include <linux/atomic.h>
 #include <linux/uidgid.h>
 #include <linux/wait.h>
+#include <linux/android_kabi.h>
 
 struct file;
 struct dentry;
@@ -157,6 +157,8 @@ struct kernfs_node {
 	unsigned short		flags;
 	umode_t			mode;
 	struct kernfs_iattrs	*iattr;
+
+	ANDROID_KABI_RESERVE(1);
 };
 
 /*
@@ -177,10 +179,10 @@ struct kernfs_syscall_ops {
 	int (*show_path)(struct seq_file *sf, struct kernfs_node *kn,
 			 struct kernfs_root *root);
 
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
-	KABI_RESERVE(3)
-	KABI_RESERVE(4)
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
+	ANDROID_KABI_RESERVE(3);
+	ANDROID_KABI_RESERVE(4);
 };
 
 struct kernfs_root {
@@ -198,6 +200,8 @@ struct kernfs_root {
 	struct list_head	supers;
 
 	wait_queue_head_t	deactivate_waitq;
+
+	ANDROID_KABI_RESERVE(1);
 };
 
 struct kernfs_open_file {
@@ -218,6 +222,8 @@ struct kernfs_open_file {
 	bool			mmapped:1;
 	bool			released:1;
 	const struct vm_operations_struct *vm_ops;
+
+	ANDROID_KABI_RESERVE(1);
 };
 
 struct kernfs_ops {
@@ -275,8 +281,8 @@ struct kernfs_ops {
 	struct lock_class_key	lockdep_key;
 #endif
 
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
 };
 
 /*

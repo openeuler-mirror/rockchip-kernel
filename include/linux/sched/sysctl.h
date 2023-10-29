@@ -31,10 +31,6 @@ extern unsigned int sysctl_sched_min_granularity;
 extern unsigned int sysctl_sched_wakeup_granularity;
 extern unsigned int sysctl_sched_child_runs_first;
 
-#ifdef CONFIG_QOS_SCHED_DYNAMIC_AFFINITY
-extern int sysctl_sched_util_low_pct;
-#endif
-
 enum sched_tunable_scaling {
 	SCHED_TUNABLESCALING_NONE,
 	SCHED_TUNABLESCALING_LOG,
@@ -78,19 +74,6 @@ extern unsigned int sysctl_sched_uclamp_util_min_rt_default;
 extern unsigned int sysctl_sched_cfs_bandwidth_slice;
 #endif
 
-#ifdef CONFIG_QOS_SCHED
-extern unsigned int sysctl_overload_detect_period;
-extern unsigned int sysctl_offline_wait_interval;
-#endif
-
-#ifdef CONFIG_QOS_SCHED_MULTILEVEL
-extern unsigned int sysctl_qos_level_weights[];
-#endif
-
-#ifdef CONFIG_QOS_SCHED_PRIO_LB
-extern unsigned int sysctl_sched_prio_load_balance_enabled;
-#endif
-
 #ifdef CONFIG_SCHED_AUTOGROUP
 extern unsigned int sysctl_sched_autogroup_enabled;
 #endif
@@ -113,12 +96,6 @@ int sysctl_schedstats(struct ctl_table *table, int write, void *buffer,
 extern unsigned int sysctl_sched_energy_aware;
 int sched_energy_aware_handler(struct ctl_table *table, int write,
 		void *buffer, size_t *lenp, loff_t *ppos);
-#endif
-
-#ifdef CONFIG_SCHED_CLUSTER
-extern unsigned int sysctl_sched_cluster;
-int sched_cluster_handler(struct ctl_table *table, int write,
-			  void *buffer, size_t *lenp, loff_t *ppos);
 #endif
 
 #endif /* _LINUX_SCHED_SYSCTL_H */
