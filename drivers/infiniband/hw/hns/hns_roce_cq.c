@@ -203,7 +203,7 @@ static int alloc_cq_buf(struct hns_roce_dev *hr_dev, struct hns_roce_cq *hr_cq,
 	struct hns_roce_buf_attr buf_attr = {};
 	int ret;
 
-	buf_attr.page_shift = hr_dev->caps.cqe_buf_pg_sz + PAGE_SHIFT;
+	buf_attr.page_shift = hr_dev->caps.cqe_buf_pg_sz + HNS_HW_PAGE_SHIFT;
 	buf_attr.region[0].size = hr_cq->cq_depth * hr_cq->cqe_size;
 	buf_attr.region[0].hopnum = hr_dev->caps.cqe_hop_num;
 	buf_attr.region_count = 1;
@@ -363,19 +363,17 @@ int hns_roce_create_cq(struct ib_cq *ib_cq, const struct ib_cq_init_attr *attr,
 	struct hns_roce_ib_create_cq ucmd = {};
 	int ret;
 
-	if (attr->flags) {
-		ret = -EOPNOTSUPP;
-		goto err_out;
-	}
+	if (attr->flags)
+		return -EOPNOTSUPP;
 
 	ret = verify_cq_create_attr(hr_dev, attr);
 	if (ret)
-		goto err_out;
+		return ret;
 
 	if (udata) {
 		ret = get_cq_ucmd(hr_cq, udata, &ucmd);
 		if (ret)
-			goto err_out;
+			return ret;
 
 	}
 
@@ -383,12 +381,12 @@ int hns_roce_create_cq(struct ib_cq *ib_cq, const struct ib_cq_init_attr *attr,
 
 	ret = set_cqe_size(hr_cq, udata, &ucmd);
 	if (ret)
-		goto err_out;
+		return ret;
 
 	ret = alloc_cq_buf(hr_dev, hr_cq, udata, ucmd.buf_addr);
 	if (ret) {
 		ibdev_err(ibdev, "failed to alloc CQ buf, ret = %d.\n", ret);
-		goto err_out;
+		return ret;
 	}
 
 	ret = alloc_cq_db(hr_dev, hr_cq, udata, ucmd.db_addr, &resp);
@@ -433,9 +431,6 @@ err_cq_db:
 	free_cq_db(hr_dev, hr_cq, udata);
 err_cq_buf:
 	free_cq_buf(hr_dev, hr_cq);
-err_out:
-	atomic64_inc(&hr_dev->dfx_cnt[HNS_ROCE_DFX_CQ_CREATE_ERR_CNT]);
-
 	return ret;
 }
 

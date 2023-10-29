@@ -3,6 +3,7 @@
  * Copyright (c) 2018 Hisilicon Limited.
  */
 
+#include <linux/pci.h>
 #include <rdma/ib_umem.h>
 #include "hns_roce_device.h"
 #include "hns_roce_cmd.h"
@@ -171,7 +172,7 @@ static int alloc_srq_idx(struct hns_roce_dev *hr_dev, struct hns_roce_srq *srq,
 
 	srq->idx_que.entry_shift = ilog2(HNS_ROCE_IDX_QUE_ENTRY_SZ);
 
-	buf_attr.page_shift = hr_dev->caps.idx_buf_pg_sz + PAGE_SHIFT;
+	buf_attr.page_shift = hr_dev->caps.idx_buf_pg_sz + HNS_HW_PAGE_SHIFT;
 	buf_attr.region[0].size = to_hr_hem_entries_size(srq->wqe_cnt,
 					srq->idx_que.entry_shift);
 	buf_attr.region[0].hopnum = hr_dev->caps.idx_hop_num;
@@ -225,15 +226,15 @@ static int alloc_srq_wqe_buf(struct hns_roce_dev *hr_dev,
 						      HNS_ROCE_SGE_SIZE *
 						      srq->max_gs)));
 
-	buf_attr.page_shift = hr_dev->caps.srqwqe_buf_pg_sz + PAGE_SHIFT;
+	buf_attr.page_shift = hr_dev->caps.srqwqe_buf_pg_sz + HNS_HW_PAGE_SHIFT;
 	buf_attr.region[0].size = to_hr_hem_entries_size(srq->wqe_cnt,
 							 srq->wqe_shift);
 	buf_attr.region[0].hopnum = hr_dev->caps.srqwqe_hop_num;
 	buf_attr.region_count = 1;
 
 	ret = hns_roce_mtr_create(hr_dev, &srq->buf_mtr, &buf_attr,
-				  hr_dev->caps.srqwqe_ba_pg_sz + PAGE_SHIFT,
-				  udata, addr);
+				  hr_dev->caps.srqwqe_ba_pg_sz +
+				  HNS_HW_PAGE_SHIFT, udata, addr);
 	if (ret)
 		ibdev_err(ibdev,
 			  "failed to alloc SRQ buf mtr, ret = %d.\n", ret);
@@ -400,11 +401,11 @@ int hns_roce_create_srq(struct ib_srq *ib_srq,
 
 	ret = set_srq_param(srq, init_attr, udata);
 	if (ret)
-		goto err_out;
+		return ret;
 
 	ret = alloc_srq_buf(hr_dev, srq, udata);
 	if (ret)
-		goto err_out;
+		return ret;
 
 	ret = alloc_srqn(hr_dev, srq);
 	if (ret)
@@ -436,8 +437,7 @@ err_srqn:
 	free_srqn(hr_dev, srq);
 err_srq_buf:
 	free_srq_buf(hr_dev, srq);
-err_out:
-	atomic64_inc(&hr_dev->dfx_cnt[HNS_ROCE_DFX_SRQ_CREATE_ERR_CNT]);
+
 	return ret;
 }
 

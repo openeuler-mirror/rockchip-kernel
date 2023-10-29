@@ -35,15 +35,46 @@
 
 #include <linux/bitops.h>
 
+#define HNS_ROCE_V2_MAX_QP_NUM			0x1000
+#define HNS_ROCE_V2_MAX_QPC_TIMER_NUM		0x200
+#define HNS_ROCE_V2_MAX_WQE_NUM			0x8000
+#define HNS_ROCE_V2_MAX_SRQ_WR			0x8000
+#define HNS_ROCE_V2_MAX_SRQ_SGE			64
+#define HNS_ROCE_V2_MAX_CQ_NUM			0x100000
+#define HNS_ROCE_V2_MAX_CQC_TIMER_BT_NUM	0x100
+#define HNS_ROCE_V2_MAX_SRQ_NUM			0x100000
+#define HNS_ROCE_V2_MAX_CQE_NUM			0x400000
+#define HNS_ROCE_V2_MAX_RQ_SGE_NUM		64
+#define HNS_ROCE_V2_MAX_SQ_SGE_NUM		64
+#define HNS_ROCE_V2_MAX_EXTEND_SGE_NUM		0x200000
+#define HNS_ROCE_V2_MAX_SQ_INLINE		0x20
+#define HNS_ROCE_V3_MAX_SQ_INLINE		0x400
 #define HNS_ROCE_V2_MAX_RC_INL_INN_SZ		32
-#define HNS_ROCE_V2_MTT_ENTRY_SZ		64
+#define HNS_ROCE_V2_UAR_NUM			256
+#define HNS_ROCE_V2_PHY_UAR_NUM			1
 #define HNS_ROCE_V2_AEQE_VEC_NUM		1
 #define HNS_ROCE_V2_ABNORMAL_VEC_NUM		1
+#define HNS_ROCE_V2_MAX_MTPT_NUM		0x100000
+#define HNS_ROCE_V2_MAX_MTT_SEGS		0x1000000
 #define HNS_ROCE_V2_MAX_SRQWQE_SEGS		0x1000000
 #define HNS_ROCE_V2_MAX_IDX_SEGS		0x1000000
+#define HNS_ROCE_V2_MAX_PD_NUM			0x1000000
+#define HNS_ROCE_V2_MAX_XRCD_NUM		0x1000000
+#define HNS_ROCE_V2_RSV_XRCD_NUM		0
+#define HNS_ROCE_V2_MAX_QP_INIT_RDMA		128
+#define HNS_ROCE_V2_MAX_QP_DEST_RDMA		128
+#define HNS_ROCE_V2_MAX_SQ_DESC_SZ		64
+#define HNS_ROCE_V2_MAX_RQ_DESC_SZ		16
+#define HNS_ROCE_V2_MAX_SRQ_DESC_SZ		64
+#define HNS_ROCE_V2_IRRL_ENTRY_SZ		64
+#define HNS_ROCE_V2_EXT_ATOMIC_TRRL_ENTRY_SZ	100
+#define HNS_ROCE_V2_CQC_ENTRY_SZ		64
+#define HNS_ROCE_V2_SRQC_ENTRY_SZ		64
+#define HNS_ROCE_V2_MTPT_ENTRY_SZ		64
+#define HNS_ROCE_V2_MTT_ENTRY_SZ		64
+#define HNS_ROCE_V2_IDX_ENTRY_SZ		4
 
-#define HNS_ROCE_V2_QP_ACK_TIMEOUT_OFS_HIP08    10
-
+#define HNS_ROCE_V2_SCCC_SZ			32
 #define HNS_ROCE_V3_SCCC_SZ			64
 #define HNS_ROCE_V3_GMV_ENTRY_SZ		32
 
@@ -52,7 +83,7 @@
 
 #define HNS_ROCE_V2_QPC_TIMER_ENTRY_SZ		PAGE_SIZE
 #define HNS_ROCE_V2_CQC_TIMER_ENTRY_SZ		PAGE_SIZE
-#define HNS_ROCE_V2_PAGE_SIZE_SUPPORTED		0xFFFF000
+#define HNS_ROCE_V2_PAGE_SIZE_SUPPORTED		0xFFFFF000
 #define HNS_ROCE_V2_MAX_INNER_MTPT_NUM		2
 #define HNS_ROCE_INVALID_LKEY			0x0
 #define HNS_ROCE_INVALID_SGE_LENGTH		0x80000000
@@ -96,7 +127,7 @@ enum {
 
 #define HNS_ROCE_CMQ_SCC_CLR_DONE_CNT		5
 
-#define HNS_ROCE_CONGEST_SIZE 64
+#define HNS_ROCE_CONG_SIZE 64
 
 #define check_whether_last_step(hop_num, step_idx) \
 	((step_idx == 0 && hop_num == HNS_ROCE_HOP_NUM_0) || \
@@ -151,6 +182,7 @@ enum {
 	HNS_ROCE_V2_WQE_OP_ATOM_MSK_CMP_AND_SWAP	= 0x8,
 	HNS_ROCE_V2_WQE_OP_ATOM_MSK_FETCH_AND_ADD	= 0x9,
 	HNS_ROCE_V2_WQE_OP_FAST_REG_PMR			= 0xa,
+	HNS_ROCE_V2_WQE_OP_LOCAL_INV			= 0xb,
 	HNS_ROCE_V2_WQE_OP_BIND_MW			= 0xc,
 	HNS_ROCE_V2_WQE_OP_MASK				= 0x1f,
 };
@@ -194,15 +226,9 @@ enum {
 /* CMQ command */
 enum hns_roce_opcode_type {
 	HNS_QUERY_FW_VER				= 0x0001,
-	HNS_QUERY_MAC_TYPE				= 0x0389,
-	HNS_ROCE_OPC_CFG_DCQCN_PARAM			= 0x1A80,
-	HNS_ROCE_OPC_CFG_LDCP_PARAM			= 0x1A81,
-	HNS_ROCE_OPC_CFG_HC3_PARAM			= 0x1A82,
-	HNS_ROCE_OPC_CFG_DIP_PARAM			= 0x1A83,
 	HNS_ROCE_OPC_QUERY_HW_VER			= 0x8000,
 	HNS_ROCE_OPC_CFG_GLOBAL_PARAM			= 0x8001,
 	HNS_ROCE_OPC_ALLOC_PF_RES			= 0x8004,
-	HNS_ROCE_OPC_QUERY_COUNTER                      = 0x8206,
 	HNS_ROCE_OPC_QUERY_PF_RES			= 0x8400,
 	HNS_ROCE_OPC_ALLOC_VF_RES			= 0x8401,
 	HNS_ROCE_OPC_CFG_EXT_LLM			= 0x8403,
@@ -210,7 +236,6 @@ enum hns_roce_opcode_type {
 	HNS_ROCE_OPC_QUERY_FUNC_INFO			= 0x8407,
 	HNS_ROCE_OPC_QUERY_PF_CAPS_NUM                  = 0x8408,
 	HNS_ROCE_OPC_CFG_ENTRY_SIZE			= 0x8409,
-	HNS_ROCE_OPC_QUERY_VF_CAPS_NUM			= 0x8410,
 	HNS_ROCE_OPC_CFG_SGID_TB			= 0x8500,
 	HNS_ROCE_OPC_CFG_SMAC_TB			= 0x8501,
 	HNS_ROCE_OPC_POST_MB				= 0x8504,
@@ -224,12 +249,9 @@ enum hns_roce_opcode_type {
 	HNS_ROCE_OPC_QUERY_VF_RES			= 0x850e,
 	HNS_ROCE_OPC_CFG_GMV_TBL			= 0x850f,
 	HNS_ROCE_OPC_CFG_GMV_BT				= 0x8510,
-	HNS_ROCE_OPC_SYNC_MB				= 0x8511,
+	HNS_ROCE_OPC_EXT_CFG				= 0x8512,
 	HNS_ROCE_QUERY_RAM_ECC				= 0x8513,
 	HNS_SWITCH_PARAMETER_CFG			= 0x1033,
-	HNS_ROCE_OPC_SET_BOND_INFO			= 0x8601,
-	HNS_ROCE_OPC_CLEAR_BOND_INFO			= 0x8602,
-	HNS_ROCE_OPC_CHANGE_ACTIVE_PORT			= 0x8603,
 };
 
 enum {
@@ -252,11 +274,6 @@ enum hns_roce_cmd_return_status {
 	CMD_INVALID,
 	CMD_ROH_CHECK_FAIL,
 	CMD_OTHER_ERR = 0xff
-};
-
-struct hns_roce_cmd_errcode {
-	enum hns_roce_cmd_return_status return_status;
-	int errno;
 };
 
 enum hns_roce_sgid_type {
@@ -492,7 +509,7 @@ struct hns_roce_v2_qp_context {
 #define QPC_RQ_TX_ERR QPC_FIELD_LOC(442, 442)
 #define QPC_RQ_RX_ERR QPC_FIELD_LOC(443, 443)
 #define QPC_LP_PKTN_INI QPC_FIELD_LOC(447, 444)
-#define QPC_CONGEST_ALGO_TMPL_ID QPC_FIELD_LOC(455, 448)
+#define QPC_CONG_ALGO_TMPL_ID QPC_FIELD_LOC(455, 448)
 #define QPC_SCC_TOKEN QPC_FIELD_LOC(474, 456)
 #define QPC_SQ_DB_DOING QPC_FIELD_LOC(475, 475)
 #define QPC_RQ_DB_DOING QPC_FIELD_LOC(476, 476)
@@ -512,8 +529,7 @@ struct hns_roce_v2_qp_context {
 #define QPC_RQ_RTY_TX_ERR QPC_FIELD_LOC(607, 607)
 #define QPC_RX_CQN QPC_FIELD_LOC(631, 608)
 #define QPC_XRC_QP_TYPE QPC_FIELD_LOC(632, 632)
-#define QPC_CQEIE QPC_FIELD_LOC(633, 633)
-#define QPC_CQEIS QPC_FIELD_LOC(634, 634)
+#define QPC_RSV3 QPC_FIELD_LOC(634, 633)
 #define QPC_MIN_RNR_TIME QPC_FIELD_LOC(639, 635)
 #define QPC_RQ_PRODUCER_IDX QPC_FIELD_LOC(655, 640)
 #define QPC_RQ_CONSUMER_IDX QPC_FIELD_LOC(671, 656)
@@ -646,8 +662,8 @@ struct hns_roce_v2_qp_context {
 
 #define QPCEX_FIELD_LOC(h, l) FIELD_LOC(struct hns_roce_v2_qp_context_ex, h, l)
 
-#define QPCEX_CONGEST_ALG_SEL QPCEX_FIELD_LOC(0, 0)
-#define QPCEX_CONGEST_ALG_SUB_SEL QPCEX_FIELD_LOC(1, 1)
+#define QPCEX_CONG_ALG_SEL QPCEX_FIELD_LOC(0, 0)
+#define QPCEX_CONG_ALG_SUB_SEL QPCEX_FIELD_LOC(1, 1)
 #define QPCEX_DIP_CTX_IDX_VLD QPCEX_FIELD_LOC(2, 2)
 #define QPCEX_DIP_CTX_IDX QPCEX_FIELD_LOC(22, 3)
 #define QPCEX_SQ_RQ_NOT_FORBID_EN QPCEX_FIELD_LOC(23, 23)
@@ -742,8 +758,7 @@ struct hns_roce_v2_mpt_entry {
 #define MPT_INNER_PA_VLD MPT_FIELD_LOC(71, 71)
 #define MPT_MW_BIND_QPN MPT_FIELD_LOC(95, 72)
 #define MPT_BOUND_LKEY MPT_FIELD_LOC(127, 96)
-#define MPT_LEN_L MPT_FIELD_LOC(159, 128)
-#define MPT_LEN_H MPT_FIELD_LOC(191, 160)
+#define MPT_LEN MPT_FIELD_LOC(191, 128)
 #define MPT_LKEY MPT_FIELD_LOC(223, 192)
 #define MPT_VA MPT_FIELD_LOC(287, 224)
 #define MPT_PBL_SIZE MPT_FIELD_LOC(319, 288)
@@ -898,11 +913,10 @@ struct hns_roce_v2_rc_send_wqe {
 #define RC_SEND_WQE_OPCODE RC_SEND_WQE_FIELD_LOC(4, 0)
 #define RC_SEND_WQE_DB_SL_L RC_SEND_WQE_FIELD_LOC(6, 5)
 #define RC_SEND_WQE_DB_SL_H RC_SEND_WQE_FIELD_LOC(14, 13)
-#define RC_SEND_WQE_SQPN_L RC_SEND_WQE_FIELD_LOC(6, 5)
-#define RC_SEND_WQE_SQPN_H RC_SEND_WQE_FIELD_LOC(30, 13)
 #define RC_SEND_WQE_OWNER RC_SEND_WQE_FIELD_LOC(7, 7)
 #define RC_SEND_WQE_CQE RC_SEND_WQE_FIELD_LOC(8, 8)
 #define RC_SEND_WQE_FENCE RC_SEND_WQE_FIELD_LOC(9, 9)
+#define RC_SEND_WQE_SO RC_SEND_WQE_FIELD_LOC(10, 10)
 #define RC_SEND_WQE_SE RC_SEND_WQE_FIELD_LOC(11, 11)
 #define RC_SEND_WQE_INLINE RC_SEND_WQE_FIELD_LOC(12, 12)
 #define RC_SEND_WQE_WQE_INDEX RC_SEND_WQE_FIELD_LOC(30, 15)
@@ -911,8 +925,6 @@ struct hns_roce_v2_rc_send_wqe {
 #define RC_SEND_WQE_SGE_NUM RC_SEND_WQE_FIELD_LOC(127, 120)
 #define RC_SEND_WQE_MSG_START_SGE_IDX RC_SEND_WQE_FIELD_LOC(151, 128)
 #define RC_SEND_WQE_INL_TYPE RC_SEND_WQE_FIELD_LOC(159, 159)
-
-#define V2_RC_SEND_WQE_BYTE_4_SQPN_L_W 2
 
 struct hns_roce_wqe_frmr_seg {
 	__le32	pbl_size;
@@ -966,6 +978,15 @@ struct hns_roce_func_clear {
 #define HNS_ROCE_V2_FUNC_CLEAR_TIMEOUT_MSECS	(249 * 2 * 100)
 #define HNS_ROCE_V2_READ_FUNC_CLEAR_FLAG_INTERVAL	40
 #define HNS_ROCE_V2_READ_FUNC_CLEAR_FLAG_FAIL_WAIT	20
+
+/* Fields of HNS_ROCE_OPC_EXT_CFG */
+#define EXT_CFG_VF_ID CMQ_REQ_FIELD_LOC(31, 0)
+#define EXT_CFG_QP_PI_IDX CMQ_REQ_FIELD_LOC(45, 32)
+#define EXT_CFG_QP_PI_NUM CMQ_REQ_FIELD_LOC(63, 48)
+#define EXT_CFG_QP_NUM CMQ_REQ_FIELD_LOC(87, 64)
+#define EXT_CFG_QP_IDX CMQ_REQ_FIELD_LOC(119, 96)
+#define EXT_CFG_LLM_IDX CMQ_REQ_FIELD_LOC(139, 128)
+#define EXT_CFG_LLM_NUM CMQ_REQ_FIELD_LOC(156, 144)
 
 #define CFG_LLM_A_BA_L CMQ_REQ_FIELD_LOC(31, 0)
 #define CFG_LLM_A_BA_H CMQ_REQ_FIELD_LOC(63, 32)
@@ -1152,7 +1173,7 @@ struct hns_roce_query_pf_caps_a {
 	__le16 max_sq_sg;
 	__le16 max_sq_inline;
 	__le16 max_rq_sg;
-	__le32 rsv0;
+	__le32 max_extend_sg;
 	__le16 num_qpc_timer;
 	__le16 num_cqc_timer;
 	__le16 max_srq_sges;
@@ -1203,7 +1224,6 @@ struct hns_roce_query_pf_caps_c {
 #define PF_CAPS_C_NUM_CQS PF_CAPS_C_FIELD_LOC(51, 32)
 #define PF_CAPS_C_MAX_GID PF_CAPS_C_FIELD_LOC(60, 52)
 #define PF_CAPS_C_CQ_DEPTH PF_CAPS_C_FIELD_LOC(86, 64)
-#define PF_CAPS_C_NUM_XRCDS PF_CAPS_C_FIELD_LOC(91, 87)
 #define PF_CAPS_C_NUM_MRWS PF_CAPS_C_FIELD_LOC(115, 96)
 #define PF_CAPS_C_NUM_QPS PF_CAPS_C_FIELD_LOC(147, 128)
 #define PF_CAPS_C_MAX_ORD PF_CAPS_C_FIELD_LOC(155, 148)
@@ -1225,13 +1245,12 @@ struct hns_roce_query_pf_caps_d {
 #define PF_CAPS_D_RQWQE_HOP_NUM PF_CAPS_D_FIELD_LOC(21, 20)
 #define PF_CAPS_D_EX_SGE_HOP_NUM PF_CAPS_D_FIELD_LOC(23, 22)
 #define PF_CAPS_D_SQWQE_HOP_NUM PF_CAPS_D_FIELD_LOC(25, 24)
-#define PF_CAPS_D_CONGEST_TYPE PF_CAPS_D_FIELD_LOC(29, 26)
+#define PF_CAPS_D_CONG_TYPE PF_CAPS_D_FIELD_LOC(29, 26)
 #define PF_CAPS_D_CEQ_DEPTH PF_CAPS_D_FIELD_LOC(85, 64)
 #define PF_CAPS_D_NUM_CEQS PF_CAPS_D_FIELD_LOC(95, 86)
 #define PF_CAPS_D_AEQ_DEPTH PF_CAPS_D_FIELD_LOC(117, 96)
 #define PF_CAPS_D_AEQ_ARM_ST PF_CAPS_D_FIELD_LOC(119, 118)
 #define PF_CAPS_D_CEQ_ARM_ST PF_CAPS_D_FIELD_LOC(121, 120)
-#define PF_CAPS_D_DEFAULT_ALG PF_CAPS_D_FIELD_LOC(127, 122)
 #define PF_CAPS_D_RSV_PDS PF_CAPS_D_FIELD_LOC(147, 128)
 #define PF_CAPS_D_NUM_UARS PF_CAPS_D_FIELD_LOC(155, 148)
 #define PF_CAPS_D_RSV_QPS PF_CAPS_D_FIELD_LOC(179, 160)
@@ -1263,7 +1282,6 @@ struct hns_roce_query_pf_caps_e {
 #define PF_CAPS_E_RSV_MRWS PF_CAPS_E_FIELD_LOC(19, 0)
 #define PF_CAPS_E_CHUNK_SIZE_SHIFT PF_CAPS_E_FIELD_LOC(31, 20)
 #define PF_CAPS_E_RSV_CQS PF_CAPS_E_FIELD_LOC(51, 32)
-#define PF_CAPS_E_RSV_XRCDS PF_CAPS_E_FIELD_LOC(63, 52)
 #define PF_CAPS_E_RSV_SRQS PF_CAPS_E_FIELD_LOC(83, 64)
 #define PF_CAPS_E_RSV_LKEYS PF_CAPS_E_FIELD_LOC(115, 96)
 
@@ -1311,10 +1329,6 @@ struct hns_roce_link_table {
 #define HNS_ROCE_EXT_LLM_ENTRY(addr, id) (((id) << (64 - 12)) | ((addr) >> 12))
 #define HNS_ROCE_EXT_LLM_MIN_PAGES(que_num) ((que_num) * 4 + 2)
 
-struct hns_roce_v2_reset_state {
-	u32 reset_state; /* stored to use in user space */
-};
-
 struct hns_roce_v2_free_mr {
 	struct hns_roce_qp *rsv_qp[HNS_ROCE_FREE_MR_USED_QP_NUM];
 	struct hns_roce_cq *rsv_cq;
@@ -1341,13 +1355,6 @@ struct fmea_ram_ecc {
 	u32	index;
 };
 
-/* only for RNR timeout issue of HIP08 */
-#define HNS_ROCE_CLOCK_ADJUST	1000
-#define HNS_ROCE_MAX_CQ_PERIOD	65
-#define HNS_ROCE_MAX_EQ_PERIOD	65
-#define HNS_ROCE_RNR_TIMER_10NS	1
-#define HNS_ROCE_1US_CFG	999
-#define HNS_ROCE_1NS_CFG	0
 
 #define HNS_ROCE_AEQ_DEFAULT_BURST_NUM	0x0
 #define HNS_ROCE_AEQ_DEFAULT_INTERVAL	0x0
@@ -1438,134 +1445,6 @@ struct hns_roce_wqe_atomic_seg {
 	__le64          cmp_data;
 };
 
-#define HNS_ROCE_DCQCN_AI_OFS 0
-#define HNS_ROCE_DCQCN_AI_SZ sizeof(u16)
-#define HNS_ROCE_DCQCN_AI_MAX ((u16)(~0U))
-#define HNS_ROCE_DCQCN_F_OFS (HNS_ROCE_DCQCN_AI_OFS + HNS_ROCE_DCQCN_AI_SZ)
-#define HNS_ROCE_DCQCN_F_SZ sizeof(u8)
-#define HNS_ROCE_DCQCN_F_MAX ((u8)(~0U))
-#define HNS_ROCE_DCQCN_TKP_OFS (HNS_ROCE_DCQCN_F_OFS + HNS_ROCE_DCQCN_F_SZ)
-#define HNS_ROCE_DCQCN_TKP_SZ sizeof(u8)
-#define HNS_ROCE_DCQCN_TKP_MAX 15
-#define HNS_ROCE_DCQCN_TMP_OFS (HNS_ROCE_DCQCN_TKP_OFS + HNS_ROCE_DCQCN_TKP_SZ)
-#define HNS_ROCE_DCQCN_TMP_SZ sizeof(u16)
-#define HNS_ROCE_DCQCN_TMP_MAX 15
-#define HNS_ROCE_DCQCN_ALP_OFS (HNS_ROCE_DCQCN_TMP_OFS + HNS_ROCE_DCQCN_TMP_SZ)
-#define HNS_ROCE_DCQCN_ALP_SZ sizeof(u16)
-#define HNS_ROCE_DCQCN_ALP_MAX ((u16)(~0U))
-#define HNS_ROCE_DCQCN_MAX_SPEED_OFS (HNS_ROCE_DCQCN_ALP_OFS + \
-					HNS_ROCE_DCQCN_ALP_SZ)
-#define HNS_ROCE_DCQCN_MAX_SPEED_SZ sizeof(u32)
-#define HNS_ROCE_DCQCN_MAX_SPEED_MAX ((u32)(~0U))
-#define HNS_ROCE_DCQCN_G_OFS (HNS_ROCE_DCQCN_MAX_SPEED_OFS + \
-					HNS_ROCE_DCQCN_MAX_SPEED_SZ)
-#define HNS_ROCE_DCQCN_G_SZ sizeof(u8)
-#define HNS_ROCE_DCQCN_G_MAX 15
-#define HNS_ROCE_DCQCN_AL_OFS (HNS_ROCE_DCQCN_G_OFS + HNS_ROCE_DCQCN_G_SZ)
-#define HNS_ROCE_DCQCN_AL_SZ sizeof(u8)
-#define HNS_ROCE_DCQCN_AL_MAX ((u8)(~0U))
-#define HNS_ROCE_DCQCN_CNP_TIME_OFS (HNS_ROCE_DCQCN_AL_OFS + \
-					HNS_ROCE_DCQCN_AL_SZ)
-#define HNS_ROCE_DCQCN_CNP_TIME_SZ sizeof(u8)
-#define HNS_ROCE_DCQCN_CNP_TIME_MAX ((u8)(~0U))
-#define HNS_ROCE_DCQCN_ASHIFT_OFS (HNS_ROCE_DCQCN_CNP_TIME_OFS + \
-					HNS_ROCE_DCQCN_CNP_TIME_SZ)
-#define HNS_ROCE_DCQCN_ASHIFT_SZ sizeof(u8)
-#define HNS_ROCE_DCQCN_ASHIFT_MAX 15
-#define HNS_ROCE_DCQCN_LIFESPAN_OFS (HNS_ROCE_DCQCN_ASHIFT_OFS + \
-					HNS_ROCE_DCQCN_ASHIFT_SZ)
-#define HNS_ROCE_DCQCN_LIFESPAN_SZ sizeof(u32)
-#define HNS_ROCE_DCQCN_LIFESPAN_MAX 1000
-
-#define HNS_ROCE_LDCP_CWD0_OFS 0
-#define HNS_ROCE_LDCP_CWD0_SZ sizeof(u32)
-#define HNS_ROCE_LDCP_CWD0_MAX ((u32)(~0U))
-#define HNS_ROCE_LDCP_ALPHA_OFS (HNS_ROCE_LDCP_CWD0_OFS + HNS_ROCE_LDCP_CWD0_SZ)
-#define HNS_ROCE_LDCP_ALPHA_SZ sizeof(u8)
-#define HNS_ROCE_LDCP_ALPHA_MAX ((u8)(~0U))
-#define HNS_ROCE_LDCP_GAMMA_OFS (HNS_ROCE_LDCP_ALPHA_OFS + \
-					HNS_ROCE_LDCP_ALPHA_SZ)
-#define HNS_ROCE_LDCP_GAMMA_SZ sizeof(u8)
-#define HNS_ROCE_LDCP_GAMMA_MAX ((u8)(~0U))
-#define HNS_ROCE_LDCP_BETA_OFS (HNS_ROCE_LDCP_GAMMA_OFS + \
-					HNS_ROCE_LDCP_GAMMA_SZ)
-#define HNS_ROCE_LDCP_BETA_SZ sizeof(u8)
-#define HNS_ROCE_LDCP_BETA_MAX ((u8)(~0U))
-#define HNS_ROCE_LDCP_ETA_OFS (HNS_ROCE_LDCP_BETA_OFS + HNS_ROCE_LDCP_BETA_SZ)
-#define HNS_ROCE_LDCP_ETA_SZ sizeof(u8)
-#define HNS_ROCE_LDCP_ETA_MAX ((u8)(~0U))
-#define HNS_ROCE_LDCP_LIFESPAN_OFS (4 * sizeof(u32))
-#define HNS_ROCE_LDCP_LIFESPAN_SZ sizeof(u32)
-#define HNS_ROCE_LDCP_LIFESPAN_MAX 1000
-
-#define HNS_ROCE_HC3_INITIAL_WINDOW_OFS 0
-#define HNS_ROCE_HC3_INITIAL_WINDOW_SZ sizeof(u32)
-#define HNS_ROCE_HC3_INITIAL_WINDOW_MAX ((u32)(~0U))
-#define HNS_ROCE_HC3_BANDWIDTH_OFS (HNS_ROCE_HC3_INITIAL_WINDOW_OFS + \
-					HNS_ROCE_HC3_INITIAL_WINDOW_SZ)
-#define HNS_ROCE_HC3_BANDWIDTH_SZ sizeof(u32)
-#define HNS_ROCE_HC3_BANDWIDTH_MAX ((u32)(~0U))
-#define HNS_ROCE_HC3_QLEN_SHIFT_OFS (HNS_ROCE_HC3_BANDWIDTH_OFS + \
-					HNS_ROCE_HC3_BANDWIDTH_SZ)
-#define HNS_ROCE_HC3_QLEN_SHIFT_SZ sizeof(u8)
-#define HNS_ROCE_HC3_QLEN_SHIFT_MAX ((u8)(~0U))
-#define HNS_ROCE_HC3_PORT_USAGE_SHIFT_OFS (HNS_ROCE_HC3_QLEN_SHIFT_OFS + \
-						HNS_ROCE_HC3_QLEN_SHIFT_SZ)
-#define HNS_ROCE_HC3_PORT_USAGE_SHIFT_SZ sizeof(u8)
-#define HNS_ROCE_HC3_PORT_USAGE_SHIFT_MAX ((u8)(~0U))
-#define HNS_ROCE_HC3_OVER_PERIOD_OFS (HNS_ROCE_HC3_PORT_USAGE_SHIFT_OFS + \
-					HNS_ROCE_HC3_PORT_USAGE_SHIFT_SZ)
-#define HNS_ROCE_HC3_OVER_PERIOD_SZ sizeof(u8)
-#define HNS_ROCE_HC3_OVER_PERIOD_MAX ((u8)(~0U))
-#define HNS_ROCE_HC3_MAX_STAGE_OFS (HNS_ROCE_HC3_OVER_PERIOD_OFS + \
-					HNS_ROCE_HC3_OVER_PERIOD_SZ)
-#define HNS_ROCE_HC3_MAX_STAGE_SZ sizeof(u8)
-#define HNS_ROCE_HC3_MAX_STAGE_MAX ((u8)(~0U))
-#define HNS_ROCE_HC3_GAMMA_SHIFT_OFS (HNS_ROCE_HC3_MAX_STAGE_OFS + \
-					HNS_ROCE_HC3_MAX_STAGE_SZ)
-#define HNS_ROCE_HC3_GAMMA_SHIFT_SZ sizeof(u8)
-#define HNS_ROCE_HC3_GAMMA_SHIFT_MAX 15
-#define HNS_ROCE_HC3_LIFESPAN_OFS (4 * sizeof(u32))
-#define HNS_ROCE_HC3_LIFESPAN_SZ sizeof(u32)
-#define HNS_ROCE_HC3_LIFESPAN_MAX 1000
-
-#define HNS_ROCE_DIP_AI_OFS 0
-#define HNS_ROCE_DIP_AI_SZ sizeof(u16)
-#define HNS_ROCE_DIP_AI_MAX ((u16)(~0U))
-#define HNS_ROCE_DIP_F_OFS (HNS_ROCE_DIP_AI_OFS + HNS_ROCE_DIP_AI_SZ)
-#define HNS_ROCE_DIP_F_SZ sizeof(u8)
-#define HNS_ROCE_DIP_F_MAX ((u8)(~0U))
-#define HNS_ROCE_DIP_TKP_OFS (HNS_ROCE_DIP_F_OFS + HNS_ROCE_DIP_F_SZ)
-#define HNS_ROCE_DIP_TKP_SZ sizeof(u8)
-#define HNS_ROCE_DIP_TKP_MAX 15
-#define HNS_ROCE_DIP_TMP_OFS (HNS_ROCE_DIP_TKP_OFS + HNS_ROCE_DIP_TKP_SZ)
-#define HNS_ROCE_DIP_TMP_SZ sizeof(u16)
-#define HNS_ROCE_DIP_TMP_MAX 15
-#define HNS_ROCE_DIP_ALP_OFS (HNS_ROCE_DIP_TMP_OFS + HNS_ROCE_DIP_TMP_SZ)
-#define HNS_ROCE_DIP_ALP_SZ sizeof(u16)
-#define HNS_ROCE_DIP_ALP_MAX ((u16)(~0U))
-#define HNS_ROCE_DIP_MAX_SPEED_OFS (HNS_ROCE_DIP_ALP_OFS + HNS_ROCE_DIP_ALP_SZ)
-#define HNS_ROCE_DIP_MAX_SPEED_SZ sizeof(u32)
-#define HNS_ROCE_DIP_MAX_SPEED_MAX ((u32)(~0U))
-#define HNS_ROCE_DIP_G_OFS (HNS_ROCE_DIP_MAX_SPEED_OFS + \
-				HNS_ROCE_DIP_MAX_SPEED_SZ)
-#define HNS_ROCE_DIP_G_SZ sizeof(u8)
-#define HNS_ROCE_DIP_G_MAX 15
-#define HNS_ROCE_DIP_AL_OFS (HNS_ROCE_DIP_G_OFS + HNS_ROCE_DIP_G_SZ)
-#define HNS_ROCE_DIP_AL_SZ sizeof(u8)
-#define HNS_ROCE_DIP_AL_MAX ((u8)(~0U))
-#define HNS_ROCE_DIP_CNP_TIME_OFS (HNS_ROCE_DIP_AL_OFS + HNS_ROCE_DIP_AL_SZ)
-#define HNS_ROCE_DIP_CNP_TIME_SZ sizeof(u8)
-#define HNS_ROCE_DIP_CNP_TIME_MAX ((u8)(~0U))
-#define HNS_ROCE_DIP_ASHIFT_OFS (HNS_ROCE_DIP_CNP_TIME_OFS + \
-					HNS_ROCE_DIP_CNP_TIME_SZ)
-#define HNS_ROCE_DIP_ASHIFT_SZ sizeof(u8)
-#define HNS_ROCE_DIP_ASHIFT_MAX 15
-#define HNS_ROCE_DIP_LIFESPAN_OFS (HNS_ROCE_DIP_ASHIFT_OFS + \
-					HNS_ROCE_DIP_ASHIFT_SZ)
-#define HNS_ROCE_DIP_LIFESPAN_SZ sizeof(u32)
-#define HNS_ROCE_DIP_LIFESPAN_MAX 1000
-
 struct hns_roce_sccc_clr {
 	__le32 qpn;
 	__le32 rsv[5];
@@ -1576,27 +1455,14 @@ struct hns_roce_sccc_clr_done {
 	__le32 rsv[5];
 };
 
-struct hns_roce_bond_info {
-	__le32 bond_id;
-	__le32 bond_mode;
-	__le32 active_slave_cnt;
-	__le32 active_slave_mask;
-	__le32 slave_mask;
-	__le32 hash_policy;
-};
+int hns_roce_v2_query_cqc_info(struct hns_roce_dev *hr_dev, u32 cqn,
+			       int *buffer);
 
-struct hns_roce_dev
-	*hns_roce_bond_init_client(struct hns_roce_bond_group *bond_grp,
-				   int func_idx);
-void hns_roce_bond_uninit_client(struct hns_roce_bond_group *bond_grp,
-				 int func_idx);
 int hns_roce_v2_destroy_qp(struct ib_qp *ibqp, struct ib_udata *udata);
 
 int hns_roce_v2_destroy_qp_common(struct hns_roce_dev *hr_dev,
 				  struct hns_roce_qp *hr_qp,
 				  struct ib_udata *udata);
-int hns_roce_cmd_bond(struct hns_roce_bond_group *bond_grp,
-		      enum hns_roce_bond_cmd_type bond_type);
 
 static inline void hns_roce_write64(struct hns_roce_dev *hr_dev, __le32 val[2],
 				    void __iomem *dest)
