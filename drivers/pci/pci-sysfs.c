@@ -454,39 +454,12 @@ static ssize_t remove_store(struct device *dev, struct device_attribute *attr,
 			    const char *buf, size_t count)
 {
 	unsigned long val;
-	struct pci_dev *pdev = to_pci_dev(dev);
-	struct pci_dev *rpdev = pdev->rpdev;
 
 	if (kstrtoul(buf, 0, &val) < 0)
 		return -EINVAL;
 
-	if (rpdev && test_and_set_bit(0,
-				&rpdev->slot_being_removed_rescanned)) {
-		pr_info("Slot is being removed or rescanned, please try later!\n");
-		return -EINVAL;
-	}
-
-	/*
-	 * if 'dev' is root port itself, 'pci_stop_and_remove_bus_device()' may
-	 * free the 'rpdev', but we need to clear
-	 * 'rpdev->slot_being_removed_rescanned' in the end. So get 'rpdev' to
-	 * avoid possible 'use-after-free'.
-	 */
-	if (rpdev)
-		pci_dev_get(rpdev);
-
-	if (val) {
-		pci_dev_get(pdev);
-		if (device_remove_file_self(dev, attr))
-			pci_stop_and_remove_bus_device_locked(pdev);
-		pci_dev_put(pdev);
-	}
-
-	if (rpdev) {
-		clear_bit(0, &rpdev->slot_being_removed_rescanned);
-		pci_dev_put(rpdev);
-	}
-
+	if (val && device_remove_file_self(dev, attr))
+		pci_stop_and_remove_bus_device_locked(to_pci_dev(dev));
 	return count;
 }
 static DEVICE_ATTR_IGNORE_LOCKDEP(remove, 0220, NULL,
@@ -1168,9 +1141,11 @@ static int pci_create_attr(struct pci_dev *pdev, int num, int write_combine)
 
 	sysfs_bin_attr_init(res_attr);
 	if (write_combine) {
+		pdev->res_attr_wc[num] = res_attr;
 		sprintf(res_attr_name, "resource%d_wc", num);
 		res_attr->mmap = pci_mmap_resource_wc;
 	} else {
+		pdev->res_attr[num] = res_attr;
 		sprintf(res_attr_name, "resource%d", num);
 		if (pci_resource_flags(pdev, num) & IORESOURCE_IO) {
 			res_attr->read = pci_read_resource_io;
@@ -1186,17 +1161,10 @@ static int pci_create_attr(struct pci_dev *pdev, int num, int write_combine)
 	res_attr->size = pci_resource_len(pdev, num);
 	res_attr->private = (void *)(unsigned long)num;
 	retval = sysfs_create_bin_file(&pdev->dev.kobj, res_attr);
-	if (retval) {
+	if (retval)
 		kfree(res_attr);
-		return retval;
-	}
 
-	if (write_combine)
-		pdev->res_attr_wc[num] = res_attr;
-	else
-		pdev->res_attr[num] = res_attr;
-
-	return 0;
+	return retval;
 }
 
 /**

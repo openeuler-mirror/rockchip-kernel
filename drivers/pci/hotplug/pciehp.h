@@ -72,8 +72,6 @@ extern int pciehp_poll_time;
  * @reset_lock: prevents access to the Data Link Layer Link Active bit in the
  *	Link Status register and to the Presence Detect State bit in the Slot
  *	Status register during a slot reset which may cause them to flap
- * @depth: Number of additional hotplug ports in the path to the root bus,
- *	used as lock subclass for @reset_lock
  * @ist_running: flag to keep user request waiting while IRQ thread is running
  * @request_result: result of last user request submitted to the IRQ thread
  * @requester: wait queue to wake up on completion of user request,
@@ -105,7 +103,6 @@ struct controller {
 
 	struct hotplug_slot hotplug_slot;	/* hotplug core interface */
 	struct rw_semaphore reset_lock;
-	unsigned int depth;
 	unsigned int ist_running;
 	int request_result;
 	wait_queue_head_t requester;
@@ -192,11 +189,6 @@ int pciehp_get_raw_indicator_status(struct hotplug_slot *h_slot, u8 *status);
 static inline const char *slot_name(struct controller *ctrl)
 {
 	return hotplug_slot_name(&ctrl->hotplug_slot);
-}
-
-static inline struct pci_dev *ctrl_dev(struct controller *ctrl)
-{
-	return ctrl->pcie->port;
 }
 
 static inline struct controller *to_ctrl(struct hotplug_slot *hotplug_slot)

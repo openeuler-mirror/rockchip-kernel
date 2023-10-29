@@ -101,18 +101,13 @@ static const struct dev_pm_ops pcie_portdrv_pm_ops = {
 static int pcie_portdrv_probe(struct pci_dev *dev,
 					const struct pci_device_id *id)
 {
-	int type = pci_pcie_type(dev);
 	int status;
 
 	if (!pci_is_pcie(dev) ||
-	    ((type != PCI_EXP_TYPE_ROOT_PORT) &&
-	     (type != PCI_EXP_TYPE_UPSTREAM) &&
-	     (type != PCI_EXP_TYPE_DOWNSTREAM) &&
-	     (type != PCI_EXP_TYPE_RC_EC)))
+	    ((pci_pcie_type(dev) != PCI_EXP_TYPE_ROOT_PORT) &&
+	     (pci_pcie_type(dev) != PCI_EXP_TYPE_UPSTREAM) &&
+	     (pci_pcie_type(dev) != PCI_EXP_TYPE_DOWNSTREAM)))
 		return -ENODEV;
-
-	if (type == PCI_EXP_TYPE_RC_EC)
-		pcie_link_rcec(dev);
 
 	status = pcie_port_device_register(dev);
 	if (status)
@@ -148,24 +143,6 @@ static void pcie_portdrv_remove(struct pci_dev *dev)
 	}
 
 	pcie_port_device_remove(dev);
-
-	pci_disable_device(dev);
-}
-
-static void pcie_portdrv_shutdown(struct pci_dev *dev)
-{
-	struct pci_host_bridge *bridge = pci_find_host_bridge(dev->bus);
-
-	if (pci_bridge_d3_possible(dev)) {
-		pm_runtime_forbid(&dev->dev);
-		pm_runtime_get_noresume(&dev->dev);
-		pm_runtime_dont_use_autosuspend(&dev->dev);
-	}
-
-	pcie_port_device_remove(dev);
-
-	if (!bridge->no_dis_bmaster)
-		pci_disable_device(dev);
 }
 
 static pci_ers_result_t pcie_portdrv_error_detected(struct pci_dev *dev,
@@ -218,8 +195,6 @@ static const struct pci_device_id port_pci_ids[] = {
 	{ PCI_DEVICE_CLASS(((PCI_CLASS_BRIDGE_PCI << 8) | 0x00), ~0) },
 	/* subtractive decode PCI-to-PCI bridge, class type is 060401h */
 	{ PCI_DEVICE_CLASS(((PCI_CLASS_BRIDGE_PCI << 8) | 0x01), ~0) },
-	/* handle any Root Complex Event Collector */
-	{ PCI_DEVICE_CLASS(((PCI_CLASS_SYSTEM_RCEC << 8) | 0x00), ~0) },
 	{ },
 };
 
@@ -236,7 +211,7 @@ static struct pci_driver pcie_portdriver = {
 
 	.probe		= pcie_portdrv_probe,
 	.remove		= pcie_portdrv_remove,
-	.shutdown	= pcie_portdrv_shutdown,
+	.shutdown	= pcie_portdrv_remove,
 
 	.err_handler	= &pcie_portdrv_err_handler,
 
