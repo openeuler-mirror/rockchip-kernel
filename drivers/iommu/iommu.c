@@ -8,6 +8,7 @@
 
 #include <linux/device.h>
 #include <linux/kernel.h>
+#include <linux/bits.h>
 #include <linux/bug.h>
 #include <linux/types.h>
 #include <linux/init.h>
@@ -29,21 +30,8 @@ static struct kset *iommu_group_kset;
 static DEFINE_IDA(iommu_group_ida);
 
 static unsigned int iommu_def_domain_type __read_mostly;
-static bool iommu_dma_strict __read_mostly;
+static bool iommu_dma_strict __read_mostly = true;
 static u32 iommu_cmd_line __read_mostly;
-
-/*
- * Timeout to wait for page response of a pending page request. This is
- * intended as a basic safety net in case a pending page request is not
- * responded for an exceptionally long time. Device may also implement
- * its own protection mechanism against this exception.
- * Units are in jiffies with a range between 1 - 100 seconds equivalent.
- * Default to 10 seconds.
- * Setting 0 means no timeout tracking.
- */
-#define IOMMU_PAGE_RESPONSE_MAX_TIMEOUT (HZ * 100)
-#define IOMMU_PAGE_RESPONSE_DEF_TIMEOUT (HZ * 10)
-static unsigned long prq_timeout = IOMMU_PAGE_RESPONSE_DEF_TIMEOUT;
 
 struct iommu_group {
 	struct kobject kobj;
@@ -198,14 +186,9 @@ static struct dev_iommu *dev_iommu_get(struct device *dev)
 
 static void dev_iommu_free(struct device *dev)
 {
-	struct dev_iommu *param = dev->iommu;
-
+	iommu_fwspec_free(dev);
+	kfree(dev->iommu);
 	dev->iommu = NULL;
-	if (param->fwspec) {
-		fwnode_handle_put(param->fwspec->iommu_fwnode);
-		kfree(param->fwspec);
-	}
-	kfree(param);
 }
 
 static int __iommu_probe_device(struct device *dev, struct list_head *group_list)
@@ -346,26 +329,6 @@ static int __init iommu_dma_setup(char *str)
 	return kstrtobool(str, &iommu_dma_strict);
 }
 early_param("iommu.strict", iommu_dma_setup);
-
-static int __init iommu_set_prq_timeout(char *str)
-{
-	int ret;
-	unsigned long timeout;
-
-	if (!str)
-		return -EINVAL;
-
-	ret = kstrtoul(str, 10, &timeout);
-	if (ret)
-		return ret;
-	timeout = timeout * HZ;
-	if (timeout > IOMMU_PAGE_RESPONSE_MAX_TIMEOUT)
-		return -EINVAL;
-	prq_timeout = timeout;
-
-	return 0;
-}
-early_param("iommu.prq_timeout", iommu_set_prq_timeout);
 
 static ssize_t iommu_group_attr_show(struct kobject *kobj,
 				     struct attribute *__attr, char *buf)
@@ -819,12 +782,6 @@ static bool iommu_is_attach_deferred(struct iommu_domain *domain,
 	return false;
 }
 
-void  __acpi_device_create_direct_mappings(struct iommu_group *group, struct device *acpi_device)
-{
-	iommu_create_device_direct_mappings(group, acpi_device);
-}
-EXPORT_SYMBOL_GPL(__acpi_device_create_direct_mappings);
-
 /**
  * iommu_group_add_device - add a device to an iommu group
  * @group: the group into which to add the device (reference should be held)
@@ -1176,84 +1133,6 @@ unlock:
 }
 EXPORT_SYMBOL_GPL(iommu_unregister_device_fault_handler);
 
-/*
- * A bunch of sanity-checks. For development only, because it probably adds a
- * large overhead to the fast path. The fault only comes from the IOMMU driver,
- * which is obviously bug-free.
- */
-static bool iommu_fault_valid(struct iommu_fault *fault)
-{
-	u32 flags, perm;
-	size_t struct_end;
-
-	if (fault->padding)
-		return false;
-
-	switch (fault->type) {
-	case IOMMU_FAULT_PAGE_REQ:
-		struct_end = offsetofend(struct iommu_fault, prm.private_data);
-		flags = fault->prm.flags;
-		perm = fault->prm.perm;
-		if (flags & ~(IOMMU_FAULT_PAGE_REQUEST_PASID_VALID |
-			      IOMMU_FAULT_PAGE_REQUEST_LAST_PAGE |
-			      IOMMU_FAULT_PAGE_REQUEST_PRIV_DATA |
-			      IOMMU_FAULT_PAGE_RESPONSE_NEEDS_PASID))
-			return false;
-
-		if (!(flags & IOMMU_FAULT_PAGE_REQUEST_PASID_VALID) &&
-		    fault->prm.pasid)
-			return false;
-
-		if (!(flags & IOMMU_FAULT_PAGE_REQUEST_PRIV_DATA) &&
-		    (fault->prm.private_data[0] || fault->prm.private_data[1]))
-			return false;
-
-		if ((flags & IOMMU_FAULT_PAGE_RESPONSE_NEEDS_PASID) &&
-		    !(flags & IOMMU_FAULT_PAGE_REQUEST_PASID_VALID))
-			return false;
-		break;
-	case IOMMU_FAULT_DMA_UNRECOV:
-		struct_end = offsetofend(struct iommu_fault, event.fetch_addr);
-		flags = fault->event.flags;
-		perm = fault->event.perm;
-		if (flags & ~(IOMMU_FAULT_UNRECOV_PASID_VALID |
-					  IOMMU_FAULT_UNRECOV_ADDR_VALID |
-					  IOMMU_FAULT_UNRECOV_FETCH_ADDR_VALID))
-			return false;
-
-		if (!(flags & IOMMU_FAULT_UNRECOV_PASID_VALID) &&
-		    fault->event.pasid)
-			return false;
-
-		if (!(flags & IOMMU_FAULT_UNRECOV_FETCH_ADDR_VALID) &&
-		    fault->event.fetch_addr)
-			return false;
-
-		if (!(flags & IOMMU_FAULT_UNRECOV_FETCH_ADDR_VALID) &&
-		    fault->event.fetch_addr)
-			return false;
-
-		if (fault->event.reason > IOMMU_FAULT_REASON_OOR_ADDRESS)
-			return false;
-		break;
-	default:
-		return false;
-	}
-
-	if (perm & ~(IOMMU_FAULT_PERM_READ |
-		     IOMMU_FAULT_PERM_WRITE |
-		     IOMMU_FAULT_PERM_EXEC |
-		     IOMMU_FAULT_PERM_PRIV))
-		return false;
-
-	/* Check that bottom padding is zero */
-	if (!bitmap_empty((void *)fault + struct_end,
-			  8 * (sizeof(*fault) - struct_end)))
-		return false;
-
-	return true;
-}
-
 /**
  * iommu_report_device_fault() - Report fault event to device driver
  * @dev: the device
@@ -1272,7 +1151,7 @@ int iommu_report_device_fault(struct device *dev, struct iommu_fault_event *evt)
 	struct iommu_fault_param *fparam;
 	int ret = 0;
 
-	if (!param || !evt || WARN_ON_ONCE(!iommu_fault_valid(&evt->fault)))
+	if (!param || !evt)
 		return -EINVAL;
 
 	/* we only report device fault if there is a handler registered */
@@ -1303,7 +1182,6 @@ int iommu_report_device_fault(struct device *dev, struct iommu_fault_event *evt)
 		mutex_unlock(&fparam->lock);
 		kfree(evt_pending);
 	}
-	trace_dev_fault(dev, &evt->fault);
 done_unlock:
 	mutex_unlock(&param->lock);
 	return ret;
@@ -1363,7 +1241,6 @@ int iommu_page_response(struct device *dev,
 		}
 
 		ret = domain->ops->page_response(dev, evt, msg);
-		trace_dev_page_response(dev, msg);
 		list_del(&evt->list);
 		kfree(evt);
 		break;
@@ -2032,7 +1909,6 @@ static struct iommu_domain *__iommu_domain_alloc(struct bus_type *bus,
 	domain->type = type;
 	/* Assume all sizes by default; the driver may override this later */
 	domain->pgsize_bitmap  = bus->iommu_ops->pgsize_bitmap;
-	mutex_init(&domain->switch_log_lock);
 
 	return domain;
 }
@@ -2301,25 +2177,6 @@ int iommu_uapi_sva_unbind_gpasid(struct iommu_domain *domain, struct device *dev
 }
 EXPORT_SYMBOL_GPL(iommu_uapi_sva_unbind_gpasid);
 
-int iommu_attach_pasid_table(struct iommu_domain *domain,
-			     struct iommu_pasid_table_config *cfg)
-{
-	if (unlikely(!domain->ops->attach_pasid_table))
-		return -ENODEV;
-
-	return domain->ops->attach_pasid_table(domain, cfg);
-}
-EXPORT_SYMBOL_GPL(iommu_attach_pasid_table);
-
-void iommu_detach_pasid_table(struct iommu_domain *domain)
-{
-	if (unlikely(!domain->ops->detach_pasid_table))
-		return;
-
-	domain->ops->detach_pasid_table(domain);
-}
-EXPORT_SYMBOL_GPL(iommu_detach_pasid_table);
-
 static void __iommu_detach_device(struct iommu_domain *domain,
 				  struct device *dev)
 {
@@ -2342,7 +2199,8 @@ void iommu_detach_device(struct iommu_domain *domain, struct device *dev)
 		return;
 
 	mutex_lock(&group->mutex);
-	if (iommu_group_device_count(group) != 1) {
+	/* Don't break detach if iommu shared by more than one master */
+	if (iommu_group_device_count(group) < 1) {
 		WARN_ON(1);
 		goto out_unlock;
 	}
@@ -2476,38 +2334,84 @@ phys_addr_t iommu_iova_to_phys(struct iommu_domain *domain, dma_addr_t iova)
 }
 EXPORT_SYMBOL_GPL(iommu_iova_to_phys);
 
-size_t iommu_pgsize(struct iommu_domain *domain,
-		    unsigned long addr_merge, size_t size)
+static size_t iommu_pgsize(struct iommu_domain *domain, unsigned long iova,
+			   phys_addr_t paddr, size_t size, size_t *count)
 {
-	unsigned int pgsize_idx;
-	size_t pgsize;
+	unsigned int pgsize_idx, pgsize_idx_next;
+	unsigned long pgsizes;
+	size_t offset, pgsize, pgsize_next;
+	unsigned long addr_merge = paddr | iova;
 
-	/* Max page size that still fits into 'size' */
-	pgsize_idx = __fls(size);
+	/* Page sizes supported by the hardware and small enough for @size */
+	pgsizes = domain->pgsize_bitmap & GENMASK(__fls(size), 0);
 
-	/* need to consider alignment requirements ? */
-	if (likely(addr_merge)) {
-		/* Max page size allowed by address */
-		unsigned int align_pgsize_idx = __ffs(addr_merge);
-		pgsize_idx = min(pgsize_idx, align_pgsize_idx);
-	}
+	/* Constrain the page sizes further based on the maximum alignment */
+	if (likely(addr_merge))
+		pgsizes &= GENMASK(__ffs(addr_merge), 0);
 
-	/* build a mask of acceptable page sizes */
-	pgsize = (1UL << (pgsize_idx + 1)) - 1;
+	/* Make sure we have at least one suitable page size */
+	BUG_ON(!pgsizes);
 
-	/* throw away page sizes not supported by the hardware */
-	pgsize &= domain->pgsize_bitmap;
+	/* Pick the biggest page size remaining */
+	pgsize_idx = __fls(pgsizes);
+	pgsize = BIT(pgsize_idx);
+	if (!count)
+		return pgsize;
 
-	/* make sure we're still sane */
-	BUG_ON(!pgsize);
 
-	/* pick the biggest page */
-	pgsize_idx = __fls(pgsize);
-	pgsize = 1UL << pgsize_idx;
+	/* Find the next biggest support page size, if it exists */
+	pgsizes = domain->pgsize_bitmap & ~GENMASK(pgsize_idx, 0);
+	if (!pgsizes)
+		goto out_set_count;
 
+	pgsize_idx_next = __ffs(pgsizes);
+	pgsize_next = BIT(pgsize_idx_next);
+
+	/*
+	 * There's no point trying a bigger page size unless the virtual
+	 * and physical addresses are similarly offset within the larger page.
+	 */
+	if ((iova ^ paddr) & (pgsize_next - 1))
+		goto out_set_count;
+
+	/* Calculate the offset to the next page size alignment boundary */
+	offset = pgsize_next - (addr_merge & (pgsize_next - 1));
+
+	/*
+	 * If size is big enough to accommodate the larger page, reduce
+	 * the number of smaller pages.
+	 */
+	if (offset + pgsize_next <= size)
+		size = offset;
+
+out_set_count:
+	*count = size >> pgsize_idx;
 	return pgsize;
 }
-EXPORT_SYMBOL_GPL(iommu_pgsize);
+
+static int __iommu_map_pages(struct iommu_domain *domain, unsigned long iova,
+			     phys_addr_t paddr, size_t size, int prot,
+			     gfp_t gfp, size_t *mapped)
+{
+	const struct iommu_ops *ops = domain->ops;
+	size_t pgsize, count;
+	int ret;
+
+	pgsize = iommu_pgsize(domain, iova, paddr, size, &count);
+
+	pr_debug("mapping: iova 0x%lx pa %pa pgsize 0x%zx count %zu\n",
+			 iova, &paddr, pgsize, count);
+
+	if (ops->map_pages) {
+		ret = ops->map_pages(domain, iova, paddr, pgsize, count, prot,
+				     gfp, mapped);
+	} else {
+		ret = ops->map(domain, iova, paddr, pgsize, prot, gfp);
+		*mapped = ret ? 0 : pgsize;
+	}
+
+	return ret;
+}
 
 static int __iommu_map(struct iommu_domain *domain, unsigned long iova,
 		       phys_addr_t paddr, size_t size, int prot, gfp_t gfp)
@@ -2519,7 +2423,7 @@ static int __iommu_map(struct iommu_domain *domain, unsigned long iova,
 	phys_addr_t orig_paddr = paddr;
 	int ret = 0;
 
-	if (unlikely(ops->map == NULL ||
+	if (unlikely(!(ops->map || ops->map_pages) ||
 		     domain->pgsize_bitmap == 0UL))
 		return -ENODEV;
 
@@ -2543,18 +2447,21 @@ static int __iommu_map(struct iommu_domain *domain, unsigned long iova,
 	pr_debug("map: iova 0x%lx pa %pa size 0x%zx\n", iova, &paddr, size);
 
 	while (size) {
-		size_t pgsize = iommu_pgsize(domain, iova | paddr, size);
+		size_t mapped = 0;
 
-		pr_debug("mapping: iova 0x%lx pa %pa pgsize 0x%zx\n",
-			 iova, &paddr, pgsize);
-		ret = ops->map(domain, iova, paddr, pgsize, prot, gfp);
+		ret = __iommu_map_pages(domain, iova, paddr, size, prot, gfp,
+					&mapped);
+		/*
+		 * Some pages may have been mapped, even if an error occurred,
+		 * so we should account for those so they can be unmapped.
+		 */
+		size -= mapped;
 
 		if (ret)
 			break;
 
-		iova += pgsize;
-		paddr += pgsize;
-		size -= pgsize;
+		iova += mapped;
+		paddr += mapped;
 	}
 
 	/* unroll mapping in case something went wrong */
@@ -2594,6 +2501,19 @@ int iommu_map_atomic(struct iommu_domain *domain, unsigned long iova,
 }
 EXPORT_SYMBOL_GPL(iommu_map_atomic);
 
+static size_t __iommu_unmap_pages(struct iommu_domain *domain,
+				  unsigned long iova, size_t size,
+				  struct iommu_iotlb_gather *iotlb_gather)
+{
+	const struct iommu_ops *ops = domain->ops;
+	size_t pgsize, count;
+
+	pgsize = iommu_pgsize(domain, iova, iova, size, &count);
+	return ops->unmap_pages ?
+	       ops->unmap_pages(domain, iova, pgsize, count, iotlb_gather) :
+	       ops->unmap(domain, iova, pgsize, iotlb_gather);
+}
+
 static size_t __iommu_unmap(struct iommu_domain *domain,
 			    unsigned long iova, size_t size,
 			    struct iommu_iotlb_gather *iotlb_gather)
@@ -2603,7 +2523,7 @@ static size_t __iommu_unmap(struct iommu_domain *domain,
 	unsigned long orig_iova = iova;
 	unsigned int min_pagesz;
 
-	if (unlikely(ops->unmap == NULL ||
+	if (unlikely(!(ops->unmap || ops->unmap_pages) ||
 		     domain->pgsize_bitmap == 0UL))
 		return 0;
 
@@ -2631,9 +2551,9 @@ static size_t __iommu_unmap(struct iommu_domain *domain,
 	 * or we hit an area that isn't mapped.
 	 */
 	while (unmapped < size) {
-		size_t pgsize = iommu_pgsize(domain, iova, size - unmapped);
-
-		unmapped_page = ops->unmap(domain, iova, pgsize, iotlb_gather);
+		unmapped_page = __iommu_unmap_pages(domain, iova,
+						    size - unmapped,
+						    iotlb_gather);
 		if (!unmapped_page)
 			break;
 
@@ -2679,6 +2599,18 @@ static size_t __iommu_map_sg(struct iommu_domain *domain, unsigned long iova,
 	phys_addr_t start;
 	unsigned int i = 0;
 	int ret;
+
+	if (ops->map_sg) {
+		ret = ops->map_sg(domain, iova, sg, nents, prot, gfp, &mapped);
+
+		if (ops->iotlb_sync_map)
+			ops->iotlb_sync_map(domain, iova, mapped);
+
+		if (ret)
+			goto out_err;
+
+		return mapped;
+	}
 
 	while (i <= nents) {
 		phys_addr_t s_phys = sg_phys(sg);
@@ -2850,188 +2782,6 @@ int iommu_domain_set_attr(struct iommu_domain *domain,
 	return ret;
 }
 EXPORT_SYMBOL_GPL(iommu_domain_set_attr);
-
-bool iommu_support_dirty_log(struct iommu_domain *domain)
-{
-	const struct iommu_ops *ops = domain->ops;
-
-	return ops->support_dirty_log && ops->support_dirty_log(domain);
-}
-EXPORT_SYMBOL_GPL(iommu_support_dirty_log);
-
-int iommu_switch_dirty_log(struct iommu_domain *domain, bool enable,
-			   unsigned long iova, size_t size, int prot)
-{
-	const struct iommu_ops *ops = domain->ops;
-	unsigned long orig_iova = iova;
-	unsigned int min_pagesz;
-	size_t orig_size = size;
-	bool flush = false;
-	int ret = 0;
-
-	if (unlikely(!ops->switch_dirty_log))
-		return -ENODEV;
-
-	min_pagesz = 1 << __ffs(domain->pgsize_bitmap);
-	if (!IS_ALIGNED(iova | size, min_pagesz)) {
-		pr_err("unaligned: iova 0x%lx size 0x%zx min_pagesz 0x%x\n",
-		       iova, size, min_pagesz);
-		return -EINVAL;
-	}
-
-	mutex_lock(&domain->switch_log_lock);
-
-	pr_debug("switch_dirty_log %s for: iova 0x%lx size 0x%zx\n",
-		 enable ? "enable" : "disable", iova, size);
-
-	while (size) {
-		size_t pgsize = iommu_pgsize(domain, iova, size);
-
-		flush = true;
-		ret = ops->switch_dirty_log(domain, enable, iova, pgsize, prot);
-		if (ret)
-			break;
-
-		pr_debug("switch_dirty_log handled: iova 0x%lx size 0x%zx\n",
-			 iova, pgsize);
-
-		iova += pgsize;
-		size -= pgsize;
-	}
-
-	if (flush)
-		iommu_flush_iotlb_all(domain);
-
-	if (!ret)
-		trace_switch_dirty_log(orig_iova, orig_size, enable);
-
-	mutex_unlock(&domain->switch_log_lock);
-	return ret;
-}
-EXPORT_SYMBOL_GPL(iommu_switch_dirty_log);
-
-int iommu_sync_dirty_log(struct iommu_domain *domain, unsigned long iova,
-			 size_t size, unsigned long *bitmap,
-			 unsigned long base_iova, unsigned long bitmap_pgshift)
-{
-	const struct iommu_ops *ops = domain->ops;
-	unsigned long orig_iova = iova;
-	unsigned int min_pagesz;
-	size_t orig_size = size;
-	int ret = 0;
-
-	if (unlikely(!ops->sync_dirty_log))
-		return -ENODEV;
-
-	min_pagesz = 1 << __ffs(domain->pgsize_bitmap);
-	if (!IS_ALIGNED(iova | size, min_pagesz)) {
-		pr_err("unaligned: iova 0x%lx size 0x%zx min_pagesz 0x%x\n",
-		       iova, size, min_pagesz);
-		return -EINVAL;
-	}
-
-	mutex_lock(&domain->switch_log_lock);
-
-	pr_debug("sync_dirty_log for: iova 0x%lx size 0x%zx\n", iova, size);
-
-	while (size) {
-		size_t pgsize = iommu_pgsize(domain, iova, size);
-
-		ret = ops->sync_dirty_log(domain, iova, pgsize,
-					  bitmap, base_iova, bitmap_pgshift);
-		if (ret)
-			break;
-
-		pr_debug("sync_dirty_log handled: iova 0x%lx size 0x%zx\n",
-			 iova, pgsize);
-
-		iova += pgsize;
-		size -= pgsize;
-	}
-
-	if (!ret)
-		trace_sync_dirty_log(orig_iova, orig_size);
-
-	mutex_unlock(&domain->switch_log_lock);
-	return ret;
-}
-EXPORT_SYMBOL_GPL(iommu_sync_dirty_log);
-
-static int __iommu_clear_dirty_log(struct iommu_domain *domain,
-				   unsigned long iova, size_t size,
-				   unsigned long *bitmap,
-				   unsigned long base_iova,
-				   unsigned long bitmap_pgshift)
-{
-	const struct iommu_ops *ops = domain->ops;
-	unsigned long orig_iova = iova;
-	size_t orig_size = size;
-	int ret = 0;
-
-	if (unlikely(!ops->clear_dirty_log))
-		return -ENODEV;
-
-	pr_debug("clear_dirty_log for: iova 0x%lx size 0x%zx\n", iova, size);
-
-	while (size) {
-		size_t pgsize = iommu_pgsize(domain, iova, size);
-
-		ret = ops->clear_dirty_log(domain, iova, pgsize, bitmap,
-					   base_iova, bitmap_pgshift);
-		if (ret)
-			break;
-
-		pr_debug("clear_dirty_log handled: iova 0x%lx size 0x%zx\n",
-			 iova, pgsize);
-
-		iova += pgsize;
-		size -= pgsize;
-	}
-
-	if (!ret)
-		trace_clear_dirty_log(orig_iova, orig_size);
-
-	return ret;
-}
-
-int iommu_clear_dirty_log(struct iommu_domain *domain,
-			  unsigned long iova, size_t size,
-			  unsigned long *bitmap, unsigned long base_iova,
-			  unsigned long bitmap_pgshift)
-{
-	unsigned long riova, rsize;
-	unsigned int min_pagesz, rs, re, start, end;
-	bool flush = false;
-	int ret = 0;
-
-	min_pagesz = 1 << __ffs(domain->pgsize_bitmap);
-	if (!IS_ALIGNED(iova | size, min_pagesz)) {
-		pr_err("unaligned: iova 0x%lx min_pagesz 0x%x\n",
-		       iova, min_pagesz);
-		return -EINVAL;
-	}
-
-	mutex_lock(&domain->switch_log_lock);
-
-	start = (iova - base_iova) >> bitmap_pgshift;
-	end = start + (size >> bitmap_pgshift);
-	bitmap_for_each_set_region(bitmap, rs, re, start, end) {
-		flush = true;
-		riova = base_iova + ((unsigned long)rs << bitmap_pgshift);
-		rsize = (unsigned long)(re - rs) << bitmap_pgshift;
-		ret = __iommu_clear_dirty_log(domain, riova, rsize, bitmap,
-					      base_iova, bitmap_pgshift);
-		if (ret)
-			break;
-	}
-
-	if (flush)
-		iommu_flush_iotlb_all(domain);
-
-	mutex_unlock(&domain->switch_log_lock);
-	return ret;
-}
-EXPORT_SYMBOL_GPL(iommu_clear_dirty_log);
 
 void iommu_get_resv_regions(struct device *dev, struct list_head *list)
 {
@@ -3288,55 +3038,6 @@ int iommu_aux_get_pasid(struct iommu_domain *domain, struct device *dev)
 }
 EXPORT_SYMBOL_GPL(iommu_aux_get_pasid);
 
-struct iommu_sva_bind_group_data {
-	struct mm_struct *mm;
-	struct iommu_sva *handle;
-	void *drvdata;
-};
-
-static int iommu_group_do_bind_dev(struct device *dev, void *data)
-{
-	struct iommu_sva_bind_group_data *bind = data;
-	const struct iommu_ops *ops = dev->bus->iommu_ops;
-
-	if (!ops || !ops->sva_bind)
-		return -ENODEV;
-
-	bind->handle = ops->sva_bind(dev, bind->mm, bind->drvdata);
-	return PTR_ERR_OR_ZERO(bind->handle);
-}
-
-struct iommu_sva *
-iommu_sva_bind_group(struct iommu_group *group, struct mm_struct *mm,
-		     void *drvdata)
-{
-	int ret = -EINVAL;
-	struct iommu_sva_bind_group_data data = {
-		.mm = mm,
-		.drvdata = drvdata,
-	};
-
-	/* Ensure device count and domain don't change while we're binding */
-	mutex_lock(&group->mutex);
-
-	/*
-	 * To keep things simple, SVA currently doesn't support IOMMU groups
-	 * with more than one device. Existing SVA-capable systems are not
-	 * affected by the problems that required IOMMU groups (lack of ACS
-	 * isolation, device ID aliasing and other hardware issues).
-	 */
-	if (iommu_group_device_count(group) != 1)
-		goto out_unlock;
-
-	ret = __iommu_group_for_each_dev(group, &data,
-					 iommu_group_do_bind_dev);
-out_unlock:
-	mutex_unlock(&group->mutex);
-
-	return ret ? ERR_PTR(ret) : data.handle;
-}
-EXPORT_SYMBOL_GPL(iommu_sva_bind_group);
-
 /**
  * iommu_sva_bind_device() - Bind a process address space to a device
  * @dev: the device
@@ -3355,14 +3056,33 @@ EXPORT_SYMBOL_GPL(iommu_sva_bind_group);
 struct iommu_sva *
 iommu_sva_bind_device(struct device *dev, struct mm_struct *mm, void *drvdata)
 {
-	struct iommu_sva *handle;
 	struct iommu_group *group;
+	struct iommu_sva *handle = ERR_PTR(-EINVAL);
+	const struct iommu_ops *ops = dev->bus->iommu_ops;
+
+	if (!ops || !ops->sva_bind)
+		return ERR_PTR(-ENODEV);
 
 	group = iommu_group_get(dev);
 	if (!group)
 		return ERR_PTR(-ENODEV);
 
-	handle = iommu_sva_bind_group(group, mm, drvdata);
+	/* Ensure device count and domain don't change while we're binding */
+	mutex_lock(&group->mutex);
+
+	/*
+	 * To keep things simple, SVA currently doesn't support IOMMU groups
+	 * with more than one device. Existing SVA-capable systems are not
+	 * affected by the problems that required IOMMU groups (lack of ACS
+	 * isolation, device ID aliasing and other hardware issues).
+	 */
+	if (iommu_group_device_count(group) != 1)
+		goto out_unlock;
+
+	handle = ops->sva_bind(dev, mm, drvdata);
+
+out_unlock:
+	mutex_unlock(&group->mutex);
 	iommu_group_put(group);
 
 	return handle;
@@ -3410,25 +3130,3 @@ u32 iommu_sva_get_pasid(struct iommu_sva *handle)
 	return ops->sva_get_pasid(handle);
 }
 EXPORT_SYMBOL_GPL(iommu_sva_get_pasid);
-
-int iommu_dev_set_config(struct device *dev, int type, void *data)
-{
-	const struct iommu_ops *ops = dev->bus->iommu_ops;
-
-	if (ops && ops->dev_set_config)
-		return ops->dev_set_config(dev, type, data);
-
-	return -ENODEV;
-}
-EXPORT_SYMBOL_GPL(iommu_dev_set_config);
-
-int iommu_dev_get_config(struct device *dev, int type, void *data)
-{
-	const struct iommu_ops *ops = dev->bus->iommu_ops;
-
-	if (ops && ops->dev_get_config)
-		return ops->dev_get_config(dev, type, data);
-
-	return -ENODEV;
-}
-EXPORT_SYMBOL_GPL(iommu_dev_get_config);
