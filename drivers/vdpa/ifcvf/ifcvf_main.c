@@ -167,7 +167,7 @@ static struct ifcvf_hw *vdpa_to_vf(struct vdpa_device *vdpa_dev)
 	return &adapter->vf;
 }
 
-static u64 ifcvf_vdpa_get_device_features(struct vdpa_device *vdpa_dev)
+static u64 ifcvf_vdpa_get_features(struct vdpa_device *vdpa_dev)
 {
 	struct ifcvf_hw *vf = vdpa_to_vf(vdpa_dev);
 	u64 features;
@@ -177,20 +177,13 @@ static u64 ifcvf_vdpa_get_device_features(struct vdpa_device *vdpa_dev)
 	return features;
 }
 
-static int ifcvf_vdpa_set_driver_features(struct vdpa_device *vdpa_dev, u64 features)
+static int ifcvf_vdpa_set_features(struct vdpa_device *vdpa_dev, u64 features)
 {
 	struct ifcvf_hw *vf = vdpa_to_vf(vdpa_dev);
 
 	vf->req_features = features;
 
 	return 0;
-}
-
-static u64 ifcvf_vdpa_get_driver_features(struct vdpa_device *vdpa_dev)
-{
-	struct ifcvf_hw *vf = vdpa_to_vf(vdpa_dev);
-
-	return vf->req_features;
 }
 
 static u8 ifcvf_vdpa_get_status(struct vdpa_device *vdpa_dev)
@@ -214,6 +207,17 @@ static void ifcvf_vdpa_set_status(struct vdpa_device *vdpa_dev, u8 status)
 	if (status_old == status)
 		return;
 
+	if ((status_old & VIRTIO_CONFIG_S_DRIVER_OK) &&
+	    !(status & VIRTIO_CONFIG_S_DRIVER_OK)) {
+		ifcvf_stop_datapath(adapter);
+		ifcvf_free_irq(adapter, IFCVF_MAX_QUEUE_PAIRS * 2);
+	}
+
+	if (status == 0) {
+		ifcvf_reset_vring(adapter);
+		return;
+	}
+
 	if ((status & VIRTIO_CONFIG_S_DRIVER_OK) &&
 	    !(status_old & VIRTIO_CONFIG_S_DRIVER_OK)) {
 		ret = ifcvf_request_irq(adapter);
@@ -233,29 +237,6 @@ static void ifcvf_vdpa_set_status(struct vdpa_device *vdpa_dev, u8 status)
 	ifcvf_set_status(vf, status);
 }
 
-static int ifcvf_vdpa_reset(struct vdpa_device *vdpa_dev)
-{
-	struct ifcvf_adapter *adapter;
-	struct ifcvf_hw *vf;
-	u8 status_old;
-
-	vf  = vdpa_to_vf(vdpa_dev);
-	adapter = vdpa_to_adapter(vdpa_dev);
-	status_old = ifcvf_get_status(vf);
-
-	if (status_old == 0)
-		return 0;
-
-	if (status_old & VIRTIO_CONFIG_S_DRIVER_OK) {
-		ifcvf_stop_datapath(adapter);
-		ifcvf_free_irq(adapter, IFCVF_MAX_QUEUE_PAIRS * 2);
-	}
-
-	ifcvf_reset_vring(adapter);
-
-	return 0;
-}
-
 static u16 ifcvf_vdpa_get_vq_num_max(struct vdpa_device *vdpa_dev)
 {
 	return IFCVF_QUEUE_MAX;
@@ -266,7 +247,7 @@ static int ifcvf_vdpa_get_vq_state(struct vdpa_device *vdpa_dev, u16 qid,
 {
 	struct ifcvf_hw *vf = vdpa_to_vf(vdpa_dev);
 
-	state->split.avail_index = ifcvf_get_vq_state(vf, qid);
+	state->avail_index = ifcvf_get_vq_state(vf, qid);
 	return 0;
 }
 
@@ -275,7 +256,7 @@ static int ifcvf_vdpa_set_vq_state(struct vdpa_device *vdpa_dev, u16 qid,
 {
 	struct ifcvf_hw *vf = vdpa_to_vf(vdpa_dev);
 
-	return ifcvf_set_vq_state(vf, qid, state->split.avail_index);
+	return ifcvf_set_vq_state(vf, qid, state->avail_index);
 }
 
 static void ifcvf_vdpa_set_vq_cb(struct vdpa_device *vdpa_dev, u16 qid,
@@ -351,11 +332,6 @@ static u32 ifcvf_vdpa_get_vq_align(struct vdpa_device *vdpa_dev)
 	return IFCVF_QUEUE_ALIGNMENT;
 }
 
-static size_t ifcvf_vdpa_get_config_size(struct vdpa_device *vdpa_dev)
-{
-	return sizeof(struct virtio_net_config);
-}
-
 static void ifcvf_vdpa_get_config(struct vdpa_device *vdpa_dev,
 				  unsigned int offset,
 				  void *buf, unsigned int len)
@@ -398,12 +374,10 @@ static int ifcvf_vdpa_get_vq_irq(struct vdpa_device *vdpa_dev,
  * implemented set_map()/dma_map()/dma_unmap()
  */
 static const struct vdpa_config_ops ifc_vdpa_ops = {
-	.get_device_features = ifcvf_vdpa_get_device_features,
-	.set_driver_features = ifcvf_vdpa_set_driver_features,
-	.get_driver_features = ifcvf_vdpa_get_driver_features,
+	.get_features	= ifcvf_vdpa_get_features,
+	.set_features	= ifcvf_vdpa_set_features,
 	.get_status	= ifcvf_vdpa_get_status,
 	.set_status	= ifcvf_vdpa_set_status,
-	.reset		= ifcvf_vdpa_reset,
 	.get_vq_num_max	= ifcvf_vdpa_get_vq_num_max,
 	.get_vq_state	= ifcvf_vdpa_get_vq_state,
 	.set_vq_state	= ifcvf_vdpa_set_vq_state,
@@ -418,7 +392,6 @@ static const struct vdpa_config_ops ifc_vdpa_ops = {
 	.get_device_id	= ifcvf_vdpa_get_device_id,
 	.get_vendor_id	= ifcvf_vdpa_get_vendor_id,
 	.get_vq_align	= ifcvf_vdpa_get_vq_align,
-	.get_config_size	= ifcvf_vdpa_get_config_size,
 	.get_config	= ifcvf_vdpa_get_config,
 	.set_config	= ifcvf_vdpa_set_config,
 	.set_config_cb  = ifcvf_vdpa_set_config_cb,
@@ -465,7 +438,8 @@ static int ifcvf_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	}
 
 	adapter = vdpa_alloc_device(struct ifcvf_adapter, vdpa,
-				    dev, &ifc_vdpa_ops, 1, 1, NULL, false);
+				    dev, &ifc_vdpa_ops,
+				    IFCVF_MAX_QUEUE_PAIRS * 2);
 	if (adapter == NULL) {
 		IFCVF_ERR(pdev, "Failed to allocate vDPA structure");
 		return -ENOMEM;
@@ -489,7 +463,7 @@ static int ifcvf_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	for (i = 0; i < IFCVF_MAX_QUEUE_PAIRS * 2; i++)
 		vf->vring[i].irq = -EINVAL;
 
-	ret = vdpa_register_device(&adapter->vdpa, IFCVF_MAX_QUEUE_PAIRS * 2);
+	ret = vdpa_register_device(&adapter->vdpa);
 	if (ret) {
 		IFCVF_ERR(pdev, "Failed to register ifcvf to vdpa bus");
 		goto err;
