@@ -1286,7 +1286,7 @@ static int br_changelink(struct net_device *brdev, struct nlattr *tb[],
 	if (data[IFLA_BR_MCAST_QUERY_INTVL]) {
 		u64 val = nla_get_u64(data[IFLA_BR_MCAST_QUERY_INTVL]);
 
-		br_multicast_set_query_intvl(br, val);
+		br->multicast_query_interval = clock_t_to_jiffies(val);
 	}
 
 	if (data[IFLA_BR_MCAST_QUERY_RESPONSE_INTVL]) {
@@ -1298,7 +1298,7 @@ static int br_changelink(struct net_device *brdev, struct nlattr *tb[],
 	if (data[IFLA_BR_MCAST_STARTUP_QUERY_INTVL]) {
 		u64 val = nla_get_u64(data[IFLA_BR_MCAST_STARTUP_QUERY_INTVL]);
 
-		br_multicast_set_startup_query_intvl(br, val);
+		br->multicast_startup_query_interval = clock_t_to_jiffies(val);
 	}
 
 	if (data[IFLA_BR_MCAST_STATS_ENABLED]) {
@@ -1590,8 +1590,7 @@ static size_t br_get_linkxstats_size(const struct net_device *dev, int attr)
 	}
 
 	return numvls * nla_total_size(sizeof(struct bridge_vlan_xstats)) +
-	       nla_total_size_64bit(sizeof(struct br_mcast_stats)) +
-	       (p ? nla_total_size_64bit(sizeof(p->stp_xstats)) : 0) +
+	       nla_total_size(sizeof(struct br_mcast_stats)) +
 	       nla_total_size(0);
 }
 
