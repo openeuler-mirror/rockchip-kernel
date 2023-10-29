@@ -74,7 +74,6 @@
 #define SMMU_PMCG_CFGR_NCTR             GENMASK(5, 0)
 #define SMMU_PMCG_CR                    0xE04
 #define SMMU_PMCG_CR_ENABLE             BIT(0)
-#define SMMU_PMCG_IIDR                  0xE08
 #define SMMU_PMCG_CEID0                 0xE20
 #define SMMU_PMCG_CEID1                 0xE28
 #define SMMU_PMCG_IRQ_CTRL              0xE50
@@ -96,7 +95,6 @@
 #define SMMU_PMCG_PA_SHIFT              12
 
 #define SMMU_PMCG_EVCNTR_RDONLY         BIT(0)
-#define SMMU_PMCG_DISABLE_HARDEN        BIT(1)
 
 static int cpuhp_state_num;
 
@@ -114,7 +112,6 @@ struct smmu_pmu {
 	void __iomem *reloc_base;
 	u64 counter_mask;
 	u32 options;
-	u32 iidr;
 	bool global_filter;
 };
 
@@ -141,25 +138,9 @@ static inline void smmu_pmu_enable(struct pmu *pmu)
 	writel(SMMU_PMCG_CR_ENABLE, smmu_pmu->reg_base + SMMU_PMCG_CR);
 }
 
-static inline void smmu_pmu_disable_harden(struct smmu_pmu *smmu_pmu)
-{
-	unsigned int idx;
-
-	/*
-	 * The global disable of PMU sometimes fail to stop the counting.
-	 * Harden this by writing an invalid event type to each used counter
-	 * to forcibly stop counting.
-	 */
-	for_each_set_bit(idx, smmu_pmu->used_counters, smmu_pmu->num_counters)
-		writel(0xffff, smmu_pmu->reg_base + SMMU_PMCG_EVTYPER(idx));
-}
-
 static inline void smmu_pmu_disable(struct pmu *pmu)
 {
 	struct smmu_pmu *smmu_pmu = to_smmu_pmu(pmu);
-
-	if (smmu_pmu->options & SMMU_PMCG_DISABLE_HARDEN)
-		smmu_pmu_disable_harden(smmu_pmu);
 
 	writel(0, smmu_pmu->reg_base + SMMU_PMCG_CR);
 	writel(0, smmu_pmu->reg_base + SMMU_PMCG_IRQ_CTRL);
@@ -573,40 +554,6 @@ static struct attribute_group smmu_pmu_events_group = {
 	.is_visible = smmu_pmu_event_is_visible,
 };
 
-static ssize_t smmu_pmu_identifier_attr_show(struct device *dev,
-					struct device_attribute *attr,
-					char *page)
-{
-	struct smmu_pmu *smmu_pmu = to_smmu_pmu(dev_get_drvdata(dev));
-
-	return snprintf(page, PAGE_SIZE, "0x%08x\n", smmu_pmu->iidr);
-}
-
-static umode_t smmu_pmu_identifier_attr_visible(struct kobject *kobj,
-						struct attribute *attr,
-						int n)
-{
-	struct device *dev = kobj_to_dev(kobj);
-	struct smmu_pmu *smmu_pmu = to_smmu_pmu(dev_get_drvdata(dev));
-
-	if (!smmu_pmu->iidr)
-		return 0;
-	return attr->mode;
-}
-
-static struct device_attribute smmu_pmu_identifier_attr =
-	__ATTR(identifier, 0444, smmu_pmu_identifier_attr_show, NULL);
-
-static struct attribute *smmu_pmu_identifier_attrs[] = {
-	&smmu_pmu_identifier_attr.attr,
-	NULL
-};
-
-static struct attribute_group smmu_pmu_identifier_group = {
-	.attrs = smmu_pmu_identifier_attrs,
-	.is_visible = smmu_pmu_identifier_attr_visible,
-};
-
 /* Formats */
 PMU_FORMAT_ATTR(event,		   "config:0-15");
 PMU_FORMAT_ATTR(filter_stream_id,  "config1:0-31");
@@ -630,7 +577,6 @@ static const struct attribute_group *smmu_pmu_attr_grps[] = {
 	&smmu_pmu_cpumask_group,
 	&smmu_pmu_events_group,
 	&smmu_pmu_format_group,
-	&smmu_pmu_identifier_group,
 	NULL
 };
 
@@ -653,7 +599,7 @@ static int smmu_pmu_offline_cpu(unsigned int cpu, struct hlist_node *node)
 
 	perf_pmu_migrate_context(&smmu_pmu->pmu, cpu, target);
 	smmu_pmu->on_cpu = target;
-	WARN_ON(irq_set_affinity(smmu_pmu->irq, cpumask_of(target)));
+	WARN_ON(irq_set_affinity_hint(smmu_pmu->irq, cpumask_of(target)));
 
 	return 0;
 }
@@ -773,10 +719,7 @@ static void smmu_pmu_get_acpi_options(struct smmu_pmu *smmu_pmu)
 	switch (model) {
 	case IORT_SMMU_V3_PMCG_HISI_HIP08:
 		/* HiSilicon Erratum 162001800 */
-		smmu_pmu->options |= SMMU_PMCG_EVCNTR_RDONLY | SMMU_PMCG_DISABLE_HARDEN;
-		break;
-	case IORT_SMMU_V3_PMCG_HISI_HIP09:
-		smmu_pmu->options |= SMMU_PMCG_DISABLE_HARDEN;
+		smmu_pmu->options |= SMMU_PMCG_EVCNTR_RDONLY;
 		break;
 	}
 
@@ -854,8 +797,6 @@ static int smmu_pmu_probe(struct platform_device *pdev)
 		return err;
 	}
 
-	smmu_pmu->iidr = readl_relaxed(smmu_pmu->reg_base + SMMU_PMCG_IIDR);
-
 	name = devm_kasprintf(&pdev->dev, GFP_KERNEL, "smmuv3_pmcg_%llx",
 			      (res_0->start) >> SMMU_PMCG_PA_SHIFT);
 	if (!name) {
@@ -867,14 +808,15 @@ static int smmu_pmu_probe(struct platform_device *pdev)
 
 	/* Pick one CPU to be the preferred one to use */
 	smmu_pmu->on_cpu = raw_smp_processor_id();
-	WARN_ON(irq_set_affinity(smmu_pmu->irq, cpumask_of(smmu_pmu->on_cpu)));
+	WARN_ON(irq_set_affinity_hint(smmu_pmu->irq,
+				      cpumask_of(smmu_pmu->on_cpu)));
 
 	err = cpuhp_state_add_instance_nocalls(cpuhp_state_num,
 					       &smmu_pmu->node);
 	if (err) {
 		dev_err(dev, "Error %d registering hotplug, PMU @%pa\n",
 			err, &res_0->start);
-		return err;
+		goto out_clear_affinity;
 	}
 
 	err = perf_pmu_register(&smmu_pmu->pmu, name, -1);
@@ -893,6 +835,8 @@ static int smmu_pmu_probe(struct platform_device *pdev)
 
 out_unregister:
 	cpuhp_state_remove_instance_nocalls(cpuhp_state_num, &smmu_pmu->node);
+out_clear_affinity:
+	irq_set_affinity_hint(smmu_pmu->irq, NULL);
 	return err;
 }
 
@@ -902,6 +846,7 @@ static int smmu_pmu_remove(struct platform_device *pdev)
 
 	perf_pmu_unregister(&smmu_pmu->pmu);
 	cpuhp_state_remove_instance_nocalls(cpuhp_state_num, &smmu_pmu->node);
+	irq_set_affinity_hint(smmu_pmu->irq, NULL);
 
 	return 0;
 }
@@ -925,8 +870,6 @@ static struct platform_driver smmu_pmu_driver = {
 
 static int __init arm_smmu_pmu_init(void)
 {
-	int ret;
-
 	cpuhp_state_num = cpuhp_setup_state_multi(CPUHP_AP_ONLINE_DYN,
 						  "perf/arm/pmcg:online",
 						  NULL,
@@ -934,11 +877,7 @@ static int __init arm_smmu_pmu_init(void)
 	if (cpuhp_state_num < 0)
 		return cpuhp_state_num;
 
-	ret = platform_driver_register(&smmu_pmu_driver);
-	if (ret)
-		cpuhp_remove_multi_state(cpuhp_state_num);
-
-	return ret;
+	return platform_driver_register(&smmu_pmu_driver);
 }
 module_init(arm_smmu_pmu_init);
 
