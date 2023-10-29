@@ -111,12 +111,6 @@ struct vfio_sva_handle {
 	struct list_head	next;
 };
 
-struct vfio_batch {
-	struct page		**pages;	/* for pin_user_pages_remote */
-	struct page		*fallback_page; /* if pages alloc fails */
-	int			capacity;	/* length of pages array */
-};
-
 struct vfio_group {
 	struct iommu_group	*iommu_group;
 	struct list_head	next;
@@ -164,6 +158,36 @@ struct vfio_regions {
  */
 #define DIRTY_BITMAP_PAGES_MAX	 ((u64)INT_MAX)
 #define DIRTY_BITMAP_SIZE_MAX	 DIRTY_BITMAP_BYTES(DIRTY_BITMAP_PAGES_MAX)
+
+#define WAITED 1
+
+struct domain_capsule {
+	struct iommu_domain *domain;
+	void *data;
+};
+
+/* iommu->lock must be held */
+static int
+vfio_iommu_lookup_dev(struct vfio_iommu *iommu,
+		      int (*fn)(struct device *dev, void *data),
+		      unsigned long arg)
+{
+	struct domain_capsule dc = {.data = &arg};
+	struct vfio_domain *d;
+	struct vfio_group *g;
+	int ret = 0;
+
+	list_for_each_entry(d, &iommu->domain_list, next) {
+		dc.domain = d->domain;
+		list_for_each_entry(g, &d->group_list, next) {
+			ret = iommu_group_for_each_dev(g->iommu_group,
+						       &dc, fn);
+			if (ret)
+				break;
+		}
+	}
+	return ret;
+}
 
 static int put_pfn(unsigned long pfn, int prot);
 
@@ -241,7 +265,7 @@ static int vfio_dma_bitmap_alloc(struct vfio_dma *dma, size_t pgsize)
 
 static void vfio_dma_bitmap_free(struct vfio_dma *dma)
 {
-	kvfree(dma->bitmap);
+	kfree(dma->bitmap);
 	dma->bitmap = NULL;
 }
 
@@ -448,31 +472,6 @@ static int put_pfn(unsigned long pfn, int prot)
 	return 0;
 }
 
-#define VFIO_BATCH_MAX_CAPACITY (PAGE_SIZE / sizeof(struct page *))
-
-static void vfio_batch_init(struct vfio_batch *batch)
-{
-	if (unlikely(disable_hugepages))
-		goto fallback;
-
-	batch->pages = (struct page **) __get_free_page(GFP_KERNEL);
-	if (!batch->pages)
-		goto fallback;
-
-	batch->capacity = VFIO_BATCH_MAX_CAPACITY;
-	return;
-
-fallback:
-	batch->pages = &batch->fallback_page;
-	batch->capacity = 1;
-}
-
-static void vfio_batch_fini(struct vfio_batch *batch)
-{
-	if (batch->capacity == VFIO_BATCH_MAX_CAPACITY)
-		free_page((unsigned long)batch->pages);
-}
-
 static int follow_fault_pfn(struct vm_area_struct *vma, struct mm_struct *mm,
 			    unsigned long vaddr, unsigned long *pfn,
 			    bool write_fault)
@@ -509,14 +508,10 @@ static int follow_fault_pfn(struct vm_area_struct *vma, struct mm_struct *mm,
 	return ret;
 }
 
-/*
- * Returns the positive number of pfns successfully obtained or a negative
- * error code.
- */
-static int vaddr_get_pfns(struct mm_struct *mm, unsigned long vaddr,
-			  long npages, int prot, unsigned long *pfn,
-			  struct page **pages)
+static int vaddr_get_pfn(struct mm_struct *mm, unsigned long vaddr,
+			 int prot, unsigned long *pfn)
 {
+	struct page *page[1];
 	struct vm_area_struct *vma;
 	unsigned int flags = 0;
 	int ret;
@@ -525,22 +520,11 @@ static int vaddr_get_pfns(struct mm_struct *mm, unsigned long vaddr,
 		flags |= FOLL_WRITE;
 
 	mmap_read_lock(mm);
-	ret = pin_user_pages_remote(mm, vaddr, npages, flags | FOLL_LONGTERM,
-				    pages, NULL, NULL);
-	if (ret > 0) {
-		int i;
-
-		/*
-		 * The zero page is always resident, we don't need to pin it
-		 * and it falls into our invalid/reserved test so we don't
-		 * unpin in put_pfn().  Unpin all zero pages in the batch here.
-		 */
-		for (i = 0 ; i < ret; i++) {
-			if (unlikely(is_zero_pfn(page_to_pfn(pages[i]))))
-				unpin_user_page(pages[i]);
-		}
-
-		*pfn = page_to_pfn(pages[0]);
+	ret = pin_user_pages_remote(mm, vaddr, 1, flags | FOLL_LONGTERM,
+				    page, NULL, NULL);
+	if (ret == 1) {
+		*pfn = page_to_pfn(page[0]);
+		ret = 0;
 		goto done;
 	}
 
@@ -554,12 +538,8 @@ retry:
 		if (ret == -EAGAIN)
 			goto retry;
 
-		if (!ret) {
-			if (is_invalid_reserved_pfn(*pfn))
-				ret = 1;
-			else
-				ret = -EFAULT;
-		}
+		if (!ret && !is_invalid_reserved_pfn(*pfn))
+			ret = -EFAULT;
 	}
 done:
 	mmap_read_unlock(mm);
@@ -573,7 +553,7 @@ done:
  */
 static long vfio_pin_pages_remote(struct vfio_dma *dma, unsigned long vaddr,
 				  long npage, unsigned long *pfn_base,
-				  unsigned long limit, struct vfio_batch *batch)
+				  unsigned long limit)
 {
 	unsigned long pfn = 0;
 	long ret, pinned = 0, lock_acct = 0;
@@ -584,9 +564,8 @@ static long vfio_pin_pages_remote(struct vfio_dma *dma, unsigned long vaddr,
 	if (!current->mm)
 		return -ENODEV;
 
-	ret = vaddr_get_pfns(current->mm, vaddr, 1, dma->prot, pfn_base,
-			     batch->pages);
-	if (ret < 0)
+	ret = vaddr_get_pfn(current->mm, vaddr, dma->prot, pfn_base);
+	if (ret)
 		return ret;
 
 	pinned++;
@@ -612,9 +591,8 @@ static long vfio_pin_pages_remote(struct vfio_dma *dma, unsigned long vaddr,
 	/* Lock all the consecutive pages from pfn_base */
 	for (vaddr += PAGE_SIZE, iova += PAGE_SIZE; pinned < npage;
 	     pinned++, vaddr += PAGE_SIZE, iova += PAGE_SIZE) {
-		ret = vaddr_get_pfns(current->mm, vaddr, 1, dma->prot, &pfn,
-				     batch->pages);
-		if (ret < 0)
+		ret = vaddr_get_pfn(current->mm, vaddr, dma->prot, &pfn);
+		if (ret)
 			break;
 
 		if (pfn != *pfn_base + pinned ||
@@ -640,7 +618,7 @@ out:
 	ret = vfio_lock_acct(dma, lock_acct, false);
 
 unpin_out:
-	if (ret < 0) {
+	if (ret) {
 		if (!rsvd) {
 			for (pfn = *pfn_base ; pinned ; pfn++, pinned--)
 				put_pfn(pfn, dma->prot);
@@ -676,7 +654,6 @@ static long vfio_unpin_pages_remote(struct vfio_dma *dma, dma_addr_t iova,
 static int vfio_pin_page_external(struct vfio_dma *dma, unsigned long vaddr,
 				  unsigned long *pfn_base, bool do_accounting)
 {
-	struct page *pages[1];
 	struct mm_struct *mm;
 	int ret;
 
@@ -684,13 +661,8 @@ static int vfio_pin_page_external(struct vfio_dma *dma, unsigned long vaddr,
 	if (!mm)
 		return -ENODEV;
 
-	ret = vaddr_get_pfns(mm, vaddr, 1, dma->prot, pfn_base, pages);
-	if (ret != 1)
-		goto out;
-
-	ret = 0;
-
-	if (do_accounting && !is_invalid_reserved_pfn(*pfn_base)) {
+	ret = vaddr_get_pfn(mm, vaddr, dma->prot, pfn_base);
+	if (!ret && do_accounting && !is_invalid_reserved_pfn(*pfn_base)) {
 		ret = vfio_lock_acct(dma, 1, true);
 		if (ret) {
 			put_pfn(*pfn_base, dma->prot);
@@ -702,7 +674,6 @@ static int vfio_pin_page_external(struct vfio_dma *dma, unsigned long vaddr,
 		}
 	}
 
-out:
 	mmput(mm);
 	return ret;
 }
@@ -1129,7 +1100,7 @@ static int vfio_iova_dirty_log_clear(u64 __user *bitmap,
 	int ret = 0;
 
 	bitmap_size = DIRTY_BITMAP_BYTES(size >> pgshift);
-	bitmap_buffer = kvzalloc(bitmap_size, GFP_KERNEL);
+	bitmap_buffer = kvmalloc(bitmap_size, GFP_KERNEL);
 	if (!bitmap_buffer) {
 		ret = -ENOMEM;
 		goto out;
@@ -1179,7 +1150,7 @@ static int vfio_iova_dirty_log_clear(u64 __user *bitmap,
 	}
 
 out:
-	kvfree(bitmap_buffer);
+	kfree(bitmap_buffer);
 	return ret;
 }
 
@@ -1499,19 +1470,15 @@ static int vfio_pin_map_dma(struct vfio_iommu *iommu, struct vfio_dma *dma,
 {
 	dma_addr_t iova = dma->iova;
 	unsigned long vaddr = dma->vaddr;
-	struct vfio_batch batch;
 	size_t size = map_size;
 	long npage;
 	unsigned long pfn, limit = rlimit(RLIMIT_MEMLOCK) >> PAGE_SHIFT;
 	int ret = 0;
 
-	vfio_batch_init(&batch);
-
 	while (size) {
 		/* Pin a contiguous chunk of memory */
 		npage = vfio_pin_pages_remote(dma, vaddr + dma->size,
-					      size >> PAGE_SHIFT, &pfn, limit,
-					      &batch);
+					      size >> PAGE_SHIFT, &pfn, limit);
 		if (npage <= 0) {
 			WARN_ON(!npage);
 			ret = (int)npage;
@@ -1531,7 +1498,6 @@ static int vfio_pin_map_dma(struct vfio_iommu *iommu, struct vfio_dma *dma,
 		dma->size += npage << PAGE_SHIFT;
 	}
 
-	vfio_batch_fini(&batch);
 	dma->iommu_mapped = true;
 
 	if (ret)
@@ -1695,7 +1661,6 @@ static int vfio_bus_type(struct device *dev, void *data)
 static int vfio_iommu_replay(struct vfio_iommu *iommu,
 			     struct vfio_domain *domain)
 {
-	struct vfio_batch batch;
 	struct vfio_domain *d = NULL;
 	struct rb_node *n;
 	unsigned long limit = rlimit(RLIMIT_MEMLOCK) >> PAGE_SHIFT;
@@ -1705,8 +1670,6 @@ static int vfio_iommu_replay(struct vfio_iommu *iommu,
 	if (!list_empty(&iommu->domain_list))
 		d = list_first_entry(&iommu->domain_list,
 				     struct vfio_domain, next);
-
-	vfio_batch_init(&batch);
 
 	n = rb_first(&iommu->dma_list);
 
@@ -1755,8 +1718,7 @@ static int vfio_iommu_replay(struct vfio_iommu *iommu,
 
 				npage = vfio_pin_pages_remote(dma, vaddr,
 							      n >> PAGE_SHIFT,
-							      &pfn, limit,
-							      &batch);
+							      &pfn, limit);
 				if (npage <= 0) {
 					WARN_ON(!npage);
 					ret = (int)npage;
@@ -1789,7 +1751,6 @@ static int vfio_iommu_replay(struct vfio_iommu *iommu,
 		dma->iommu_mapped = true;
 	}
 
-	vfio_batch_fini(&batch);
 	return 0;
 
 unwind:
@@ -1830,7 +1791,6 @@ unwind:
 		}
 	}
 
-	vfio_batch_fini(&batch);
 	return ret;
 }
 
@@ -3088,6 +3048,81 @@ static int vfio_iommu_iova_build_caps(struct vfio_iommu *iommu,
 	return ret;
 }
 
+static void
+vfio_detach_pasid_table(struct vfio_iommu *iommu)
+{
+	struct vfio_domain *d;
+
+	mutex_lock(&iommu->lock);
+	list_for_each_entry(d, &iommu->domain_list, next)
+		iommu_detach_pasid_table(d->domain);
+
+	mutex_unlock(&iommu->lock);
+}
+
+static int
+vfio_attach_pasid_table(struct vfio_iommu *iommu, unsigned long arg)
+{
+	struct vfio_domain *d;
+	int ret = 0;
+
+	mutex_lock(&iommu->lock);
+
+	list_for_each_entry(d, &iommu->domain_list, next) {
+		ret = iommu_uapi_attach_pasid_table(d->domain, (void __user *)arg);
+		if (ret) {
+			list_for_each_entry_continue_reverse(d, &iommu->domain_list, next)
+				iommu_detach_pasid_table(d->domain);
+			break;
+		}
+	}
+
+	mutex_unlock(&iommu->lock);
+	return ret;
+}
+static int vfio_cache_inv_fn(struct device *dev, void *data)
+{
+	struct domain_capsule *dc = (struct domain_capsule *)data;
+	unsigned long arg = *(unsigned long *)dc->data;
+
+	return iommu_uapi_cache_invalidate(dc->domain, dev, (void __user *)arg);
+}
+
+static int
+vfio_bind_msi(struct vfio_iommu *iommu,
+	      dma_addr_t giova, phys_addr_t gpa, size_t size)
+{
+	struct vfio_domain *d;
+	int ret = 0;
+
+	mutex_lock(&iommu->lock);
+
+	list_for_each_entry(d, &iommu->domain_list, next) {
+		ret = iommu_bind_guest_msi(d->domain, giova, gpa, size);
+		if (ret)
+			goto unwind;
+	}
+	goto unlock;
+unwind:
+	list_for_each_entry_continue_reverse(d, &iommu->domain_list, next) {
+		iommu_unbind_guest_msi(d->domain, giova);
+	}
+unlock:
+	mutex_unlock(&iommu->lock);
+	return ret;
+}
+
+static void
+vfio_unbind_msi(struct vfio_iommu *iommu, dma_addr_t giova)
+{
+	struct vfio_domain *d;
+
+	mutex_lock(&iommu->lock);
+	list_for_each_entry(d, &iommu->domain_list, next)
+		iommu_unbind_guest_msi(d->domain, giova);
+	mutex_unlock(&iommu->lock);
+}
+
 static int vfio_iommu_migration_build_caps(struct vfio_iommu *iommu,
 					   struct vfio_info_cap *caps)
 {
@@ -3262,6 +3297,52 @@ static void vfio_iommu_dirty_log_switch(struct vfio_iommu *iommu, bool enable)
 			continue;
 		vfio_domain_dirty_log_switch(iommu, d, enable);
 	}
+}
+
+static int vfio_iommu_type1_cache_invalidate(struct vfio_iommu *iommu,
+					    unsigned long arg)
+{
+	struct vfio_iommu_type1_cache_invalidate cache_inv;
+	unsigned long minsz;
+	int ret;
+
+	minsz = offsetofend(struct vfio_iommu_type1_cache_invalidate, flags);
+
+	if (copy_from_user(&cache_inv, (void __user *)arg, minsz))
+		return -EFAULT;
+
+	if (cache_inv.argsz < minsz || cache_inv.flags)
+		return -EINVAL;
+
+	mutex_lock(&iommu->lock);
+	ret = vfio_iommu_lookup_dev(iommu, vfio_cache_inv_fn, arg + minsz);
+	mutex_unlock(&iommu->lock);
+	return ret;
+}
+
+static int vfio_iommu_type1_set_msi_binding(struct vfio_iommu *iommu,
+					    unsigned long arg)
+{
+	struct vfio_iommu_type1_set_msi_binding msi_binding;
+	unsigned long minsz;
+
+	minsz = offsetofend(struct vfio_iommu_type1_set_msi_binding,
+			    size);
+
+	if (copy_from_user(&msi_binding, (void __user *)arg, minsz))
+		return -EFAULT;
+
+	if (msi_binding.argsz < minsz)
+		return -EINVAL;
+
+	if (msi_binding.flags == VFIO_IOMMU_UNBIND_MSI) {
+		vfio_unbind_msi(iommu, msi_binding.iova);
+		return 0;
+	} else if (msi_binding.flags == VFIO_IOMMU_BIND_MSI) {
+		return vfio_bind_msi(iommu, msi_binding.iova,
+				     msi_binding.gpa, msi_binding.size);
+	}
+	return -EINVAL;
 }
 
 static int vfio_iommu_type1_dirty_pages(struct vfio_iommu *iommu,
@@ -3526,6 +3607,29 @@ static long vfio_iommu_type1_unbind(struct vfio_iommu *iommu, unsigned long arg)
 	return 0;
 }
 
+static int vfio_iommu_type1_set_pasid_table(struct vfio_iommu *iommu,
+					    unsigned long arg)
+{
+	struct vfio_iommu_type1_set_pasid_table spt;
+	unsigned long minsz;
+
+	minsz = offsetofend(struct vfio_iommu_type1_set_pasid_table, flags);
+
+	if (copy_from_user(&spt, (void __user *)arg, minsz))
+		return -EFAULT;
+
+	if (spt.argsz < minsz)
+		return -EINVAL;
+
+	if (spt.flags == VFIO_PASID_TABLE_FLAG_SET) {
+		return vfio_attach_pasid_table(iommu, arg + minsz);
+	} else if (spt.flags == VFIO_PASID_TABLE_FLAG_UNSET) {
+		vfio_detach_pasid_table(iommu);
+		return 0;
+	}
+	return -EINVAL;
+}
+
 static long vfio_iommu_type1_ioctl(void *iommu_data,
 				   unsigned int cmd, unsigned long arg)
 {
@@ -3546,6 +3650,12 @@ static long vfio_iommu_type1_ioctl(void *iommu_data,
 		return vfio_iommu_type1_bind(iommu, arg);
 	case VFIO_IOMMU_UNBIND:
 		return vfio_iommu_type1_unbind(iommu, arg);
+	case VFIO_IOMMU_SET_PASID_TABLE:
+		return vfio_iommu_type1_set_pasid_table(iommu, arg);
+	case VFIO_IOMMU_CACHE_INVALIDATE:
+		return vfio_iommu_type1_cache_invalidate(iommu, arg);
+	case VFIO_IOMMU_SET_MSI_BINDING:
+		return vfio_iommu_type1_set_msi_binding(iommu, arg);
 	default:
 		return -ENOTTY;
 	}
@@ -3659,29 +3769,6 @@ static int vfio_iommu_type1_dma_rw(void *iommu_data, dma_addr_t user_iova,
 	return ret;
 }
 
-static struct iommu_domain *
-vfio_iommu_type1_group_iommu_domain(void *iommu_data,
-				    struct iommu_group *iommu_group)
-{
-	struct iommu_domain *domain = ERR_PTR(-ENODEV);
-	struct vfio_iommu *iommu = iommu_data;
-	struct vfio_domain *d;
-
-	if (!iommu || !iommu_group)
-		return ERR_PTR(-EINVAL);
-
-	mutex_lock(&iommu->lock);
-	list_for_each_entry(d, &iommu->domain_list, next) {
-		if (find_iommu_group(d, iommu_group)) {
-			domain = d->domain;
-			break;
-		}
-	}
-	mutex_unlock(&iommu->lock);
-
-	return domain;
-}
-
 static const struct vfio_iommu_driver_ops vfio_iommu_driver_ops_type1 = {
 	.name			= "vfio-iommu-type1",
 	.owner			= THIS_MODULE,
@@ -3695,7 +3782,6 @@ static const struct vfio_iommu_driver_ops vfio_iommu_driver_ops_type1 = {
 	.register_notifier	= vfio_iommu_type1_register_notifier,
 	.unregister_notifier	= vfio_iommu_type1_unregister_notifier,
 	.dma_rw			= vfio_iommu_type1_dma_rw,
-	.group_iommu_domain	= vfio_iommu_type1_group_iommu_domain,
 };
 
 static int __init vfio_iommu_type1_init(void)
