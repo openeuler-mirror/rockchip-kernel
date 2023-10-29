@@ -42,6 +42,9 @@
 
 #include "internal.h"
 
+#undef CREATE_TRACE_POINT
+#include <trace/hooks/mm.h>
+
 /*
  * Sleep at most 200ms at a time in balance_dirty_pages().
  */
@@ -107,6 +110,11 @@ EXPORT_SYMBOL_GPL(dirty_writeback_interval);
  * The longest time for which data is allowed to remain dirty
  */
 unsigned int dirty_expire_interval = 30 * 100; /* centiseconds */
+
+/*
+ * Flag that makes the machine dump writes/reads and block dirtyings.
+ */
+int block_dump;
 
 /*
  * Flag that puts the machine in "laptop mode". Doubles as a timeout in jiffies:
@@ -1619,6 +1627,9 @@ static void balance_dirty_pages(struct bdi_writeback *wb,
 				m_bg_thresh = mdtc->bg_thresh;
 			}
 		}
+
+		trace_android_vh_mm_dirty_limits(gdtc, strictlimit, dirty, bg_thresh,
+				nr_reclaimable, pages_dirtied);
 
 		/*
 		 * Throttle it only when the background writeback cannot

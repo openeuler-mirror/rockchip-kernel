@@ -18,6 +18,8 @@
 #include <linux/mm_inline.h>
 #include <linux/sched/mm.h>
 
+#include <linux/page_pinner.h>
+
 #include <asm/mmu_context.h>
 #include <asm/tlbflush.h>
 
@@ -114,9 +116,12 @@ static __maybe_unused struct page *try_grab_compound_head(struct page *page,
 							  int refs,
 							  unsigned int flags)
 {
-	if (flags & FOLL_GET)
-		return try_get_compound_head(page, refs);
-	else if (flags & FOLL_PIN) {
+	if (flags & FOLL_GET) {
+		struct page *head = try_get_compound_head(page, refs);
+		if (head)
+			set_page_pinner(head, compound_order(head));
+		return head;
+	} else if (flags & FOLL_PIN) {
 		int orig_refs = refs;
 
 		/*
@@ -170,6 +175,8 @@ static void put_compound_head(struct page *page, int refs, unsigned int flags)
 			refs *= GUP_PIN_COUNTING_BIAS;
 	}
 
+	if (flags & FOLL_GET)
+		reset_page_pinner(page, compound_order(page));
 	put_page_refs(page, refs);
 }
 
@@ -198,9 +205,15 @@ bool __must_check try_grab_page(struct page *page, unsigned int flags)
 {
 	WARN_ON_ONCE((flags & (FOLL_GET | FOLL_PIN)) == (FOLL_GET | FOLL_PIN));
 
-	if (flags & FOLL_GET)
-		return try_get_page(page);
-	else if (flags & FOLL_PIN) {
+	if (flags & FOLL_GET) {
+		bool ret = try_get_page(page);
+
+		if (ret) {
+			page = compound_head(page);
+			set_page_pinner(page, compound_order(page));
+		}
+		return ret;
+	} else if (flags & FOLL_PIN) {
 		int refs = 1;
 
 		page = compound_head(page);
@@ -242,57 +255,23 @@ void unpin_user_page(struct page *page)
 }
 EXPORT_SYMBOL(unpin_user_page);
 
-static inline void compound_range_next(unsigned long i, unsigned long npages,
-				       struct page **list, struct page **head,
-				       unsigned int *ntails)
+/*
+ * put_user_page() - release a page obtained using get_user_pages() or
+ *                   follow_page(FOLL_GET)
+ * @page:            pointer to page to be released
+ *
+ * Pages that were obtained via get_user_pages()/follow_page(FOLL_GET) must be
+ * released via put_user_page.
+ * note: If it's not a page from GUP or follow_page(FOLL_GET), it's harmless.
+ */
+void put_user_page(struct page *page)
 {
-	struct page *next, *page;
-	unsigned int nr = 1;
+	struct page *head = compound_head(page);
 
-	if (i >= npages)
-		return;
-
-	next = *list + i;
-	page = compound_head(next);
-	if (PageCompound(page) && compound_order(page) >= 1)
-		nr = min_t(unsigned int,
-			   page + compound_nr(page) - next, npages - i);
-
-	*head = page;
-	*ntails = nr;
+	reset_page_pinner(head, compound_order(head));
+	put_page(page);
 }
-
-#define for_each_compound_range(__i, __list, __npages, __head, __ntails) \
-	for (__i = 0, \
-	     compound_range_next(__i, __npages, __list, &(__head), &(__ntails)); \
-	     __i < __npages; __i += __ntails, \
-	     compound_range_next(__i, __npages, __list, &(__head), &(__ntails)))
-
-static inline void compound_next(unsigned long i, unsigned long npages,
-				 struct page **list, struct page **head,
-				 unsigned int *ntails)
-{
-	struct page *page;
-	unsigned int nr;
-
-	if (i >= npages)
-		return;
-
-	page = compound_head(list[i]);
-	for (nr = i + 1; nr < npages; nr++) {
-		if (compound_head(list[nr]) != page)
-			break;
-	}
-
-	*head = page;
-	*ntails = nr - i;
-}
-
-#define for_each_compound_head(__i, __list, __npages, __head, __ntails) \
-	for (__i = 0, \
-	     compound_next(__i, __npages, __list, &(__head), &(__ntails)); \
-	     __i < __npages; __i += __ntails, \
-	     compound_next(__i, __npages, __list, &(__head), &(__ntails)))
+EXPORT_SYMBOL(put_user_page);
 
 /**
  * unpin_user_pages_dirty_lock() - release and optionally dirty gup-pinned pages
@@ -320,15 +299,20 @@ void unpin_user_pages_dirty_lock(struct page **pages, unsigned long npages,
 				 bool make_dirty)
 {
 	unsigned long index;
-	struct page *head;
-	unsigned int ntails;
+
+	/*
+	 * TODO: this can be optimized for huge pages: if a series of pages is
+	 * physically contiguous and part of the same compound page, then a
+	 * single operation to the head page should suffice.
+	 */
 
 	if (!make_dirty) {
 		unpin_user_pages(pages, npages);
 		return;
 	}
 
-	for_each_compound_head(index, pages, npages, head, ntails) {
+	for (index = 0; index < npages; index++) {
+		struct page *page = compound_head(pages[index]);
 		/*
 		 * Checking PageDirty at this point may race with
 		 * clear_page_dirty_for_io(), but that's OK. Two key
@@ -349,48 +333,12 @@ void unpin_user_pages_dirty_lock(struct page **pages, unsigned long npages,
 		 * written back, so it gets written back again in the
 		 * next writeback cycle. This is harmless.
 		 */
-		if (!PageDirty(head))
-			set_page_dirty_lock(head);
-		put_compound_head(head, ntails, FOLL_PIN);
+		if (!PageDirty(page))
+			set_page_dirty_lock(page);
+		unpin_user_page(page);
 	}
 }
 EXPORT_SYMBOL(unpin_user_pages_dirty_lock);
-
-/**
- * unpin_user_page_range_dirty_lock() - release and optionally dirty
- * gup-pinned page range
- *
- * @page:  the starting page of a range maybe marked dirty, and definitely released.
- * @npages: number of consecutive pages to release.
- * @make_dirty: whether to mark the pages dirty
- *
- * "gup-pinned page range" refers to a range of pages that has had one of the
- * pin_user_pages() variants called on that page.
- *
- * For the page ranges defined by [page .. page+npages], make that range (or
- * its head pages, if a compound page) dirty, if @make_dirty is true, and if the
- * page range was previously listed as clean.
- *
- * set_page_dirty_lock() is used internally. If instead, set_page_dirty() is
- * required, then the caller should a) verify that this is really correct,
- * because _lock() is usually required, and b) hand code it:
- * set_page_dirty_lock(), unpin_user_page().
- *
- */
-void unpin_user_page_range_dirty_lock(struct page *page, unsigned long npages,
-				      bool make_dirty)
-{
-	unsigned long index;
-	struct page *head;
-	unsigned int ntails;
-
-	for_each_compound_range(index, &page, npages, head, ntails) {
-		if (make_dirty && !PageDirty(head))
-			set_page_dirty_lock(head);
-		put_compound_head(head, ntails, FOLL_PIN);
-	}
-}
-EXPORT_SYMBOL(unpin_user_page_range_dirty_lock);
 
 /**
  * unpin_user_pages() - release an array of gup-pinned pages.
@@ -404,8 +352,6 @@ EXPORT_SYMBOL(unpin_user_page_range_dirty_lock);
 void unpin_user_pages(struct page **pages, unsigned long npages)
 {
 	unsigned long index;
-	struct page *head;
-	unsigned int ntails;
 
 	/*
 	 * If this WARN_ON() fires, then the system *might* be leaking pages (by
@@ -414,9 +360,13 @@ void unpin_user_pages(struct page **pages, unsigned long npages)
 	 */
 	if (WARN_ON(IS_ERR_VALUE(npages)))
 		return;
-
-	for_each_compound_head(index, pages, npages, head, ntails)
-		put_compound_head(head, ntails, FOLL_PIN);
+	/*
+	 * TODO: this can be optimized for huge pages: if a series of pages is
+	 * physically contiguous and part of the same compound page, then a
+	 * single operation to the head page should suffice.
+	 */
+	for (index = 0; index < npages; index++)
+		unpin_user_page(pages[index]);
 }
 EXPORT_SYMBOL(unpin_user_pages);
 
@@ -486,18 +436,6 @@ static struct page *follow_page_pte(struct vm_area_struct *vma,
 	if (WARN_ON_ONCE((flags & (FOLL_PIN | FOLL_GET)) ==
 			 (FOLL_PIN | FOLL_GET)))
 		return ERR_PTR(-EINVAL);
-
-	/*
-	 * Considering PTE level hugetlb, like continuous-PTE hugetlb on
-	 * ARM64 architecture.
-	 */
-	if (is_vm_hugetlb_page(vma)) {
-		page = follow_huge_pmd_pte(vma, address, flags);
-		if (page)
-			return page;
-		return no_page_table(vma, flags);
-	}
-
 retry:
 	if (unlikely(pmd_bad(*pmd)))
 		return no_page_table(vma, flags);
@@ -653,7 +591,7 @@ static struct page *follow_pmd_mask(struct vm_area_struct *vma,
 	if (pmd_none(pmdval))
 		return no_page_table(vma, flags);
 	if (pmd_huge(pmdval) && is_vm_hugetlb_page(vma)) {
-		page = follow_huge_pmd_pte(vma, address, flags);
+		page = follow_huge_pmd(mm, address, pmd, flags);
 		if (page)
 			return page;
 		return no_page_table(vma, flags);
@@ -1519,12 +1457,15 @@ long populate_vma_page_range(struct vm_area_struct *vma,
 }
 
 /*
- * do_mm_populate - populate and/or mlock pages within a range of
- * address space for the specified mm_struct.
+ * __mm_populate - populate and/or mlock pages within a range of address space.
+ *
+ * This is used to implement mlock() and the MAP_POPULATE / MAP_LOCKED mmap
+ * flags. VMAs must be already marked with the desired vm_flags, and
+ * mmap_lock must not be held.
  */
-int do_mm_populate(struct mm_struct *mm, unsigned long start, unsigned long len,
-		   int ignore_errors)
+int __mm_populate(unsigned long start, unsigned long len, int ignore_errors)
 {
+	struct mm_struct *mm = current->mm;
 	unsigned long end, nstart, nend;
 	struct vm_area_struct *vma = NULL;
 	int locked = 0;
@@ -1574,19 +1515,6 @@ int do_mm_populate(struct mm_struct *mm, unsigned long start, unsigned long len,
 		mmap_read_unlock(mm);
 	return ret;	/* 0 or negative error code */
 }
-
-/*
- * __mm_populate - populate and/or mlock pages within a range of address space.
- *
- * This is used to implement mlock() and the MAP_POPULATE / MAP_LOCKED mmap
- * flags. VMAs must be already marked with the desired vm_flags, and
- * mmap_lock must not be held.
- */
-int __mm_populate(unsigned long start, unsigned long len, int ignore_errors)
-{
-	return do_mm_populate(current->mm, start, len, ignore_errors);
-}
-
 #else /* CONFIG_MMU */
 static long __get_user_pages_locked(struct mm_struct *mm, unsigned long start,
 		unsigned long nr_pages, struct page **pages,
@@ -2231,28 +2159,8 @@ static void __maybe_unused undo_dev_pagemap(int *nr, int nr_start,
 }
 
 #ifdef CONFIG_ARCH_HAS_PTE_SPECIAL
-/*
- * Fast-gup relies on pte change detection to avoid concurrent pgtable
- * operations.
- *
- * To pin the page, fast-gup needs to do below in order:
- * (1) pin the page (by prefetching pte), then (2) check pte not changed.
- *
- * For the rest of pgtable operations where pgtable updates can be racy
- * with fast-gup, we need to do (1) clear pte, then (2) check whether page
- * is pinned.
- *
- * Above will work for all pte-level operations, including THP split.
- *
- * For THP collapse, it's a bit more complicated because fast-gup may be
- * walking a pgtable page that is being freed (pte is still valid but pmd
- * can be cleared already).  To avoid race in such condition, we need to
- * also check pmd here to make sure pmd doesn't change (corresponds to
- * pmdp_collapse_flush() in the THP collapse code path).
- */
-static int gup_pte_range(pmd_t pmd, pmd_t *pmdp, unsigned long addr,
-			 unsigned long end, unsigned int flags,
-			 struct page **pages, int *nr)
+static int gup_pte_range(pmd_t pmd, unsigned long addr, unsigned long end,
+			 unsigned int flags, struct page **pages, int *nr)
 {
 	struct dev_pagemap *pgmap = NULL;
 	int nr_start = *nr, ret = 0;
@@ -2292,8 +2200,7 @@ static int gup_pte_range(pmd_t pmd, pmd_t *pmdp, unsigned long addr,
 		if (!head)
 			goto pte_unmap;
 
-		if (unlikely(pmd_val(pmd) != pmd_val(*pmdp)) ||
-		    unlikely(pte_val(pte) != pte_val(*ptep))) {
+		if (unlikely(pte_val(pte) != pte_val(*ptep))) {
 			put_compound_head(head, 1, flags);
 			goto pte_unmap;
 		}
@@ -2338,9 +2245,8 @@ pte_unmap:
  * get_user_pages_fast_only implementation that can pin pages. Thus it's still
  * useful to have gup_huge_pmd even if we can't operate on ptes.
  */
-static int gup_pte_range(pmd_t pmd, pmd_t *pmdp, unsigned long addr,
-			 unsigned long end, unsigned int flags,
-			 struct page **pages, int *nr)
+static int gup_pte_range(pmd_t pmd, unsigned long addr, unsigned long end,
+			 unsigned int flags, struct page **pages, int *nr)
 {
 	return 0;
 }
@@ -2353,7 +2259,6 @@ static int __gup_device_huge(unsigned long pfn, unsigned long addr,
 {
 	int nr_start = *nr;
 	struct dev_pagemap *pgmap = NULL;
-	int ret = 1;
 
 	do {
 		struct page *page = pfn_to_page(pfn);
@@ -2361,22 +2266,21 @@ static int __gup_device_huge(unsigned long pfn, unsigned long addr,
 		pgmap = get_dev_pagemap(pfn, pgmap);
 		if (unlikely(!pgmap)) {
 			undo_dev_pagemap(nr, nr_start, flags, pages);
-			ret = 0;
-			break;
+			return 0;
 		}
 		SetPageReferenced(page);
 		pages[*nr] = page;
 		if (unlikely(!try_grab_page(page, flags))) {
 			undo_dev_pagemap(nr, nr_start, flags, pages);
-			ret = 0;
-			break;
+			return 0;
 		}
 		(*nr)++;
 		pfn++;
 	} while (addr += PAGE_SIZE, addr != end);
 
-	put_dev_pagemap(pgmap);
-	return ret;
+	if (pgmap)
+		put_dev_pagemap(pgmap);
+	return 1;
 }
 
 static int __gup_device_huge_pmd(pmd_t orig, pmd_t *pmdp, unsigned long addr,
@@ -2649,7 +2553,7 @@ static int gup_pmd_range(pud_t *pudp, pud_t pud, unsigned long addr, unsigned lo
 			if (!gup_huge_pd(__hugepd(pmd_val(pmd)), addr,
 					 PMD_SHIFT, next, flags, pages, nr))
 				return 0;
-		} else if (!gup_pte_range(pmd, pmdp, addr, next, flags, pages, nr))
+		} else if (!gup_pte_range(pmd, addr, next, flags, pages, nr))
 			return 0;
 	} while (pmdp++, addr = next, addr != end);
 
@@ -2669,7 +2573,7 @@ static int gup_pud_range(p4d_t *p4dp, p4d_t p4d, unsigned long addr, unsigned lo
 		next = pud_addr_end(addr, end);
 		if (unlikely(!pud_present(pud)))
 			return 0;
-		if (unlikely(pud_huge(pud) || pud_devmap(pud))) {
+		if (unlikely(pud_huge(pud))) {
 			if (!gup_huge_pud(pud, pudp, addr, next, flags,
 					  pages, nr))
 				return 0;

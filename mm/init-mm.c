@@ -10,7 +10,6 @@
 
 #include <linux/atomic.h>
 #include <linux/user_namespace.h>
-#include <linux/ioasid.h>
 #include <asm/mmu.h>
 
 #ifndef INIT_MM_CONTEXT
@@ -29,6 +28,9 @@
  */
 struct mm_struct init_mm = {
 	.mm_rb		= RB_ROOT,
+#ifdef CONFIG_SPECULATIVE_PAGE_FAULT
+	.mm_rb_lock	= __RW_LOCK_UNLOCKED(init_mm.mm_rb_lock),
+#endif
 	.pgd		= swapper_pg_dir,
 	.mm_users	= ATOMIC_INIT(2),
 	.mm_count	= ATOMIC_INIT(1),
@@ -39,8 +41,5 @@ struct mm_struct init_mm = {
 	.mmlist		= LIST_HEAD_INIT(init_mm.mmlist),
 	.user_ns	= &init_user_ns,
 	.cpu_bitmap	= CPU_BITS_NONE,
-#ifdef CONFIG_IOMMU_SVA
-	.pasid		= INVALID_IOASID,
-#endif
 	INIT_MM_CONTEXT(init_mm)
 };

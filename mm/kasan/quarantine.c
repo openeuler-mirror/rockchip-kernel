@@ -6,16 +6,6 @@
  * Copyright (C) 2016 Google, Inc.
  *
  * Based on code by Dmitry Chernenkov.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * version 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
  */
 
 #include <linux/gfp.h>
@@ -178,7 +168,7 @@ static void qlist_free_all(struct qlist_head *q, struct kmem_cache *cache)
 	qlist_init(q);
 }
 
-bool quarantine_put(struct kmem_cache *cache, void *object)
+bool kasan_quarantine_put(struct kmem_cache *cache, void *object)
 {
 	unsigned long flags;
 	struct qlist_head *q;
@@ -194,11 +184,11 @@ bool quarantine_put(struct kmem_cache *cache, void *object)
 
 	/*
 	 * Note: irq must be disabled until after we move the batch to the
-	 * global quarantine. Otherwise quarantine_remove_cache() can miss
-	 * some objects belonging to the cache if they are in our local temp
-	 * list. quarantine_remove_cache() executes on_each_cpu() at the
-	 * beginning which ensures that it either sees the objects in per-cpu
-	 * lists or in the global quarantine.
+	 * global quarantine. Otherwise kasan_quarantine_remove_cache() can
+	 * miss some objects belonging to the cache if they are in our local
+	 * temp list. kasan_quarantine_remove_cache() executes on_each_cpu()
+	 * at the beginning which ensures that it either sees the objects in
+	 * per-cpu lists or in the global quarantine.
 	 */
 	local_irq_save(flags);
 
@@ -232,7 +222,7 @@ bool quarantine_put(struct kmem_cache *cache, void *object)
 	return true;
 }
 
-void quarantine_reduce(void)
+void kasan_quarantine_reduce(void)
 {
 	size_t total_size, new_quarantine_size, percpu_quarantines;
 	unsigned long flags;
@@ -244,7 +234,7 @@ void quarantine_reduce(void)
 		return;
 
 	/*
-	 * srcu critical section ensures that quarantine_remove_cache()
+	 * srcu critical section ensures that kasan_quarantine_remove_cache()
 	 * will not miss objects belonging to the cache while they are in our
 	 * local to_free list. srcu is chosen because (1) it gives us private
 	 * grace period domain that does not interfere with anything else,
@@ -314,27 +304,20 @@ static void per_cpu_remove_cache(void *arg)
 	struct qlist_head *q;
 
 	q = this_cpu_ptr(&cpu_quarantine);
-	/*
-	 * Ensure the ordering between the writing to q->offline and
-	 * per_cpu_remove_cache.  Prevent cpu_quarantine from being corrupted
-	 * by interrupt.
-	 */
-	if (READ_ONCE(q->offline))
-		return;
 	qlist_move_cache(q, &to_free, cache);
 	qlist_free_all(&to_free, cache);
 }
 
 /* Free all quarantined objects belonging to cache. */
-void quarantine_remove_cache(struct kmem_cache *cache)
+void kasan_quarantine_remove_cache(struct kmem_cache *cache)
 {
 	unsigned long flags, i;
 	struct qlist_head to_free = QLIST_INIT;
 
 	/*
 	 * Must be careful to not miss any objects that are being moved from
-	 * per-cpu list to the global quarantine in quarantine_put(),
-	 * nor objects being freed in quarantine_reduce(). on_each_cpu()
+	 * per-cpu list to the global quarantine in kasan_quarantine_put(),
+	 * nor objects being freed in kasan_quarantine_reduce(). on_each_cpu()
 	 * achieves the first goal, while synchronize_srcu() achieves the
 	 * second.
 	 */
