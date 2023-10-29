@@ -105,7 +105,7 @@ struct rxrpc_connection *rxrpc_find_connection_rcu(struct rxrpc_local *local,
 			goto not_found;
 		*_peer = peer;
 		conn = rxrpc_find_service_conn_rcu(peer, skb);
-		if (!conn || refcount_read(&conn->ref) == 0)
+		if (!conn || atomic_read(&conn->usage) == 0)
 			goto not_found;
 		_leave(" = %p", conn);
 		return conn;
@@ -115,7 +115,7 @@ struct rxrpc_connection *rxrpc_find_connection_rcu(struct rxrpc_local *local,
 		 */
 		conn = idr_find(&rxrpc_client_conn_ids,
 				sp->hdr.cid >> RXRPC_CIDSHIFT);
-		if (!conn || refcount_read(&conn->ref) == 0) {
+		if (!conn || atomic_read(&conn->usage) == 0) {
 			_debug("no conn");
 			goto not_found;
 		}
@@ -184,7 +184,7 @@ void __rxrpc_disconnect_call(struct rxrpc_connection *conn,
 			chan->last_type = RXRPC_PACKET_TYPE_ABORT;
 			break;
 		default:
-			chan->last_abort = RX_CALL_DEAD;
+			chan->last_abort = RX_USER_ABORT;
 			chan->last_type = RXRPC_PACKET_TYPE_ABORT;
 			break;
 		}
@@ -264,12 +264,11 @@ void rxrpc_kill_connection(struct rxrpc_connection *conn)
 bool rxrpc_queue_conn(struct rxrpc_connection *conn)
 {
 	const void *here = __builtin_return_address(0);
-	int r;
-
-	if (!__refcount_inc_not_zero(&conn->ref, &r))
+	int n = atomic_fetch_add_unless(&conn->usage, 1, 0);
+	if (n == 0)
 		return false;
 	if (rxrpc_queue_work(&conn->processor))
-		trace_rxrpc_conn(conn->debug_id, rxrpc_conn_queued, r + 1, here);
+		trace_rxrpc_conn(conn->debug_id, rxrpc_conn_queued, n + 1, here);
 	else
 		rxrpc_put_connection(conn);
 	return true;
@@ -282,7 +281,7 @@ void rxrpc_see_connection(struct rxrpc_connection *conn)
 {
 	const void *here = __builtin_return_address(0);
 	if (conn) {
-		int n = refcount_read(&conn->ref);
+		int n = atomic_read(&conn->usage);
 
 		trace_rxrpc_conn(conn->debug_id, rxrpc_conn_seen, n, here);
 	}
@@ -294,10 +293,9 @@ void rxrpc_see_connection(struct rxrpc_connection *conn)
 struct rxrpc_connection *rxrpc_get_connection(struct rxrpc_connection *conn)
 {
 	const void *here = __builtin_return_address(0);
-	int r;
+	int n = atomic_inc_return(&conn->usage);
 
-	__refcount_inc(&conn->ref, &r);
-	trace_rxrpc_conn(conn->debug_id, rxrpc_conn_got, r, here);
+	trace_rxrpc_conn(conn->debug_id, rxrpc_conn_got, n, here);
 	return conn;
 }
 
@@ -308,11 +306,11 @@ struct rxrpc_connection *
 rxrpc_get_connection_maybe(struct rxrpc_connection *conn)
 {
 	const void *here = __builtin_return_address(0);
-	int r;
 
 	if (conn) {
-		if (__refcount_inc_not_zero(&conn->ref, &r))
-			trace_rxrpc_conn(conn->debug_id, rxrpc_conn_got, r + 1, here);
+		int n = atomic_fetch_add_unless(&conn->usage, 1, 0);
+		if (n > 0)
+			trace_rxrpc_conn(conn->debug_id, rxrpc_conn_got, n + 1, here);
 		else
 			conn = NULL;
 	}
@@ -336,11 +334,12 @@ void rxrpc_put_service_conn(struct rxrpc_connection *conn)
 {
 	const void *here = __builtin_return_address(0);
 	unsigned int debug_id = conn->debug_id;
-	int r;
+	int n;
 
-	__refcount_dec(&conn->ref, &r);
-	trace_rxrpc_conn(debug_id, rxrpc_conn_put_service, r - 1, here);
-	if (r - 1 == 1)
+	n = atomic_dec_return(&conn->usage);
+	trace_rxrpc_conn(debug_id, rxrpc_conn_put_service, n, here);
+	ASSERTCMP(n, >=, 0);
+	if (n == 1)
 		rxrpc_set_service_reap_timer(conn->params.local->rxnet,
 					     jiffies + rxrpc_connection_expiry);
 }
@@ -353,9 +352,9 @@ static void rxrpc_destroy_connection(struct rcu_head *rcu)
 	struct rxrpc_connection *conn =
 		container_of(rcu, struct rxrpc_connection, rcu);
 
-	_enter("{%d,u=%d}", conn->debug_id, refcount_read(&conn->ref));
+	_enter("{%d,u=%d}", conn->debug_id, atomic_read(&conn->usage));
 
-	ASSERTCMP(refcount_read(&conn->ref), ==, 0);
+	ASSERTCMP(atomic_read(&conn->usage), ==, 0);
 
 	_net("DESTROY CONN %d", conn->debug_id);
 
@@ -395,8 +394,8 @@ void rxrpc_service_connection_reaper(struct work_struct *work)
 
 	write_lock(&rxnet->conn_lock);
 	list_for_each_entry_safe(conn, _p, &rxnet->service_conns, link) {
-		ASSERTCMP(refcount_read(&conn->ref), >, 0);
-		if (likely(refcount_read(&conn->ref) > 1))
+		ASSERTCMP(atomic_read(&conn->usage), >, 0);
+		if (likely(atomic_read(&conn->usage) > 1))
 			continue;
 		if (conn->state == RXRPC_CONN_SERVICE_PREALLOC)
 			continue;
@@ -408,7 +407,7 @@ void rxrpc_service_connection_reaper(struct work_struct *work)
 				expire_at = idle_timestamp + rxrpc_closed_conn_expiry * HZ;
 
 			_debug("reap CONN %d { u=%d,t=%ld }",
-			       conn->debug_id, refcount_read(&conn->ref),
+			       conn->debug_id, atomic_read(&conn->usage),
 			       (long)expire_at - (long)now);
 
 			if (time_before(now, expire_at)) {
@@ -421,7 +420,7 @@ void rxrpc_service_connection_reaper(struct work_struct *work)
 		/* The usage count sits at 1 whilst the object is unused on the
 		 * list; we reduce that to 0 to make the object unavailable.
 		 */
-		if (!refcount_dec_if_one(&conn->ref))
+		if (atomic_cmpxchg(&conn->usage, 1, 0) != 1)
 			continue;
 		trace_rxrpc_conn(conn->debug_id, rxrpc_conn_reap_service, 0, NULL);
 
@@ -445,7 +444,7 @@ void rxrpc_service_connection_reaper(struct work_struct *work)
 				  link);
 		list_del_init(&conn->link);
 
-		ASSERTCMP(refcount_read(&conn->ref), ==, 0);
+		ASSERTCMP(atomic_read(&conn->usage), ==, 0);
 		rxrpc_kill_connection(conn);
 	}
 
@@ -473,7 +472,7 @@ void rxrpc_destroy_all_connections(struct rxrpc_net *rxnet)
 	write_lock(&rxnet->conn_lock);
 	list_for_each_entry_safe(conn, _p, &rxnet->service_conns, link) {
 		pr_err("AF_RXRPC: Leaked conn %p {%d}\n",
-		       conn, refcount_read(&conn->ref));
+		       conn, atomic_read(&conn->usage));
 		leak = true;
 	}
 	write_unlock(&rxnet->conn_lock);
