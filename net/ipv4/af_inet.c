@@ -158,7 +158,7 @@ void inet_sock_destruct(struct sock *sk)
 
 	kfree(rcu_dereference_protected(inet->inet_opt, 1));
 	dst_release(rcu_dereference_protected(sk->sk_dst_cache, 1));
-	dst_release(rcu_dereference_protected(sk->sk_rx_dst, 1));
+	dst_release(sk->sk_rx_dst);
 	sk_refcnt_debug_dec(sk);
 }
 EXPORT_SYMBOL(inet_sock_destruct);
@@ -220,7 +220,7 @@ int inet_listen(struct socket *sock, int backlog)
 		 * because the socket was in TCP_LISTEN state previously but
 		 * was shutdown() rather than close().
 		 */
-		tcp_fastopen = READ_ONCE(sock_net(sk)->ipv4.sysctl_tcp_fastopen);
+		tcp_fastopen = sock_net(sk)->ipv4.sysctl_tcp_fastopen;
 		if ((tcp_fastopen & TFO_SERVER_WO_SOCKOPT1) &&
 		    (tcp_fastopen & TFO_SERVER_ENABLE) &&
 		    !inet_csk(sk)->icsk_accept_queue.fastopenq.max_qlen) {
@@ -338,7 +338,7 @@ lookup_protocol:
 			inet->hdrincl = 1;
 	}
 
-	if (READ_ONCE(net->ipv4.sysctl_ip_no_pmtu_disc))
+	if (net->ipv4.sysctl_ip_no_pmtu_disc)
 		inet->pmtudisc = IP_PMTUDISC_DONT;
 	else
 		inet->pmtudisc = IP_PMTUDISC_WANT;
@@ -450,7 +450,7 @@ int inet_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
 	/* BPF prog is run before any checks are done so that if the prog
 	 * changes context in a wrong way it will be caught.
 	 */
-	err = BPF_CGROUP_RUN_PROG_INET4_BIND_LOCK(sk, uaddr);
+	err = BPF_CGROUP_RUN_PROG_INET4_BIND(sk, uaddr);
 	if (err)
 		return err;
 
@@ -498,6 +498,10 @@ int __inet_bind(struct sock *sk, struct sockaddr *uaddr, int addr_len,
 		goto out;
 
 	snum = ntohs(addr->sin_port);
+	err = -EPERM;
+	if (snum && inet_is_local_unbindable_port(net, snum))
+		goto out;
+
 	err = -EACCES;
 	if (snum && inet_port_requires_bind_service(net, snum) &&
 	    !ns_capable(net->user_ns, CAP_NET_BIND_SERVICE))
@@ -559,27 +563,22 @@ int inet_dgram_connect(struct socket *sock, struct sockaddr *uaddr,
 		       int addr_len, int flags)
 {
 	struct sock *sk = sock->sk;
-	const struct proto *prot;
 	int err;
 
 	if (addr_len < sizeof(uaddr->sa_family))
 		return -EINVAL;
-
-	/* IPV6_ADDRFORM can change sk->sk_prot under us. */
-	prot = READ_ONCE(sk->sk_prot);
-
 	if (uaddr->sa_family == AF_UNSPEC)
-		return prot->disconnect(sk, flags);
+		return sk->sk_prot->disconnect(sk, flags);
 
 	if (BPF_CGROUP_PRE_CONNECT_ENABLED(sk)) {
-		err = prot->pre_connect(sk, uaddr, addr_len);
+		err = sk->sk_prot->pre_connect(sk, uaddr, addr_len);
 		if (err)
 			return err;
 	}
 
 	if (data_race(!inet_sk(sk)->inet_num) && inet_autobind(sk))
 		return -EAGAIN;
-	return prot->connect(sk, uaddr, addr_len);
+	return sk->sk_prot->connect(sk, uaddr, addr_len);
 }
 EXPORT_SYMBOL(inet_dgram_connect);
 
@@ -740,11 +739,10 @@ EXPORT_SYMBOL(inet_stream_connect);
 int inet_accept(struct socket *sock, struct socket *newsock, int flags,
 		bool kern)
 {
-	struct sock *sk1 = sock->sk, *sk2;
+	struct sock *sk1 = sock->sk;
 	int err = -EINVAL;
+	struct sock *sk2 = sk1->sk_prot->accept(sk1, flags, &err, kern);
 
-	/* IPV6_ADDRFORM can change sk->sk_prot under us. */
-	sk2 = READ_ONCE(sk1->sk_prot)->accept(sk1, flags, &err, kern);
 	if (!sk2)
 		goto do_err;
 
@@ -783,19 +781,18 @@ int inet_getname(struct socket *sock, struct sockaddr *uaddr,
 			return -ENOTCONN;
 		sin->sin_port = inet->inet_dport;
 		sin->sin_addr.s_addr = inet->inet_daddr;
-		BPF_CGROUP_RUN_SA_PROG_LOCK(sk, (struct sockaddr *)sin,
-					    CGROUP_INET4_GETPEERNAME,
-					    NULL);
 	} else {
 		__be32 addr = inet->inet_rcv_saddr;
 		if (!addr)
 			addr = inet->inet_saddr;
 		sin->sin_port = inet->inet_sport;
 		sin->sin_addr.s_addr = addr;
-		BPF_CGROUP_RUN_SA_PROG_LOCK(sk, (struct sockaddr *)sin,
-					    CGROUP_INET4_GETSOCKNAME,
-					    NULL);
 	}
+	if (cgroup_bpf_enabled)
+		BPF_CGROUP_RUN_SA_PROG_LOCK(sk, (struct sockaddr *)sin,
+					    peer ? BPF_CGROUP_INET4_GETPEERNAME :
+						   BPF_CGROUP_INET4_GETSOCKNAME,
+					    NULL);
 	memset(sin->sin_zero, 0, sizeof(sin->sin_zero));
 	return sizeof(*sin);
 }
@@ -830,15 +827,12 @@ ssize_t inet_sendpage(struct socket *sock, struct page *page, int offset,
 		      size_t size, int flags)
 {
 	struct sock *sk = sock->sk;
-	const struct proto *prot;
 
 	if (unlikely(inet_send_prepare(sk)))
 		return -EAGAIN;
 
-	/* IPV6_ADDRFORM can change sk->sk_prot under us. */
-	prot = READ_ONCE(sk->sk_prot);
-	if (prot->sendpage)
-		return prot->sendpage(sk, page, offset, size, flags);
+	if (sk->sk_prot->sendpage)
+		return sk->sk_prot->sendpage(sk, page, offset, size, flags);
 	return sock_no_sendpage(sock, page, offset, size, flags);
 }
 EXPORT_SYMBOL(inet_sendpage);
@@ -1255,7 +1249,7 @@ static int inet_sk_reselect_saddr(struct sock *sk)
 	if (new_saddr == old_saddr)
 		return 0;
 
-	if (READ_ONCE(sock_net(sk)->ipv4.sysctl_ip_dynaddr) > 1) {
+	if (sock_net(sk)->ipv4.sysctl_ip_dynaddr > 1) {
 		pr_info("%s(): shifting inet->saddr from %pI4 to %pI4\n",
 			__func__, &old_saddr, &new_saddr);
 	}
@@ -1310,7 +1304,7 @@ int inet_sk_rebuild_header(struct sock *sk)
 		 * Other protocols have to map its equivalent state to TCP_SYN_SENT.
 		 * DCCP maps its DCCP_REQUESTING state to TCP_SYN_SENT. -acme
 		 */
-		if (!READ_ONCE(sock_net(sk)->ipv4.sysctl_ip_dynaddr) ||
+		if (!sock_net(sk)->ipv4.sysctl_ip_dynaddr ||
 		    sk->sk_state != TCP_SYN_SENT ||
 		    (sk->sk_userlocks & SOCK_BINDADDR_LOCK) ||
 		    (err = inet_sk_reselect_saddr(sk)) != 0)
@@ -1384,11 +1378,8 @@ struct sk_buff *inet_gso_segment(struct sk_buff *skb,
 	}
 
 	ops = rcu_dereference(inet_offloads[proto]);
-	if (likely(ops && ops->callbacks.gso_segment)) {
+	if (likely(ops && ops->callbacks.gso_segment))
 		segs = ops->callbacks.gso_segment(skb, features);
-		if (!segs)
-			skb->network_header = skb_mac_header(skb) + nhoff - skb->head;
-	}
 
 	if (IS_ERR_OR_NULL(segs))
 		goto out;
@@ -1678,6 +1669,12 @@ int inet_ctl_sock_create(struct sock **sk, unsigned short family,
 }
 EXPORT_SYMBOL_GPL(inet_ctl_sock_create);
 
+u64 snmp_get_cpu_field(void __percpu *mib, int cpu, int offt)
+{
+	return  *(((unsigned long *)per_cpu_ptr(mib, cpu)) + offt);
+}
+EXPORT_SYMBOL_GPL(snmp_get_cpu_field);
+
 unsigned long snmp_fold_field(void __percpu *mib, int offt)
 {
 	unsigned long res = 0;
@@ -1730,7 +1727,12 @@ static const struct net_protocol igmp_protocol = {
 };
 #endif
 
-static const struct net_protocol tcp_protocol = {
+/* thinking of making this const? Don't.
+ * early_demux can change based on sysctl.
+ */
+static struct net_protocol tcp_protocol = {
+	.early_demux	=	tcp_v4_early_demux,
+	.early_demux_handler =  tcp_v4_early_demux,
 	.handler	=	tcp_v4_rcv,
 	.err_handler	=	tcp_v4_err,
 	.no_policy	=	1,
@@ -1738,7 +1740,12 @@ static const struct net_protocol tcp_protocol = {
 	.icmp_strict_tag_validation = 1,
 };
 
-static const struct net_protocol udp_protocol = {
+/* thinking of making this const? Don't.
+ * early_demux can change based on sysctl.
+ */
+static struct net_protocol udp_protocol = {
+	.early_demux =	udp_v4_early_demux,
+	.early_demux_handler =	udp_v4_early_demux,
 	.handler =	udp_rcv,
 	.err_handler =	udp_err,
 	.no_policy =	1,
@@ -1940,8 +1947,6 @@ static int __init inet_init(void)
 
 	sock_skb_cb_check_size(sizeof(struct inet_skb_parm));
 
-	raw_hashinfo_init(&raw_v4_hashinfo);
-
 	rc = proto_register(&tcp_prot, 1);
 	if (rc)
 		goto out;
@@ -2002,10 +2007,6 @@ static int __init inet_init(void)
 
 	ip_init();
 
-	/* Initialise per-cpu ipv4 mibs */
-	if (init_ipv4_mibs())
-		panic("%s: Cannot init ipv4 mibs\n", __func__);
-
 	/* Setup TCP slab cache for open requests. */
 	tcp_init();
 
@@ -2036,6 +2037,12 @@ static int __init inet_init(void)
 
 	if (init_inet_pernet_ops())
 		pr_crit("%s: Cannot init ipv4 inet pernet ops\n", __func__);
+	/*
+	 *	Initialise per-cpu ipv4 mibs
+	 */
+
+	if (init_ipv4_mibs())
+		pr_crit("%s: Cannot init ipv4 mibs\n", __func__);
 
 	ipv4_proc_init();
 

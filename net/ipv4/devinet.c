@@ -1244,7 +1244,7 @@ out:
 	return ret;
 }
 
-int inet_gifconf(struct net_device *dev, char __user *buf, int len, int size)
+static int inet_gifconf(struct net_device *dev, char __user *buf, int len, int size)
 {
 	struct in_device *in_dev = __in_dev_get_rtnl(dev);
 	const struct in_ifaddr *ifa;
@@ -2582,7 +2582,7 @@ static int __devinet_sysctl_register(struct net *net, char *dev_name,
 free:
 	kfree(t);
 out:
-	return -ENOMEM;
+	return -ENOBUFS;
 }
 
 static void __devinet_sysctl_unregister(struct net *net,
@@ -2668,27 +2668,23 @@ static __net_init int devinet_init_net(struct net *net)
 #endif
 
 	if (!net_eq(net, &init_net)) {
-		switch (net_inherit_devconf()) {
-		case 3:
+		if (IS_ENABLED(CONFIG_SYSCTL) &&
+		    sysctl_devconf_inherit_init_net == 3) {
 			/* copy from the current netns */
 			memcpy(all, current->nsproxy->net_ns->ipv4.devconf_all,
 			       sizeof(ipv4_devconf));
 			memcpy(dflt,
 			       current->nsproxy->net_ns->ipv4.devconf_dflt,
 			       sizeof(ipv4_devconf_dflt));
-			break;
-		case 0:
-		case 1:
-			/* copy from init_net */
+		} else if (!IS_ENABLED(CONFIG_SYSCTL) ||
+			   sysctl_devconf_inherit_init_net != 2) {
+			/* inherit == 0 or 1: copy from init_net */
 			memcpy(all, init_net.ipv4.devconf_all,
 			       sizeof(ipv4_devconf));
 			memcpy(dflt, init_net.ipv4.devconf_dflt,
 			       sizeof(ipv4_devconf_dflt));
-			break;
-		case 2:
-			/* use compiled values */
-			break;
 		}
+		/* else inherit == 2: use compiled values */
 	}
 
 #ifdef CONFIG_SYSCTL
@@ -2766,6 +2762,8 @@ void __init devinet_init(void)
 		INIT_HLIST_HEAD(&inet_addr_lst[i]);
 
 	register_pernet_subsys(&devinet_ops);
+
+	register_gifconf(PF_INET, inet_gifconf);
 	register_netdevice_notifier(&ip_netdev_notifier);
 
 	queue_delayed_work(system_power_efficient_wq, &check_lifetime_work, 0);
