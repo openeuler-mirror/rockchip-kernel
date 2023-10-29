@@ -421,8 +421,6 @@ static struct bfq_io_cq *bfq_bic_lookup(struct bfq_data *bfqd,
  */
 void bfq_schedule_dispatch(struct bfq_data *bfqd)
 {
-	lockdep_assert_held(&bfqd->lock);
-
 	if (bfqd->queued != 0) {
 		bfq_log(bfqd, "schedule dispatch");
 		blk_mq_run_hw_queues(bfqd->queue, true);
@@ -1873,11 +1871,7 @@ static void bfq_add_request(struct request *rq)
 
 	bfq_log_bfqq(bfqd, bfqq, "add_request %d", rq_is_sync(rq));
 	bfqq->queued[rq_is_sync(rq)]++;
-	/*
-	 * Updating of 'bfqd->queued' is protected by 'bfqd->lock', however, it
-	 * may be read without holding the lock in bfq_has_work().
-	 */
-	WRITE_ONCE(bfqd->queued, bfqd->queued + 1);
+	bfqd->queued++;
 
 	if (RB_EMPTY_ROOT(&bfqq->sort_list) && bfq_bfqq_sync(bfqq)) {
 		/*
@@ -2170,11 +2164,7 @@ static void bfq_remove_request(struct request_queue *q,
 	if (rq->queuelist.prev != &rq->queuelist)
 		list_del_init(&rq->queuelist);
 	bfqq->queued[sync]--;
-	/*
-	 * Updating of 'bfqd->queued' is protected by 'bfqd->lock', however, it
-	 * may be read without holding the lock in bfq_has_work().
-	 */
-	WRITE_ONCE(bfqd->queued, bfqd->queued - 1);
+	bfqd->queued--;
 	elv_rb_del(&bfqq->sort_list, rq);
 
 	elv_rqhash_del(q, rq);
@@ -2237,24 +2227,17 @@ static bool bfq_bio_merge(struct request_queue *q, struct bio *bio,
 
 	spin_lock_irq(&bfqd->lock);
 
-	if (bic) {
-		/*
-		 * Make sure cgroup info is uptodate for current process before
-		 * considering the merge.
-		 */
-		bfq_bic_update_cgroup(bic, bio);
-
+	if (bic)
 		bfqd->bio_bfqq = bic_to_bfqq(bic, op_is_sync(bio->bi_opf));
-	} else {
+	else
 		bfqd->bio_bfqq = NULL;
-	}
 	bfqd->bio_bic = bic;
 
 	ret = blk_mq_sched_try_merge(q, bio, nr_segs, &free);
 
-	spin_unlock_irq(&bfqd->lock);
 	if (free)
 		blk_mq_free_request(free);
+	spin_unlock_irq(&bfqd->lock);
 
 	return ret;
 }
@@ -2277,6 +2260,8 @@ static int bfq_request_merge(struct request_queue *q, struct request **req,
 	return ELEVATOR_NO_MERGE;
 }
 
+static struct bfq_queue *bfq_init_rq(struct request *rq);
+
 static void bfq_request_merged(struct request_queue *q, struct request *req,
 			       enum elv_merge type)
 {
@@ -2285,7 +2270,7 @@ static void bfq_request_merged(struct request_queue *q, struct request *req,
 	    blk_rq_pos(req) <
 	    blk_rq_pos(container_of(rb_prev(&req->rb_node),
 				    struct request, rb_node))) {
-		struct bfq_queue *bfqq = RQ_BFQQ(req);
+		struct bfq_queue *bfqq = bfq_init_rq(req);
 		struct bfq_data *bfqd;
 		struct request *prev, *next_rq;
 
@@ -2337,11 +2322,11 @@ static void bfq_request_merged(struct request_queue *q, struct request *req,
 static void bfq_requests_merged(struct request_queue *q, struct request *rq,
 				struct request *next)
 {
-	struct bfq_queue *bfqq = RQ_BFQQ(rq),
-		*next_bfqq = RQ_BFQQ(next);
+	struct bfq_queue *bfqq = bfq_init_rq(rq),
+		*next_bfqq = bfq_init_rq(next);
 
 	if (!bfqq)
-		goto remove;
+		return;
 
 	/*
 	 * If next and rq belong to the same bfq_queue and next is older
@@ -2364,14 +2349,6 @@ static void bfq_requests_merged(struct request_queue *q, struct request *rq,
 		bfqq->next_rq = rq;
 
 	bfqg_stats_update_io_merged(bfqq_group(bfqq), next->cmd_flags);
-remove:
-	/* Merged request may be in the IO scheduler. Remove it. */
-	if (!RB_EMPTY_NODE(&next->rb_node)) {
-		bfq_remove_request(next->q, next);
-		if (next_bfqq)
-			bfqg_stats_update_io_remove(bfqq_group(next_bfqq),
-						    next->cmd_flags);
-	}
 }
 
 /* Must be called with bfqq != NULL */
@@ -2525,14 +2502,6 @@ bfq_setup_merge(struct bfq_queue *bfqq, struct bfq_queue *new_bfqq)
 	if (process_refs == 0 || new_process_refs == 0)
 		return NULL;
 
-	/*
-	 * Make sure merged queues belong to the same parent. Parents could
-	 * have changed since the time we decided the two queues are suitable
-	 * for merging.
-	 */
-	if (new_bfqq->entity.parent != bfqq->entity.parent)
-		return NULL;
-
 	bfq_log_bfqq(bfqq->bfqd, bfqq, "scheduling merge with queue %d",
 		new_bfqq->pid);
 
@@ -2557,15 +2526,6 @@ bfq_setup_merge(struct bfq_queue *bfqq, struct bfq_queue *new_bfqq)
 	 * are likely to increase the throughput.
 	 */
 	bfqq->new_bfqq = new_bfqq;
-	/*
-	 * The above assignment schedules the following redirections:
-	 * each time some I/O for bfqq arrives, the process that
-	 * generated that I/O is disassociated from bfqq and
-	 * associated with new_bfqq. Here we increases new_bfqq->ref
-	 * in advance, adding the number of processes that are
-	 * expected to be associated with new_bfqq as they happen to
-	 * issue I/O.
-	 */
 	new_bfqq->ref += process_refs;
 	return new_bfqq;
 }
@@ -2625,10 +2585,6 @@ bfq_setup_cooperator(struct bfq_data *bfqd, struct bfq_queue *bfqq,
 {
 	struct bfq_queue *in_service_bfqq, *new_bfqq;
 
-	/* if a merge has already been setup, then proceed with that first */
-	if (bfqq->new_bfqq)
-		return bfqq->new_bfqq;
-
 	/*
 	 * Do not perform queue merging if the device is non
 	 * rotational and performs internal queueing. In fact, such a
@@ -2682,6 +2638,9 @@ bfq_setup_cooperator(struct bfq_data *bfqd, struct bfq_queue *bfqq,
 	 */
 	if (bfq_too_late_for_merging(bfqq))
 		return NULL;
+
+	if (bfqq->new_bfqq)
+		return bfqq->new_bfqq;
 
 	if (!io_struct || unlikely(bfqq == &bfqd->oom_bfqq))
 		return NULL;
@@ -2776,15 +2735,6 @@ void bfq_release_process_ref(struct bfq_data *bfqd, struct bfq_queue *bfqq)
 	if (bfq_bfqq_busy(bfqq) && RB_EMPTY_ROOT(&bfqq->sort_list) &&
 	    bfqq != bfqd->in_service_queue)
 		bfq_del_bfqq_busy(bfqd, bfqq, false);
-
-	/*
-	 * __bfq_bic_change_cgroup() just reset bic->bfqq so that a new bfqq
-	 * will be created to handle new io, while old bfqq will stay around
-	 * until all the requests are completed. It's unsafe to keep bfqq->bic
-	 * since they are not related anymore.
-	 */
-	if (bfqq_process_refs(bfqq) == 1)
-		bfqq->bic = NULL;
 
 	bfq_put_queue(bfqq);
 }
@@ -4694,11 +4644,11 @@ static bool bfq_has_work(struct blk_mq_hw_ctx *hctx)
 	struct bfq_data *bfqd = hctx->queue->elevator->elevator_data;
 
 	/*
-	 * Avoiding lock: a race on bfqd->queued should cause at
+	 * Avoiding lock: a race on bfqd->busy_queues should cause at
 	 * most a call to dispatch for nothing
 	 */
 	return !list_empty_careful(&bfqd->dispatch) ||
-		READ_ONCE(bfqd->queued);
+		bfq_tot_busy_queues(bfqd) > 0;
 }
 
 static struct request *__bfq_dispatch_request(struct blk_mq_hw_ctx *hctx)
@@ -4846,7 +4796,7 @@ static struct request *bfq_dispatch_request(struct blk_mq_hw_ctx *hctx)
 	struct bfq_data *bfqd = hctx->queue->elevator->elevator_data;
 	struct request *rq;
 	struct bfq_queue *in_serv_queue;
-	bool waiting_rq, idle_timer_disabled = false;
+	bool waiting_rq, idle_timer_disabled;
 
 	spin_lock_irq(&bfqd->lock);
 
@@ -4854,15 +4804,14 @@ static struct request *bfq_dispatch_request(struct blk_mq_hw_ctx *hctx)
 	waiting_rq = in_serv_queue && bfq_bfqq_wait_request(in_serv_queue);
 
 	rq = __bfq_dispatch_request(hctx);
-	if (in_serv_queue == bfqd->in_service_queue) {
-		idle_timer_disabled =
-			waiting_rq && !bfq_bfqq_wait_request(in_serv_queue);
-	}
+
+	idle_timer_disabled =
+		waiting_rq && !bfq_bfqq_wait_request(in_serv_queue);
 
 	spin_unlock_irq(&bfqd->lock);
-	bfq_update_dispatch_stats(hctx->queue, rq,
-			idle_timer_disabled ? in_serv_queue : NULL,
-				idle_timer_disabled);
+
+	bfq_update_dispatch_stats(hctx->queue, rq, in_serv_queue,
+				  idle_timer_disabled);
 
 	return rq;
 }
@@ -4954,7 +4903,7 @@ void bfq_put_queue(struct bfq_queue *bfqq)
 	bfqg_and_blkg_put(bfqg);
 }
 
-void bfq_put_cooperator(struct bfq_queue *bfqq)
+static void bfq_put_cooperator(struct bfq_queue *bfqq)
 {
 	struct bfq_queue *__bfqq, *next;
 
@@ -5059,7 +5008,7 @@ bfq_set_next_ioprio_data(struct bfq_queue *bfqq, struct bfq_io_cq *bic)
 	if (bfqq->new_ioprio >= IOPRIO_BE_NR) {
 		pr_crit("bfq_set_next_ioprio_data: new_ioprio %d\n",
 			bfqq->new_ioprio);
-		bfqq->new_ioprio = IOPRIO_BE_NR - 1;
+		bfqq->new_ioprio = IOPRIO_BE_NR;
 	}
 
 	bfqq->entity.new_weight = bfq_ioprio_to_weight(bfqq->new_ioprio);
@@ -5186,7 +5135,14 @@ static struct bfq_queue *bfq_get_queue(struct bfq_data *bfqd,
 	struct bfq_queue *bfqq;
 	struct bfq_group *bfqg;
 
-	bfqg = bfq_bio_bfqg(bfqd, bio);
+	rcu_read_lock();
+
+	bfqg = bfq_find_set_group(bfqd, __bio_blkcg(bio));
+	if (!bfqg) {
+		bfqq = &bfqd->oom_bfqq;
+		goto out;
+	}
+
 	if (!is_sync) {
 		async_bfqq = bfq_async_queue_prio(bfqd, bfqg, ioprio_class,
 						  ioprio);
@@ -5230,6 +5186,7 @@ static struct bfq_queue *bfq_get_queue(struct bfq_data *bfqd,
 out:
 	bfqq->ref++; /* get a process reference to this queue */
 	bfq_log_bfqq(bfqd, bfqq, "get_queue, at end: %p, %d", bfqq, bfqq->ref);
+	rcu_read_unlock();
 	return bfqq;
 }
 
@@ -5532,8 +5489,6 @@ static inline void bfq_update_insert_stats(struct request_queue *q,
 					   unsigned int cmd_flags) {}
 #endif /* CONFIG_BFQ_CGROUP_DEBUG */
 
-static struct bfq_queue *bfq_init_rq(struct request *rq);
-
 static void bfq_insert_request(struct blk_mq_hw_ctx *hctx, struct request *rq,
 			       bool at_head)
 {
@@ -5542,22 +5497,23 @@ static void bfq_insert_request(struct blk_mq_hw_ctx *hctx, struct request *rq,
 	struct bfq_queue *bfqq;
 	bool idle_timer_disabled = false;
 	unsigned int cmd_flags;
-	LIST_HEAD(free);
 
 #ifdef CONFIG_BFQ_GROUP_IOSCHED
 	if (!cgroup_subsys_on_dfl(io_cgrp_subsys) && rq->bio)
 		bfqg_stats_update_legacy_io(q, rq);
 #endif
 	spin_lock_irq(&bfqd->lock);
-	bfqq = bfq_init_rq(rq);
-	if (blk_mq_sched_try_insert_merge(q, rq, &free)) {
+	if (blk_mq_sched_try_insert_merge(q, rq)) {
 		spin_unlock_irq(&bfqd->lock);
-		blk_mq_free_requests(&free);
 		return;
 	}
 
+	spin_unlock_irq(&bfqd->lock);
+
 	blk_mq_sched_request_inserted(rq);
 
+	spin_lock_irq(&bfqd->lock);
+	bfqq = bfq_init_rq(rq);
 	if (!bfqq || at_head || blk_rq_is_passthrough(rq)) {
 		if (at_head)
 			list_add(&rq->queuelist, &bfqd->dispatch);
@@ -5941,7 +5897,6 @@ static void bfq_finish_requeue_request(struct request *rq)
 {
 	struct bfq_queue *bfqq = RQ_BFQQ(rq);
 	struct bfq_data *bfqd;
-	unsigned long flags;
 
 	/*
 	 * rq either is not associated with any icq, or is an already
@@ -5959,15 +5914,39 @@ static void bfq_finish_requeue_request(struct request *rq)
 					     rq->io_start_time_ns,
 					     rq->cmd_flags);
 
-	spin_lock_irqsave(&bfqd->lock, flags);
 	if (likely(rq->rq_flags & RQF_STARTED)) {
+		unsigned long flags;
+
+		spin_lock_irqsave(&bfqd->lock, flags);
+
 		if (rq == bfqd->waited_rq)
 			bfq_update_inject_limit(bfqd, bfqq);
 
 		bfq_completed_request(bfqq, bfqd);
+		bfq_finish_requeue_request_body(bfqq);
+
+		spin_unlock_irqrestore(&bfqd->lock, flags);
+	} else {
+		/*
+		 * Request rq may be still/already in the scheduler,
+		 * in which case we need to remove it (this should
+		 * never happen in case of requeue). And we cannot
+		 * defer such a check and removal, to avoid
+		 * inconsistencies in the time interval from the end
+		 * of this function to the start of the deferred work.
+		 * This situation seems to occur only in process
+		 * context, as a consequence of a merge. In the
+		 * current version of the code, this implies that the
+		 * lock is held.
+		 */
+
+		if (!RB_EMPTY_NODE(&rq->rb_node)) {
+			bfq_remove_request(rq->q, rq);
+			bfqg_stats_update_io_remove(bfqq_group(bfqq),
+						    rq->cmd_flags);
+		}
+		bfq_finish_requeue_request_body(bfqq);
 	}
-	bfq_finish_requeue_request_body(bfqq);
-	spin_unlock_irqrestore(&bfqd->lock, flags);
 
 	/*
 	 * Reset private fields. In case of a requeue, this allows
@@ -6270,8 +6249,8 @@ bfq_idle_slice_timer_body(struct bfq_data *bfqd, struct bfq_queue *bfqq)
 	bfq_bfqq_expire(bfqd, bfqq, true, reason);
 
 schedule_dispatch:
-	bfq_schedule_dispatch(bfqd);
 	spin_unlock_irqrestore(&bfqd->lock, flags);
+	bfq_schedule_dispatch(bfqd);
 }
 
 /*
@@ -6384,8 +6363,8 @@ static void bfq_depth_updated(struct blk_mq_hw_ctx *hctx)
 	struct blk_mq_tags *tags = hctx->sched_tags;
 	unsigned int min_shallow;
 
-	min_shallow = bfq_update_depths(bfqd, &tags->bitmap_tags);
-	sbitmap_queue_min_shallow_depth(&tags->bitmap_tags, min_shallow);
+	min_shallow = bfq_update_depths(bfqd, tags->bitmap_tags);
+	sbitmap_queue_min_shallow_depth(tags->bitmap_tags, min_shallow);
 }
 
 static int bfq_init_hctx(struct blk_mq_hw_ctx *hctx, unsigned int index)
@@ -6398,7 +6377,6 @@ static void bfq_exit_queue(struct elevator_queue *e)
 {
 	struct bfq_data *bfqd = e->elevator_data;
 	struct bfq_queue *bfqq, *n;
-	struct request_queue *q = bfqd->queue;
 
 	hrtimer_cancel(&bfqd->idle_slice_timer);
 
@@ -6422,9 +6400,6 @@ static void bfq_exit_queue(struct elevator_queue *e)
 #endif
 
 	kfree(bfqd);
-
-	/* Re-enable throttling in case elevator disabled it */
-	wbt_enable_default(q);
 }
 
 static void bfq_init_root_group(struct bfq_group *root_group,

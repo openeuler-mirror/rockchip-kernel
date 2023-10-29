@@ -69,6 +69,7 @@
 #include <linux/blkdev.h>
 #include <linux/gfp.h>
 #include <linux/blk-mq.h>
+#include <linux/lockdep.h>
 
 #include "blk.h"
 #include "blk-mq.h"
@@ -235,10 +236,8 @@ static void flush_end_io(struct request *flush_rq, blk_status_t error)
 	 * avoiding use-after-free.
 	 */
 	WRITE_ONCE(flush_rq->state, MQ_RQ_IDLE);
-	if (fq->rq_status != BLK_STS_OK) {
+	if (fq->rq_status != BLK_STS_OK)
 		error = fq->rq_status;
-		fq->rq_status = BLK_STS_OK;
-	}
 
 	if (!q->elevator) {
 		flush_rq->tag = BLK_MQ_NO_TAG;
@@ -333,7 +332,7 @@ static void blk_kick_flush(struct request_queue *q, struct blk_flush_queue *fq,
 
 	flush_rq->cmd_flags = REQ_OP_FLUSH | REQ_PREFLUSH;
 	flush_rq->cmd_flags |= (flags & REQ_DRV) | (flags & REQ_FAILFAST_MASK);
-	flush_rq->rq_flags |= RQF_FLUSH_SEQ | RQF_FROM_BLOCK;
+	flush_rq->rq_flags |= RQF_FLUSH_SEQ;
 	flush_rq->rq_disk = first_rq->rq_disk;
 	flush_rq->end_io = flush_end_io;
 	/*
@@ -470,8 +469,7 @@ struct blk_flush_queue *blk_alloc_flush_queue(int node, int cmd_size,
 					      gfp_t flags)
 {
 	struct blk_flush_queue *fq;
-	struct request_wrapper *wrapper;
-	int rq_sz = sizeof(struct request) + sizeof(struct request_wrapper);
+	int rq_sz = sizeof(struct request);
 
 	fq = kzalloc_node(sizeof(*fq), flags, node);
 	if (!fq)
@@ -480,14 +478,16 @@ struct blk_flush_queue *blk_alloc_flush_queue(int node, int cmd_size,
 	spin_lock_init(&fq->mq_flush_lock);
 
 	rq_sz = round_up(rq_sz + cmd_size, cache_line_size());
-	wrapper = kzalloc_node(rq_sz, flags, node);
-	if (!wrapper)
+	fq->flush_rq = kzalloc_node(rq_sz, flags, node);
+	if (!fq->flush_rq)
 		goto fail_rq;
 
-	fq->flush_rq = (struct request *)(wrapper + 1);
 	INIT_LIST_HEAD(&fq->flush_queue[0]);
 	INIT_LIST_HEAD(&fq->flush_queue[1]);
 	INIT_LIST_HEAD(&fq->flush_data_in_flight);
+
+	lockdep_register_key(&fq->key);
+	lockdep_set_class(&fq->mq_flush_lock, &fq->key);
 
 	return fq;
 
@@ -503,31 +503,7 @@ void blk_free_flush_queue(struct blk_flush_queue *fq)
 	if (!fq)
 		return;
 
-	kfree(request_to_wrapper(fq->flush_rq));
+	lockdep_unregister_key(&fq->key);
+	kfree(fq->flush_rq);
 	kfree(fq);
 }
-
-/*
- * Allow driver to set its own lock class to fq->mq_flush_lock for
- * avoiding lockdep complaint.
- *
- * flush_end_io() may be called recursively from some driver, such as
- * nvme-loop, so lockdep may complain 'possible recursive locking' because
- * all 'struct blk_flush_queue' instance share same mq_flush_lock lock class
- * key. We need to assign different lock class for these driver's
- * fq->mq_flush_lock for avoiding the lockdep warning.
- *
- * Use dynamically allocated lock class key for each 'blk_flush_queue'
- * instance is over-kill, and more worse it introduces horrible boot delay
- * issue because synchronize_rcu() is implied in lockdep_unregister_key which
- * is called for each hctx release. SCSI probing may synchronously create and
- * destroy lots of MQ request_queues for non-existent devices, and some robot
- * test kernel always enable lockdep option. It is observed that more than half
- * an hour is taken during SCSI MQ probe with per-fq lock class.
- */
-void blk_mq_hctx_set_fq_lock_class(struct blk_mq_hw_ctx *hctx,
-		struct lock_class_key *key)
-{
-	lockdep_set_class(&hctx->fq->mq_flush_lock, key);
-}
-EXPORT_SYMBOL_GPL(blk_mq_hctx_set_fq_lock_class);

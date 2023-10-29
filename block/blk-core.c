@@ -18,7 +18,6 @@
 #include <linux/bio.h>
 #include <linux/blkdev.h>
 #include <linux/blk-mq.h>
-#include <linux/blk-pm.h>
 #include <linux/highmem.h>
 #include <linux/mm.h>
 #include <linux/pagemap.h>
@@ -59,23 +58,15 @@ EXPORT_TRACEPOINT_SYMBOL_GPL(block_rq_remap);
 EXPORT_TRACEPOINT_SYMBOL_GPL(block_bio_complete);
 EXPORT_TRACEPOINT_SYMBOL_GPL(block_split);
 EXPORT_TRACEPOINT_SYMBOL_GPL(block_unplug);
+EXPORT_TRACEPOINT_SYMBOL_GPL(block_bio_queue);
+EXPORT_TRACEPOINT_SYMBOL_GPL(block_getrq);
+EXPORT_TRACEPOINT_SYMBOL_GPL(block_rq_insert);
+EXPORT_TRACEPOINT_SYMBOL_GPL(block_rq_issue);
+EXPORT_TRACEPOINT_SYMBOL_GPL(block_rq_merge);
+EXPORT_TRACEPOINT_SYMBOL_GPL(block_rq_requeue);
+EXPORT_TRACEPOINT_SYMBOL_GPL(block_rq_complete);
 
 DEFINE_IDA(blk_queue_ida);
-
-bool precise_iostat;
-
-static int __init precise_iostat_setup(char *str)
-{
-	bool precise;
-
-	if (!strtobool(str, &precise)) {
-		precise_iostat = precise;
-		pr_info("precise iostat %d\n", precise_iostat);
-	}
-
-	return 1;
-}
-__setup("precise_iostat=", precise_iostat_setup);
 
 /*
  * For queue allocation
@@ -402,6 +393,8 @@ void blk_cleanup_queue(struct request_queue *q)
 	 */
 	blk_freeze_queue(q);
 
+	rq_qos_exit(q);
+
 	blk_queue_flag_set(QUEUE_FLAG_DEAD, q);
 
 	/* for synchronous bio-based driver finish in-flight integrity i/o */
@@ -411,10 +404,8 @@ void blk_cleanup_queue(struct request_queue *q)
 	del_timer_sync(&q->backing_dev_info->laptop_mode_wb_timer);
 	blk_sync_queue(q);
 
-	if (queue_is_mq(q)) {
-		blk_mq_cancel_work_sync(q);
+	if (queue_is_mq(q))
 		blk_mq_exit_queue(q);
-	}
 
 	/*
 	 * In theory, request pool of sched_tags belongs to request queue.
@@ -426,8 +417,10 @@ void blk_cleanup_queue(struct request_queue *q)
 	 */
 	mutex_lock(&q->sysfs_lock);
 	if (q->elevator)
-		blk_mq_sched_free_rqs(q);
+		blk_mq_sched_free_requests(q);
 	mutex_unlock(&q->sysfs_lock);
+
+	percpu_ref_exit(&q->q_usage_counter);
 
 	/* @q is and will stay empty, shutdown and put */
 	blk_put_queue(q);
@@ -453,8 +446,7 @@ int blk_queue_enter(struct request_queue *q, blk_mq_req_flags_t flags)
 			 * responsible for ensuring that that counter is
 			 * globally visible before the queue is unfrozen.
 			 */
-			if ((pm && queue_rpm_status(q) != RPM_SUSPENDED) ||
-			    !blk_queue_pm_only(q)) {
+			if (pm || !blk_queue_pm_only(q)) {
 				success = true;
 			} else {
 				percpu_ref_put(&q->q_usage_counter);
@@ -479,7 +471,8 @@ int blk_queue_enter(struct request_queue *q, blk_mq_req_flags_t flags)
 
 		wait_event(q->mq_freeze_wq,
 			   (!q->mq_freeze_depth &&
-			    blk_pm_resume_queue(pm, q)) ||
+			    (pm || (blk_pm_request_resume(q),
+				    !blk_queue_pm_only(q)))) ||
 			   blk_queue_dying(q));
 		if (blk_queue_dying(q))
 			return -ENODEV;
@@ -708,7 +701,7 @@ static inline bool bio_check_ro(struct bio *bio, struct hd_struct *part)
 {
 	const int op = bio_op(bio);
 
-	if (part->read_only && op_is_write(op)) {
+	if (part->policy && op_is_write(op)) {
 		char b[BDEVNAME_SIZE];
 
 		if (op_is_flush(bio->bi_opf) && !bio_sectors(bio))
@@ -910,8 +903,10 @@ static noinline_for_stack bool submit_bio_checks(struct bio *bio)
 	if (unlikely(!current->io_context))
 		create_task_io_context(current, GFP_ATOMIC, q->node);
 
-	if (blk_throtl_bio(bio))
+	if (blk_throtl_bio(bio)) {
+		blkcg_bio_issue_init(bio);
 		return false;
+	}
 
 	blk_cgroup_bio_start(bio);
 	blkcg_bio_issue_init(bio);
@@ -1108,6 +1103,15 @@ blk_qc_t submit_bio(struct bio *bio)
 			task_io_account_read(bio->bi_iter.bi_size);
 			count_vm_events(PGPGIN, count);
 		}
+
+		if (unlikely(block_dump)) {
+			char b[BDEVNAME_SIZE];
+			printk(KERN_DEBUG "%s(%d): %s block %Lu on %s (%u sectors)\n",
+			current->comm, task_pid_nr(current),
+				op_is_write(bio_op(bio)) ? "WRITE" : "READ",
+				(unsigned long long)bio->bi_iter.bi_sector,
+				bio_devname(bio, b), count);
+		}
 	}
 
 	/*
@@ -1217,10 +1221,7 @@ blk_status_t blk_insert_cloned_request(struct request_queue *q, struct request *
 	 * bypass a potential scheduler on the bottom device for
 	 * insert.
 	 */
-	ret = blk_mq_request_issue_directly(rq, true);
-	if (ret)
-		blk_account_io_done(rq, ktime_get_ns());
-	return ret;
+	return blk_mq_request_issue_directly(rq, true);
 }
 EXPORT_SYMBOL_GPL(blk_insert_cloned_request);
 
@@ -1265,19 +1266,14 @@ unsigned int blk_rq_err_bytes(const struct request *rq)
 }
 EXPORT_SYMBOL_GPL(blk_rq_err_bytes);
 
-void update_io_ticks(struct hd_struct *part, unsigned long now, bool end)
+static void update_io_ticks(struct hd_struct *part, unsigned long now, bool end)
 {
 	unsigned long stamp;
 again:
 	stamp = READ_ONCE(part->stamp);
-	if (unlikely(time_after(now, stamp)) &&
-		likely(cmpxchg(&part->stamp, stamp, now) == stamp)) {
-		if (precise_iostat) {
-			if (end || part_in_flight(part))
-				__part_stat_add(part, io_ticks, now - stamp);
-		} else {
+	if (unlikely(stamp != now)) {
+		if (likely(cmpxchg(&part->stamp, stamp, now) == stamp))
 			__part_stat_add(part, io_ticks, end ? now - stamp : 1);
-		}
 	}
 	if (part->partno) {
 		part = &part_to_disk(part)->part0;
@@ -1298,37 +1294,6 @@ static void blk_account_io_completion(struct request *req, unsigned int bytes)
 	}
 }
 
-static void blk_account_io_latency(struct request *req, u64 now, const int sgrp)
-{
-#ifdef CONFIG_64BIT
-	u64 stat_time;
-	struct request_wrapper *rq_wrapper;
-
-	if (!(req->rq_flags & RQF_FROM_BLOCK)) {
-		part_stat_add(req->part, nsecs[sgrp], now - req->start_time_ns);
-		return;
-	}
-
-	rq_wrapper = request_to_wrapper(req);
-	stat_time = READ_ONCE(rq_wrapper->stat_time_ns);
-	/*
-	 * This might fail if 'stat_time_ns' is updated
-	 * in blk_mq_check_inflight_with_stat().
-	 */
-	if (likely(now > stat_time &&
-		   cmpxchg64(&rq_wrapper->stat_time_ns, stat_time, now)
-		   == stat_time)) {
-		u64 duration = stat_time ? now - stat_time :
-			now - req->start_time_ns;
-
-		part_stat_add(req->part, nsecs[sgrp], duration);
-	}
-#else
-	part_stat_add(req->part, nsecs[sgrp], now - req->start_time_ns);
-
-#endif
-}
-
 void blk_account_io_done(struct request *req, u64 now)
 {
 	/*
@@ -1343,12 +1308,12 @@ void blk_account_io_done(struct request *req, u64 now)
 
 		part_stat_lock();
 		part = req->part;
+
 		update_io_ticks(part, jiffies, true);
 		part_stat_inc(part, ios[sgrp]);
-		blk_account_io_latency(req, now, sgrp);
-		if (precise_iostat)
-			part_stat_local_dec(part, in_flight[rq_data_dir(req)]);
+		part_stat_add(part, nsecs[sgrp], now - req->start_time_ns);
 		part_stat_unlock();
+
 		hd_struct_put(part);
 	}
 }
@@ -1362,24 +1327,19 @@ void blk_account_io_start(struct request *rq)
 
 	part_stat_lock();
 	update_io_ticks(rq->part, jiffies, false);
-	if (precise_iostat)
-		part_stat_local_inc(rq->part, in_flight[rq_data_dir(rq)]);
 	part_stat_unlock();
 }
 
 static unsigned long __part_start_io_acct(struct hd_struct *part,
-					  unsigned int sectors, unsigned int op,
-					  bool precise)
+					  unsigned int sectors, unsigned int op)
 {
 	const int sgrp = op_stat_group(op);
 	unsigned long now = READ_ONCE(jiffies);
 
 	part_stat_lock();
 	update_io_ticks(part, now, false);
-	if (!precise) {
-		part_stat_inc(part, ios[sgrp]);
-		part_stat_add(part, sectors[sgrp], sectors);
-	}
+	part_stat_inc(part, ios[sgrp]);
+	part_stat_add(part, sectors[sgrp], sectors);
 	part_stat_local_inc(part, in_flight[op_is_write(op)]);
 	part_stat_unlock();
 
@@ -1391,21 +1351,19 @@ unsigned long part_start_io_acct(struct gendisk *disk, struct hd_struct **part,
 {
 	*part = disk_map_sector_rcu(disk, bio->bi_iter.bi_sector);
 
-	return __part_start_io_acct(*part, bio_sectors(bio), bio_op(bio),
-				    false);
+	return __part_start_io_acct(*part, bio_sectors(bio), bio_op(bio));
 }
 EXPORT_SYMBOL_GPL(part_start_io_acct);
 
 unsigned long disk_start_io_acct(struct gendisk *disk, unsigned int sectors,
 				 unsigned int op)
 {
-	return __part_start_io_acct(&disk->part0, sectors, op, false);
+	return __part_start_io_acct(&disk->part0, sectors, op);
 }
 EXPORT_SYMBOL(disk_start_io_acct);
 
-static void __part_end_io_acct(struct hd_struct *part, unsigned int sectors,
-			       unsigned int op, unsigned long start_time,
-			       bool precise)
+static void __part_end_io_acct(struct hd_struct *part, unsigned int op,
+			       unsigned long start_time)
 {
 	const int sgrp = op_stat_group(op);
 	unsigned long now = READ_ONCE(jiffies);
@@ -1413,10 +1371,6 @@ static void __part_end_io_acct(struct hd_struct *part, unsigned int sectors,
 
 	part_stat_lock();
 	update_io_ticks(part, now, true);
-	if (precise) {
-		part_stat_inc(part, ios[sgrp]);
-		part_stat_add(part, sectors[sgrp], sectors);
-	}
 	part_stat_add(part, nsecs[sgrp], jiffies_to_nsecs(duration));
 	part_stat_local_dec(part, in_flight[op_is_write(op)]);
 	part_stat_unlock();
@@ -1425,7 +1379,7 @@ static void __part_end_io_acct(struct hd_struct *part, unsigned int sectors,
 void part_end_io_acct(struct hd_struct *part, struct bio *bio,
 		      unsigned long start_time)
 {
-	__part_end_io_acct(part, 0, bio_op(bio), start_time, false);
+	__part_end_io_acct(part, bio_op(bio), start_time);
 	hd_struct_put(part);
 }
 EXPORT_SYMBOL_GPL(part_end_io_acct);
@@ -1433,41 +1387,9 @@ EXPORT_SYMBOL_GPL(part_end_io_acct);
 void disk_end_io_acct(struct gendisk *disk, unsigned int op,
 		      unsigned long start_time)
 {
-	__part_end_io_acct(&disk->part0, 0, op, start_time, false);
+	__part_end_io_acct(&disk->part0, op, start_time);
 }
 EXPORT_SYMBOL(disk_end_io_acct);
-
-unsigned long part_start_precise_io_acct(struct gendisk *disk,
-					 struct hd_struct **part,
-					 struct bio *bio)
-{
-	*part = disk_map_sector_rcu(disk, bio->bi_iter.bi_sector);
-
-	return __part_start_io_acct(*part, 0, bio_op(bio), true);
-}
-EXPORT_SYMBOL_GPL(part_start_precise_io_acct);
-
-unsigned long disk_start_precise_io_acct(struct gendisk *disk, unsigned int op)
-{
-	return __part_start_io_acct(&disk->part0, 0, op, true);
-}
-EXPORT_SYMBOL(disk_start_precise_io_acct);
-
-void part_end_precise_io_acct(struct hd_struct *part, struct bio *bio,
-			      unsigned long start_time)
-{
-	__part_end_io_acct(part, bio_sectors(bio), bio_op(bio), start_time,
-			   true);
-	hd_struct_put(part);
-}
-EXPORT_SYMBOL_GPL(part_end_precise_io_acct);
-
-void disk_end_precise_io_acct(struct gendisk *disk, unsigned int sectors,
-			      unsigned int op, unsigned long start_time)
-{
-	__part_end_io_acct(&disk->part0, sectors, op, start_time, true);
-}
-EXPORT_SYMBOL(disk_end_precise_io_acct);
 
 /*
  * Steal bios from a request and add them to a bio list.

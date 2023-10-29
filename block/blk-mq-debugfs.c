@@ -129,7 +129,6 @@ static const char *const blk_queue_flag_name[] = {
 	QUEUE_FLAG_NAME(PCI_P2PDMA),
 	QUEUE_FLAG_NAME(ZONE_RESETALL),
 	QUEUE_FLAG_NAME(RQ_ALLOC_TIME),
-	QUEUE_FLAG_NAME(HCTX_ACTIVE),
 	QUEUE_FLAG_NAME(NOWAIT),
 };
 #undef QUEUE_FLAG_NAME
@@ -204,22 +203,6 @@ static ssize_t queue_write_hint_store(void *data, const char __user *buf,
 	return count;
 }
 
-static int queue_tag_set_show(void *data, struct seq_file *m)
-{
-	struct request_queue *q = data;
-	struct blk_mq_tag_set *set = q->tag_set;
-
-	seq_printf(m, "nr_hw_queues=%u\n", set->nr_hw_queues);
-	seq_printf(m, "queue_depth=%u\n", set->queue_depth);
-	seq_printf(m, "reserved_tags=%u\n", set->reserved_tags);
-	seq_printf(m, "cmd_size=%u\n", set->cmd_size);
-	seq_printf(m, "numa_node=%d\n", set->numa_node);
-	seq_printf(m, "timeout=%u\n", set->timeout);
-	seq_printf(m, "flags=%u\n", set->flags);
-
-	return 0;
-}
-
 static const struct blk_mq_debugfs_attr blk_mq_debugfs_queue_attrs[] = {
 	{ "poll_stat", 0400, queue_poll_stat_show },
 	{ "requeue_list", 0400, .seq_ops = &queue_requeue_list_seq_ops },
@@ -227,7 +210,6 @@ static const struct blk_mq_debugfs_attr blk_mq_debugfs_queue_attrs[] = {
 	{ "state", 0600, queue_state_show, queue_state_write },
 	{ "write_hints", 0600, queue_write_hint_show, queue_write_hint_store },
 	{ "zone_wlock", 0400, queue_zone_wlock_show, NULL },
-	{ "tag_set", 0400, queue_tag_set_show, NULL },
 	{ },
 };
 
@@ -360,9 +342,8 @@ int __blk_mq_debugfs_rq_show(struct seq_file *m, struct request *rq)
 	blk_flags_show(m, rq->cmd_flags & ~REQ_OP_MASK, cmd_flag_name,
 		       ARRAY_SIZE(cmd_flag_name));
 	seq_puts(m, ", .rq_flags=");
-	blk_flags_show(m,
-		       (__force unsigned int)(rq->rq_flags & ~RQF_FROM_BLOCK),
-		       rqf_name, ARRAY_SIZE(rqf_name));
+	blk_flags_show(m, (__force unsigned int)rq->rq_flags, rqf_name,
+		       ARRAY_SIZE(rqf_name));
 	seq_printf(m, ", .state=%s", blk_mq_rq_state_name(blk_mq_rq_state(rq)));
 	seq_printf(m, ", .tag=%d, .internal_tag=%d", rq->tag,
 		   rq->internal_tag);
@@ -471,15 +452,13 @@ static void blk_mq_debugfs_tags_show(struct seq_file *m,
 	seq_printf(m, "nr_reserved_tags=%u\n", tags->nr_reserved_tags);
 	seq_printf(m, "active_queues=%d\n",
 		   atomic_read(&tags->active_queues));
-	seq_printf(m, "pending_queues=%d\n",
-		   atomic_read(&tags->pending_queues));
 
 	seq_puts(m, "\nbitmap_tags:\n");
-	sbitmap_queue_show(&tags->bitmap_tags, m);
+	sbitmap_queue_show(tags->bitmap_tags, m);
 
 	if (tags->nr_reserved_tags) {
 		seq_puts(m, "\nbreserved_tags:\n");
-		sbitmap_queue_show(&tags->breserved_tags, m);
+		sbitmap_queue_show(tags->breserved_tags, m);
 	}
 }
 
@@ -510,7 +489,7 @@ static int hctx_tags_bitmap_show(void *data, struct seq_file *m)
 	if (res)
 		goto out;
 	if (hctx->tags)
-		sbitmap_bitmap_show(&hctx->tags->bitmap_tags.sb, m);
+		sbitmap_bitmap_show(&hctx->tags->bitmap_tags->sb, m);
 	mutex_unlock(&q->sysfs_lock);
 
 out:
@@ -544,7 +523,7 @@ static int hctx_sched_tags_bitmap_show(void *data, struct seq_file *m)
 	if (res)
 		goto out;
 	if (hctx->sched_tags)
-		sbitmap_bitmap_show(&hctx->sched_tags->bitmap_tags.sb, m);
+		sbitmap_bitmap_show(&hctx->sched_tags->bitmap_tags->sb, m);
 	mutex_unlock(&q->sysfs_lock);
 
 out:
@@ -645,20 +624,6 @@ static int hctx_dispatch_busy_show(void *data, struct seq_file *m)
 	struct blk_mq_hw_ctx *hctx = data;
 
 	seq_printf(m, "%u\n", hctx->dispatch_busy);
-	return 0;
-}
-
-static int hctx_dtag_wait_time_show(void *data, struct seq_file *m)
-{
-	struct blk_mq_hw_ctx *hctx = data;
-	unsigned int time = 0;
-
-	if (test_bit(BLK_MQ_S_DTAG_WAIT, &hctx->state))
-		time = jiffies_to_msecs(jiffies -
-					READ_ONCE(hctx->dtag_wait_time));
-
-	seq_printf(m, "%u\n", time);
-
 	return 0;
 }
 
@@ -832,7 +797,6 @@ static const struct blk_mq_debugfs_attr blk_mq_debugfs_hctx_attrs[] = {
 	{"active", 0400, hctx_active_show},
 	{"dispatch_busy", 0400, hctx_dispatch_busy_show},
 	{"type", 0400, hctx_type_show},
-	{"dtag_wait_time_ms", 0400, hctx_dtag_wait_time_show},
 	{},
 };
 
@@ -916,9 +880,6 @@ void blk_mq_debugfs_register_hctx(struct request_queue *q,
 	char name[20];
 	int i;
 
-	if (!q->debugfs_dir)
-		return;
-
 	snprintf(name, sizeof(name), "hctx%u", hctx->queue_num);
 	hctx->debugfs_dir = debugfs_create_dir(name, q->debugfs_dir);
 
@@ -976,6 +937,21 @@ void blk_mq_debugfs_unregister_sched(struct request_queue *q)
 {
 	debugfs_remove_recursive(q->sched_debugfs_dir);
 	q->sched_debugfs_dir = NULL;
+}
+
+static const char *rq_qos_id_to_name(enum rq_qos_id id)
+{
+	switch (id) {
+	case RQ_QOS_WBT:
+		return "wbt";
+	case RQ_QOS_LATENCY:
+		return "latency";
+	case RQ_QOS_COST:
+		return "cost";
+	case RQ_QOS_IOPRIO:
+		return "ioprio";
+	}
+	return "unknown";
 }
 
 void blk_mq_debugfs_unregister_rqos(struct rq_qos *rqos)

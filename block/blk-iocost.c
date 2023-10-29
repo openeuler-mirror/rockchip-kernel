@@ -184,7 +184,6 @@
 #include "blk-rq-qos.h"
 #include "blk-stat.h"
 #include "blk-wbt.h"
-#include "blk-mq.h"
 
 #ifdef CONFIG_TRACEPOINTS
 
@@ -486,7 +485,6 @@ struct ioc_gq {
 	u32				inuse;
 
 	u32				last_inuse;
-	bool				online;
 	s64				saved_margin;
 
 	sector_t			cursor;		/* to detect randio */
@@ -701,20 +699,6 @@ static struct ioc_cgrp *blkcg_to_iocc(struct blkcg *blkcg)
 {
 	return container_of(blkcg_to_cpd(blkcg, &blkcg_policy_iocost),
 			    struct ioc_cgrp, cpd);
-}
-
-static struct ioc_gq *ioc_bio_iocg(struct bio *bio)
-{
-	struct blkcg_gq *blkg = bio->bi_blkg;
-
-	if (blkg && blkg->online) {
-		struct ioc_gq *iocg = blkg_to_iocg(blkg);
-
-		if (iocg && iocg->online)
-			return iocg;
-	}
-
-	return NULL;
 }
 
 /*
@@ -1233,9 +1217,6 @@ static bool iocg_activate(struct ioc_gq *iocg, struct ioc_now *now)
 
 	spin_lock_irq(&ioc->lock);
 
-	if (!iocg->online)
-		goto fail_unlock;
-
 	ioc_now(ioc, now);
 
 	/* update period */
@@ -1405,17 +1386,14 @@ static int iocg_wake_fn(struct wait_queue_entry *wq_entry, unsigned mode,
 {
 	struct iocg_wait *wait = container_of(wq_entry, struct iocg_wait, wait);
 	struct iocg_wake_ctx *ctx = (struct iocg_wake_ctx *)key;
+	u64 cost = abs_cost_to_cost(wait->abs_cost, ctx->hw_inuse);
 
-	if (ctx->iocg->online) {
-		u64 cost = abs_cost_to_cost(wait->abs_cost, ctx->hw_inuse);
+	ctx->vbudget -= cost;
 
-		ctx->vbudget -= cost;
-		if (ctx->vbudget < 0)
-			return -1;
+	if (ctx->vbudget < 0)
+		return -1;
 
-		iocg_commit_bio(ctx->iocg, wait->bio, wait->abs_cost, cost);
-	}
-
+	iocg_commit_bio(ctx->iocg, wait->bio, wait->abs_cost, cost);
 	wait->committed = true;
 
 	/*
@@ -2268,28 +2246,11 @@ static void ioc_timer_fn(struct timer_list *timer)
 			hwm = current_hweight_max(iocg);
 			new_hwi = hweight_after_donation(iocg, old_hwi, hwm,
 							 usage, &now);
-			/*
-			 * Donation calculation assumes hweight_after_donation
-			 * to be positive, a condition that a donor w/ hwa < 2
-			 * can't meet. Don't bother with donation if hwa is
-			 * below 2. It's not gonna make a meaningful difference
-			 * anyway.
-			 */
-			if (new_hwi < hwm && hwa >= 2) {
+			if (new_hwi < hwm) {
 				iocg->hweight_donating = hwa;
 				iocg->hweight_after_donation = new_hwi;
 				list_add(&iocg->surplus_list, &surpluses);
-			} else if (!iocg->abs_vdebt) {
-				/*
-				 * @iocg doesn't have enough to donate. Reset
-				 * its inuse to active.
-				 *
-				 * Don't reset debtors as their inuse's are
-				 * owned by debt handling. This shouldn't affect
-				 * donation calculuation in any meaningful way
-				 * as @iocg doesn't have a meaningful amount of
-				 * share anyway.
-				 */
+			} else {
 				TRACE_IOCG_PATH(inuse_shortage, iocg, &now,
 						iocg->inuse, iocg->active,
 						iocg->hweight_inuse, new_hwi);
@@ -2435,7 +2396,6 @@ static u64 adjust_inuse_and_calc_cost(struct ioc_gq *iocg, u64 vtime,
 	u32 hwi, adj_step;
 	s64 margin;
 	u64 cost, new_inuse;
-	unsigned long flags;
 
 	current_hweight(iocg, NULL, &hwi);
 	old_hwi = hwi;
@@ -2454,11 +2414,11 @@ static u64 adjust_inuse_and_calc_cost(struct ioc_gq *iocg, u64 vtime,
 	    iocg->inuse == iocg->active)
 		return cost;
 
-	spin_lock_irqsave(&ioc->lock, flags);
+	spin_lock_irq(&ioc->lock);
 
 	/* we own inuse only when @iocg is in the normal active state */
 	if (iocg->abs_vdebt || list_empty(&iocg->active_list)) {
-		spin_unlock_irqrestore(&ioc->lock, flags);
+		spin_unlock_irq(&ioc->lock);
 		return cost;
 	}
 
@@ -2479,7 +2439,7 @@ static u64 adjust_inuse_and_calc_cost(struct ioc_gq *iocg, u64 vtime,
 	} while (time_after64(vtime + cost, now->vnow) &&
 		 iocg->inuse != iocg->active);
 
-	spin_unlock_irqrestore(&ioc->lock, flags);
+	spin_unlock_irq(&ioc->lock);
 
 	TRACE_IOCG_PATH(inuse_adjust, iocg, now,
 			old_inuse, iocg->inuse, old_hwi, hwi);
@@ -2563,8 +2523,9 @@ static u64 calc_size_vtime_cost(struct request *rq, struct ioc *ioc)
 
 static void ioc_rqos_throttle(struct rq_qos *rqos, struct bio *bio)
 {
+	struct blkcg_gq *blkg = bio->bi_blkg;
 	struct ioc *ioc = rqos_to_ioc(rqos);
-	struct ioc_gq *iocg = ioc_bio_iocg(bio);
+	struct ioc_gq *iocg = blkg_to_iocg(blkg);
 	struct ioc_now now;
 	struct iocg_wait wait;
 	u64 abs_cost, cost, vtime;
@@ -2698,7 +2659,7 @@ retry_lock:
 static void ioc_rqos_merge(struct rq_qos *rqos, struct request *rq,
 			   struct bio *bio)
 {
-	struct ioc_gq *iocg = ioc_bio_iocg(bio);
+	struct ioc_gq *iocg = blkg_to_iocg(bio->bi_blkg);
 	struct ioc *ioc = rqos_to_ioc(rqos);
 	sector_t bio_end = bio_end_sector(bio);
 	struct ioc_now now;
@@ -2756,7 +2717,7 @@ static void ioc_rqos_merge(struct rq_qos *rqos, struct request *rq,
 
 static void ioc_rqos_done_bio(struct rq_qos *rqos, struct bio *bio)
 {
-	struct ioc_gq *iocg = ioc_bio_iocg(bio);
+	struct ioc_gq *iocg = blkg_to_iocg(bio->bi_blkg);
 
 	if (iocg && bio->bi_iocost_cost)
 		atomic64_add(bio->bi_iocost_cost, &iocg->done_vtime);
@@ -2768,13 +2729,8 @@ static void ioc_rqos_done(struct rq_qos *rqos, struct request *rq)
 	struct ioc_pcpu_stat *ccs;
 	u64 on_q_ns, rq_wait_ns, size_nsec;
 	int pidx, rw;
-	struct request_wrapper *rq_wrapper;
 
-	if (WARN_ON_ONCE(!(rq->rq_flags & RQF_FROM_BLOCK)))
-		return;
-
-	rq_wrapper = request_to_wrapper(rq);
-	if (!ioc->enabled || !rq_wrapper->alloc_time_ns || !rq->start_time_ns)
+	if (!ioc->enabled || !rq->alloc_time_ns || !rq->start_time_ns)
 		return;
 
 	switch (req_op(rq) & REQ_OP_MASK) {
@@ -2790,8 +2746,8 @@ static void ioc_rqos_done(struct rq_qos *rqos, struct request *rq)
 		return;
 	}
 
-	on_q_ns = ktime_get_ns() - rq_wrapper->alloc_time_ns;
-	rq_wait_ns = rq->start_time_ns - rq_wrapper->alloc_time_ns;
+	on_q_ns = ktime_get_ns() - rq->alloc_time_ns;
+	rq_wait_ns = rq->start_time_ns - rq->alloc_time_ns;
 	size_nsec = div64_u64(calc_size_vtime_cost(rq, ioc), VTIME_PER_NSEC);
 
 	ccs = get_cpu_ptr(ioc->pcpu_stat);
@@ -2894,21 +2850,15 @@ static int blk_iocost_init(struct request_queue *q)
 	 * called before policy activation completion, can't assume that the
 	 * target bio has an iocg associated and need to test for NULL iocg.
 	 */
-	ret = rq_qos_add(q, rqos);
-	if (ret)
-		goto err_free_ioc;
-
+	rq_qos_add(q, rqos);
 	ret = blkcg_activate_policy(q, &blkcg_policy_iocost);
-	if (ret)
-		goto err_del_qos;
+	if (ret) {
+		rq_qos_del(q, rqos);
+		free_percpu(ioc->pcpu_stat);
+		kfree(ioc);
+		return ret;
+	}
 	return 0;
-
-err_del_qos:
-	rq_qos_del(q, rqos);
-err_free_ioc:
-	free_percpu(ioc->pcpu_stat);
-	kfree(ioc);
-	return ret;
 }
 
 static struct blkcg_policy_data *ioc_cpd_alloc(gfp_t gfp)
@@ -2959,7 +2909,6 @@ static void ioc_pd_init(struct blkg_policy_data *pd)
 	ioc_now(ioc, &now);
 
 	iocg->ioc = ioc;
-	iocg->online = true;
 	atomic64_set(&iocg->vtime, now.vnow);
 	atomic64_set(&iocg->done_vtime, now.vnow);
 	atomic64_set(&iocg->active_period, atomic64_read(&ioc->cur_period));
@@ -2985,18 +2934,14 @@ static void ioc_pd_init(struct blkg_policy_data *pd)
 	spin_unlock_irqrestore(&ioc->lock, flags);
 }
 
-static void ioc_pd_offline(struct blkg_policy_data *pd)
+static void ioc_pd_free(struct blkg_policy_data *pd)
 {
 	struct ioc_gq *iocg = pd_to_iocg(pd);
 	struct ioc *ioc = iocg->ioc;
 	unsigned long flags;
 
 	if (ioc) {
-		struct iocg_wake_ctx ctx = { .iocg = iocg };
-
-		iocg_lock(iocg, true, &flags);
-
-		iocg->online = false;
+		spin_lock_irqsave(&ioc->lock, flags);
 
 		if (!list_empty(&iocg->active_list)) {
 			struct ioc_now now;
@@ -3009,17 +2954,10 @@ static void ioc_pd_offline(struct blkg_policy_data *pd)
 		WARN_ON_ONCE(!list_empty(&iocg->walk_list));
 		WARN_ON_ONCE(!list_empty(&iocg->surplus_list));
 
-		iocg_unlock(iocg, true, &flags);
+		spin_unlock_irqrestore(&ioc->lock, flags);
 
 		hrtimer_cancel(&iocg->waitq_timer);
-		__wake_up(&iocg->waitq, TASK_NORMAL, 0, &ctx);
 	}
-}
-
-static void ioc_pd_free(struct blkg_policy_data *pd)
-{
-	struct ioc_gq *iocg = pd_to_iocg(pd);
-
 	free_percpu(iocg->pcpu_stat);
 	kfree(iocg);
 }
@@ -3205,10 +3143,6 @@ static ssize_t ioc_qos_write(struct kernfs_open_file *of, char *input,
 	disk = blkcg_conf_get_disk(&input);
 	if (IS_ERR(disk))
 		return PTR_ERR(disk);
-	if (!queue_is_mq(disk->queue)) {
-		ret = -EOPNOTSUPP;
-		goto err;
-	}
 
 	ioc = q_to_ioc(disk->queue);
 	if (!ioc) {
@@ -3376,10 +3310,6 @@ static ssize_t ioc_cost_model_write(struct kernfs_open_file *of, char *input,
 	disk = blkcg_conf_get_disk(&input);
 	if (IS_ERR(disk))
 		return PTR_ERR(disk);
-	if (!queue_is_mq(disk->queue)) {
-		ret = -EOPNOTSUPP;
-		goto err;
-	}
 
 	ioc = q_to_ioc(disk->queue);
 	if (!ioc) {
@@ -3449,28 +3379,6 @@ err:
 	return ret;
 }
 
-static struct cftype ioc_legacy_files[] = {
-	{
-		.name = "cost.weight",
-		.flags = CFTYPE_NOT_ON_ROOT,
-		.seq_show = ioc_weight_show,
-		.write = ioc_weight_write,
-	},
-	{
-		.name = "cost.qos",
-		.flags = CFTYPE_ONLY_ON_ROOT,
-		.seq_show = ioc_qos_show,
-		.write = ioc_qos_write,
-	},
-	{
-		.name = "cost.model",
-		.flags = CFTYPE_ONLY_ON_ROOT,
-		.seq_show = ioc_cost_model_show,
-		.write = ioc_cost_model_write,
-	},
-	{}
-};
-
 static struct cftype ioc_files[] = {
 	{
 		.name = "weight",
@@ -3495,12 +3403,10 @@ static struct cftype ioc_files[] = {
 
 static struct blkcg_policy blkcg_policy_iocost = {
 	.dfl_cftypes	= ioc_files,
-	.legacy_cftypes = ioc_legacy_files,
 	.cpd_alloc_fn	= ioc_cpd_alloc,
 	.cpd_free_fn	= ioc_cpd_free,
 	.pd_alloc_fn	= ioc_pd_alloc,
 	.pd_init_fn	= ioc_pd_init,
-	.pd_offline_fn	= ioc_pd_offline,
 	.pd_free_fn	= ioc_pd_free,
 	.pd_stat_fn	= ioc_pd_stat,
 };

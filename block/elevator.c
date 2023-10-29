@@ -353,11 +353,9 @@ enum elv_merge elv_merge(struct request_queue *q, struct request **req,
  * we can append 'rq' to an existing request, so we can throw 'rq' away
  * afterwards.
  *
- * Returns true if we merged, false otherwise. 'free' will contain all
- * requests that need to be freed.
+ * Returns true if we merged, false otherwise
  */
-bool elv_attempt_insert_merge(struct request_queue *q, struct request *rq,
-			      struct list_head *free)
+bool elv_attempt_insert_merge(struct request_queue *q, struct request *rq)
 {
 	struct request *__rq;
 	bool ret;
@@ -368,10 +366,8 @@ bool elv_attempt_insert_merge(struct request_queue *q, struct request *rq,
 	/*
 	 * First try one-hit cache.
 	 */
-	if (q->last_merge && blk_attempt_req_merge(q, q->last_merge, rq)) {
-		list_add(&rq->queuelist, free);
+	if (q->last_merge && blk_attempt_req_merge(q, q->last_merge, rq))
 		return true;
-	}
 
 	if (blk_queue_noxmerges(q))
 		return false;
@@ -385,7 +381,6 @@ bool elv_attempt_insert_merge(struct request_queue *q, struct request *rq,
 		if (!__rq || !blk_attempt_req_merge(q, __rq, rq))
 			break;
 
-		list_add(&rq->queuelist, free);
 		/* The merged request could be merged with others, try again */
 		ret = true;
 		rq = __rq;
@@ -523,6 +518,8 @@ void elv_unregister_queue(struct request_queue *q)
 		kobject_del(&e->kobj);
 
 		e->registered = 0;
+		/* Re-enable throttling in case elevator disabled it */
+		wbt_enable_default(q);
 	}
 }
 
@@ -577,7 +574,7 @@ void elv_unregister(struct elevator_type *e)
 }
 EXPORT_SYMBOL_GPL(elv_unregister);
 
-static int elevator_switch_mq(struct request_queue *q,
+int elevator_switch_mq(struct request_queue *q,
 			      struct elevator_type *new_e)
 {
 	int ret;
@@ -630,8 +627,7 @@ static struct elevator_type *elevator_get_default(struct request_queue *q)
 	if (q->tag_set && q->tag_set->flags & BLK_MQ_F_NO_SCHED_BY_DEFAULT)
 		return NULL;
 
-	if (q->nr_hw_queues != 1 &&
-			!blk_mq_is_sbitmap_shared(q->tag_set->flags))
+	if (q->nr_hw_queues != 1)
 		return NULL;
 
 	return elevator_get(q, "mq-deadline", false);
@@ -688,18 +684,12 @@ void elevator_init_mq(struct request_queue *q)
 	if (!e)
 		return;
 
-	/*
-	 * We are called before adding disk, when there isn't any FS I/O,
-	 * so freezing queue plus canceling dispatch work is enough to
-	 * drain any dispatch activities originated from passthrough
-	 * requests, then no need to quiesce queue which may add long boot
-	 * latency, especially when lots of disks are involved.
-	 */
 	blk_mq_freeze_queue(q);
-	blk_mq_cancel_work_sync(q);
+	blk_mq_quiesce_queue(q);
 
 	err = blk_mq_init_sched(q, e);
 
+	blk_mq_unquiesce_queue(q);
 	blk_mq_unfreeze_queue(q);
 
 	if (err) {
@@ -716,7 +706,7 @@ void elevator_init_mq(struct request_queue *q)
  * need for the new one. this way we have a chance of going back to the old
  * one, if the new one fails init for some reason.
  */
-int elevator_switch(struct request_queue *q, struct elevator_type *new_e)
+static int elevator_switch(struct request_queue *q, struct elevator_type *new_e)
 {
 	int err;
 

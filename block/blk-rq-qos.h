@@ -17,6 +17,7 @@ enum rq_qos_id {
 	RQ_QOS_WBT,
 	RQ_QOS_LATENCY,
 	RQ_QOS_COST,
+	RQ_QOS_IOPRIO,
 };
 
 struct rq_wait {
@@ -79,26 +80,13 @@ static inline struct rq_qos *blkcg_rq_qos(struct request_queue *q)
 	return rq_qos_id(q, RQ_QOS_LATENCY);
 }
 
-static inline const char *rq_qos_id_to_name(enum rq_qos_id id)
-{
-	switch (id) {
-	case RQ_QOS_WBT:
-		return "wbt";
-	case RQ_QOS_LATENCY:
-		return "latency";
-	case RQ_QOS_COST:
-		return "cost";
-	}
-	return "unknown";
-}
-
 static inline void rq_wait_init(struct rq_wait *rq_wait)
 {
 	atomic_set(&rq_wait->inflight, 0);
 	init_waitqueue_head(&rq_wait->wait);
 }
 
-static inline int rq_qos_add(struct request_queue *q, struct rq_qos *rqos)
+static inline void rq_qos_add(struct request_queue *q, struct rq_qos *rqos)
 {
 	/*
 	 * No IO can be in-flight when adding rqos, so freeze queue, which
@@ -110,8 +98,6 @@ static inline int rq_qos_add(struct request_queue *q, struct rq_qos *rqos)
 	blk_mq_freeze_queue(q);
 
 	spin_lock_irq(&q->queue_lock);
-	if (rq_qos_id(q, rqos->id))
-		goto ebusy;
 	rqos->next = q->rq_qos;
 	q->rq_qos = rqos;
 	spin_unlock_irq(&q->queue_lock);
@@ -120,13 +106,6 @@ static inline int rq_qos_add(struct request_queue *q, struct rq_qos *rqos)
 
 	if (rqos->ops->debugfs_attrs)
 		blk_mq_debugfs_register_rqos(rqos);
-
-	return 0;
-ebusy:
-	spin_unlock_irq(&q->queue_lock);
-	blk_mq_unfreeze_queue(q);
-	return -EBUSY;
-
 }
 
 static inline void rq_qos_del(struct request_queue *q, struct rq_qos *rqos)
