@@ -58,22 +58,7 @@ int kvm_hvc_call_handler(struct kvm_vcpu *vcpu)
 				break;
 			}
 			break;
-		case ARM_SMCCC_ARCH_WORKAROUND_3:
-			switch (arm64_get_spectre_bhb_state()) {
-			case SPECTRE_VULNERABLE:
-				break;
-			case SPECTRE_MITIGATED:
-				val = SMCCC_RET_SUCCESS;
-				break;
-			case SPECTRE_UNAFFECTED:
-				val = SMCCC_ARCH_WORKAROUND_RET_UNAFFECTED;
-				break;
-			}
-			break;
 		case ARM_SMCCC_HV_PV_TIME_FEATURES:
-			val = SMCCC_RET_SUCCESS;
-			break;
-		case ARM_SMCCC_HV_PV_SCHED_FEATURES:
 			val = SMCCC_RET_SUCCESS;
 			break;
 		}
@@ -85,23 +70,6 @@ int kvm_hvc_call_handler(struct kvm_vcpu *vcpu)
 		gpa = kvm_init_stolen_time(vcpu);
 		if (gpa != GPA_INVALID)
 			val = gpa;
-		break;
-	case ARM_SMCCC_HV_PV_SCHED_FEATURES:
-		val = kvm_hypercall_pvsched_features(vcpu);
-		break;
-	case ARM_SMCCC_HV_PV_SCHED_IPA_INIT:
-		gpa = smccc_get_arg1(vcpu);
-		if (gpa != GPA_INVALID) {
-			vcpu->arch.pvsched.base = gpa;
-			val = SMCCC_RET_SUCCESS;
-		}
-		break;
-	case ARM_SMCCC_HV_PV_SCHED_IPA_RELEASE:
-		vcpu->arch.pvsched.base = GPA_INVALID;
-		val = SMCCC_RET_SUCCESS;
-		break;
-	case ARM_SMCCC_HV_PV_SCHED_KICK_CPU:
-		val = kvm_pvsched_kick_vcpu(vcpu);
 		break;
 	case ARM_SMCCC_TRNG_VERSION:
 	case ARM_SMCCC_TRNG_FEATURES:

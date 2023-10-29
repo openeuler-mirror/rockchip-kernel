@@ -24,7 +24,6 @@
 #include <asm/fpsimd.h>
 #include <asm/kvm.h>
 #include <asm/kvm_emulate.h>
-#include <asm/kvm_coproc.h>
 #include <asm/sigcontext.h>
 
 #include "trace.h"
@@ -39,44 +38,9 @@ struct kvm_stats_debugfs_item debugfs_entries[] = {
 	VCPU_STAT("wfi_exit_stat", wfi_exit_stat),
 	VCPU_STAT("mmio_exit_user", mmio_exit_user),
 	VCPU_STAT("mmio_exit_kernel", mmio_exit_kernel),
-	VCPU_STAT("signal_exits", signal_exits),
 	VCPU_STAT("exits", exits),
 	VCPU_STAT("halt_poll_success_ns", halt_poll_success_ns),
 	VCPU_STAT("halt_poll_fail_ns", halt_poll_fail_ns),
-	{ "vcpu_stat", 0, KVM_STAT_DFX },
-	{ NULL }
-};
-
-/* debugfs entries of Detail For vcpu stat EXtension */
-struct dfx_kvm_stats_debugfs_item dfx_debugfs_entries[] = {
-	DFX_STAT("pid", pid),
-	DFX_STAT("hvc_exit_stat", hvc_exit_stat),
-	DFX_STAT("wfe_exit_stat", wfe_exit_stat),
-	DFX_STAT("wfi_exit_stat", wfi_exit_stat),
-	DFX_STAT("mmio_exit_user", mmio_exit_user),
-	DFX_STAT("mmio_exit_kernel", mmio_exit_kernel),
-	DFX_STAT("signal_exits", signal_exits),
-	DFX_STAT("exits", exits),
-	DFX_STAT("fp_asimd_exit_stat", fp_asimd_exit_stat),
-	DFX_STAT("irq_exit_stat", irq_exit_stat),
-	DFX_STAT("sys64_exit_stat", sys64_exit_stat),
-	DFX_STAT("mabt_exit_stat", mabt_exit_stat),
-	DFX_STAT("fail_entry_exit_stat", fail_entry_exit_stat),
-	DFX_STAT("internal_error_exit_stat", internal_error_exit_stat),
-	DFX_STAT("unknown_ec_exit_stat", unknown_ec_exit_stat),
-	DFX_STAT("cp15_32_exit_stat", cp15_32_exit_stat),
-	DFX_STAT("cp15_64_exit_stat", cp15_64_exit_stat),
-	DFX_STAT("cp14_mr_exit_stat", cp14_mr_exit_stat),
-	DFX_STAT("cp14_ls_exit_stat", cp14_ls_exit_stat),
-	DFX_STAT("cp14_64_exit_stat", cp14_64_exit_stat),
-	DFX_STAT("smc_exit_stat", smc_exit_stat),
-	DFX_STAT("sve_exit_stat", sve_exit_stat),
-	DFX_STAT("debug_exit_stat", debug_exit_stat),
-	DFX_STAT("steal", steal),
-	DFX_STAT("st_max", st_max),
-	DFX_STAT("utime", utime),
-	DFX_STAT("stime", stime),
-	DFX_STAT("gtime", gtime),
 	{ NULL }
 };
 
@@ -287,10 +251,32 @@ static int set_core_reg(struct kvm_vcpu *vcpu, const struct kvm_one_reg *reg)
 	memcpy(addr, valp, KVM_REG_SIZE(reg->id));
 
 	if (*vcpu_cpsr(vcpu) & PSR_MODE32_BIT) {
-		int i;
+		int i, nr_reg;
 
-		for (i = 0; i < 16; i++)
-			*vcpu_reg32(vcpu, i) = (u32)*vcpu_reg32(vcpu, i);
+		switch (*vcpu_cpsr(vcpu)) {
+		/*
+		 * Either we are dealing with user mode, and only the
+		 * first 15 registers (+ PC) must be narrowed to 32bit.
+		 * AArch32 r0-r14 conveniently map to AArch64 x0-x14.
+		 */
+		case PSR_AA32_MODE_USR:
+		case PSR_AA32_MODE_SYS:
+			nr_reg = 15;
+			break;
+
+		/*
+		 * Otherwide, this is a priviledged mode, and *all* the
+		 * registers must be narrowed to 32bit.
+		 */
+		default:
+			nr_reg = 31;
+			break;
+		}
+
+		for (i = 0; i < nr_reg; i++)
+			vcpu_set_reg(vcpu, i, (u32)vcpu_get_reg(vcpu, i));
+
+		*vcpu_pc(vcpu) = (u32)*vcpu_pc(vcpu);
 	}
 out:
 	return err;
@@ -313,7 +299,7 @@ static int get_sve_vls(struct kvm_vcpu *vcpu, const struct kvm_one_reg *reg)
 
 	memset(vqs, 0, sizeof(vqs));
 
-	max_vq = sve_vq_from_vl(vcpu->arch.sve_max_vl);
+	max_vq = vcpu_sve_max_vq(vcpu);
 	for (vq = SVE_VQ_MIN; vq <= max_vq; ++vq)
 		if (sve_vq_available(vq))
 			vqs[vq_word(vq)] |= vq_mask(vq);
@@ -441,7 +427,7 @@ static int sve_reg_to_region(struct sve_state_reg_region *region,
 		if (!vcpu_has_sve(vcpu) || (reg->id & SVE_REG_SLICE_MASK) > 0)
 			return -ENOENT;
 
-		vq = sve_vq_from_vl(vcpu->arch.sve_max_vl);
+		vq = vcpu_sve_max_vq(vcpu);
 
 		reqoffset = SVE_SIG_ZREG_OFFSET(vq, reg_num) -
 				SVE_SIG_REGS_OFFSET;
@@ -451,7 +437,7 @@ static int sve_reg_to_region(struct sve_state_reg_region *region,
 		if (!vcpu_has_sve(vcpu) || (reg->id & SVE_REG_SLICE_MASK) > 0)
 			return -ENOENT;
 
-		vq = sve_vq_from_vl(vcpu->arch.sve_max_vl);
+		vq = vcpu_sve_max_vq(vcpu);
 
 		reqoffset = SVE_SIG_PREG_OFFSET(vq, reg_num) -
 				SVE_SIG_REGS_OFFSET;
