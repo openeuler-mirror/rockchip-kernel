@@ -356,12 +356,6 @@ __add_event(struct list_head *list, int *idx,
 	struct perf_cpu_map *cpus = pmu ? perf_cpu_map__get(pmu->cpus) :
 			       cpu_list ? perf_cpu_map__new(cpu_list) : NULL;
 
-	if (pmu)
-		perf_pmu__warn_invalid_formats(pmu);
-
-	if (pmu && attr->type == PERF_TYPE_RAW)
-		perf_pmu__warn_invalid_config(pmu, attr->config, name);
-
 	if (init_attr)
 		event_attr_init(attr);
 
@@ -2973,7 +2967,7 @@ int parse_events_term__num(struct parse_events_term **term,
 	struct parse_events_term temp = {
 		.type_val  = PARSE_EVENTS__TERM_TYPE_NUM,
 		.type_term = type_term,
-		.config    = config ? : strdup(config_term_names[type_term]),
+		.config    = config,
 		.no_value  = no_value,
 		.err_term  = loc_term ? loc_term->first_column : 0,
 		.err_val   = loc_val  ? loc_val->first_column  : 0,

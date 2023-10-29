@@ -17,14 +17,14 @@
 /* Define arch specific functions & regs for libunwind, should be
  * defined before including "unwind.h"
  */
-#define LIBUNWIND__ARCH_REG_ID(regnum) libunwind__sw_64_reg_id(regnum)
+#define LIBUNWIND__ARCH_REG_ID(regnum) libunwind__arm64_reg_id(regnum)
 #define LIBUNWIND__ARCH_REG_IP PERF_REG_SW64_PC
-#define LIBUNWIND__ARCH_REG_SP PERF_REG_SW64_SP
+#define LIBUNWIND__ARCH_REG_SP PERF_REG_SW64_HAE
 
 #include "unwind.h"
 #include "debug.h"
 #include "libunwind-sw_64.h"
-#include <../../../arch/sw_64/include/uapi/asm/perf_regs.h>
+#include <../../../../arch/sw_64/include/uapi/asm/perf_regs.h>
 #include "../../arch/sw_64/util/unwind-libunwind.c"
 
 #include "util/unwind-libunwind-local.c"

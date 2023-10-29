@@ -156,7 +156,6 @@ static int arch__associate_ins_ops(struct arch* arch, const char *name, struct i
 #include "arch/powerpc/annotate/instructions.c"
 #include "arch/s390/annotate/instructions.c"
 #include "arch/sparc/annotate/instructions.c"
-#include "arch/loongarch/annotate/instructions.c"
 
 static struct arch architectures[] = {
 	{
@@ -202,13 +201,6 @@ static struct arch architectures[] = {
 	{
 		.name = "sparc",
 		.init = sparc__annotate_init,
-		.objdump = {
-			.comment_char = '#',
-		},
-	},
-	{
-		.name = "loongarch",
-		.init = loongarch__annotate_init,
 		.objdump = {
 			.comment_char = '#',
 		},
@@ -1694,7 +1686,7 @@ fallback:
 #if defined(HAVE_LIBBFD_SUPPORT) && defined(HAVE_LIBBPF_SUPPORT)
 #define PACKAGE "perf"
 #include <bfd.h>
-#include <tools/dis-asm-compat.h>
+#include <dis-asm.h>
 
 static int symbol__disassemble_bpf(struct symbol *sym,
 				   struct annotate_args *args)
@@ -1737,9 +1729,9 @@ static int symbol__disassemble_bpf(struct symbol *sym,
 		ret = errno;
 		goto out;
 	}
-	init_disassemble_info_compat(&info, s,
-				     (fprintf_ftype) fprintf,
-				     fprintf_styled);
+	init_disassemble_info(&info, s,
+			      (fprintf_ftype) fprintf);
+
 	info.arch = bfd_get_arch(bfdf);
 	info.mach = bfd_get_mach(bfdf);
 
@@ -2786,17 +2778,9 @@ int symbol__tty_annotate2(struct map_symbol *ms, struct evsel *evsel,
 	struct rb_root source_line = RB_ROOT;
 	struct hists *hists = evsel__hists(evsel);
 	char buf[1024];
-	int err;
 
-	err = symbol__annotate2(ms, evsel, opts, NULL);
-	if (err) {
-		char msg[BUFSIZ];
-
-		dso->annotate_warned = true;
-		symbol__strerror_disassemble(ms, err, msg, sizeof(msg));
-		ui__error("Couldn't annotate %s:\n%s", sym->name, msg);
+	if (symbol__annotate2(ms, evsel, opts, NULL) < 0)
 		return -1;
-	}
 
 	if (opts->print_lines) {
 		srcline_full_filename = opts->full_path;
@@ -2820,17 +2804,9 @@ int symbol__tty_annotate(struct map_symbol *ms, struct evsel *evsel,
 	struct dso *dso = ms->map->dso;
 	struct symbol *sym = ms->sym;
 	struct rb_root source_line = RB_ROOT;
-	int err;
 
-	err = symbol__annotate(ms, evsel, opts, NULL);
-	if (err) {
-		char msg[BUFSIZ];
-
-		dso->annotate_warned = true;
-		symbol__strerror_disassemble(ms, err, msg, sizeof(msg));
-		ui__error("Couldn't annotate %s:\n%s", sym->name, msg);
+	if (symbol__annotate(ms, evsel, opts, NULL) < 0)
 		return -1;
-	}
 
 	symbol__calc_percent(sym, evsel);
 
