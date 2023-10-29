@@ -33,9 +33,12 @@
 #include <crypto/akcipher.h>
 #include <crypto/kpp.h>
 #include <crypto/acompress.h>
+#include <crypto/internal/cipher.h>
 #include <crypto/internal/simd.h>
 
 #include "internal.h"
+
+MODULE_IMPORT_NS(CRYPTO_INTERNAL);
 
 static bool notests;
 module_param(notests, bool, 0644);
@@ -4466,12 +4469,6 @@ static const struct alg_test_desc alg_test_descs[] = {
 			.hash = __VECS(aes_cbcmac_tv_template)
 		}
 	}, {
-		.alg = "cbcmac(sm4)",
-		.test = alg_test_hash,
-		.suite = {
-			.hash = __VECS(sm4_cbcmac_tv_template)
-		}
-	}, {
 		.alg = "ccm(aes)",
 		.generic_driver = "ccm_base(ctr(aes-generic),cbcmac(aes-generic))",
 		.test = alg_test_aead,
@@ -4479,16 +4476,6 @@ static const struct alg_test_desc alg_test_descs[] = {
 		.suite = {
 			.aead = {
 				____VECS(aes_ccm_tv_template),
-				.einval_allowed = 1,
-			}
-		}
-	}, {
-		.alg = "ccm(sm4)",
-		.generic_driver = "ccm_base(ctr(sm4-generic),cbcmac(sm4-generic))",
-		.test = alg_test_aead,
-		.suite = {
-			.aead = {
-				____VECS(sm4_ccm_tv_template),
 				.einval_allowed = 1,
 			}
 		}
@@ -4524,12 +4511,6 @@ static const struct alg_test_desc alg_test_descs[] = {
 		.test = alg_test_hash,
 		.suite = {
 			.hash = __VECS(des3_ede_cmac64_tv_template)
-		}
-	}, {
-		.alg = "cmac(sm4)",
-		.test = alg_test_hash,
-		.suite = {
-			.hash = __VECS(sm4_cmac128_tv_template)
 		}
 	}, {
 		.alg = "compress_null",
@@ -4942,42 +4923,11 @@ static const struct alg_test_desc alg_test_descs[] = {
 		}
 	}, {
 #endif
-		.alg = "ecdh-nist-p192",
-		.test = alg_test_kpp,
-		.suite = {
-			.kpp = __VECS(ecdh_p192_tv_template)
-		}
-	}, {
-		.alg = "ecdh-nist-p256",
+		.alg = "ecdh",
 		.test = alg_test_kpp,
 		.fips_allowed = 1,
 		.suite = {
-			.kpp = __VECS(ecdh_p256_tv_template)
-		}
-	}, {
-		.alg = "ecdh-nist-p384",
-		.test = alg_test_kpp,
-		.fips_allowed = 1,
-		.suite = {
-			.kpp = __VECS(ecdh_p384_tv_template)
-		}
-	}, {
-		.alg = "ecdsa-nist-p192",
-		.test = alg_test_akcipher,
-		.suite = {
-			.akcipher = __VECS(ecdsa_nist_p192_tv_template)
-		}
-	}, {
-		.alg = "ecdsa-nist-p256",
-		.test = alg_test_akcipher,
-		.suite = {
-			.akcipher = __VECS(ecdsa_nist_p256_tv_template)
-		}
-	}, {
-		.alg = "ecdsa-nist-p384",
-		.test = alg_test_akcipher,
-		.suite = {
-			.akcipher = __VECS(ecdsa_nist_p384_tv_template)
+			.kpp = __VECS(ecdh_tv_template)
 		}
 	}, {
 		.alg = "ecrdsa",
@@ -5006,13 +4956,6 @@ static const struct alg_test_desc alg_test_descs[] = {
 		.fips_allowed = 1,
 		.suite = {
 			.aead = __VECS(aes_gcm_tv_template)
-		}
-	}, {
-		.alg = "gcm(sm4)",
-		.generic_driver = "gcm_base(ctr(sm4-generic),ghash-generic)",
-		.test = alg_test_aead,
-		.suite = {
-			.aead = __VECS(sm4_gcm_tv_template)
 		}
 	}, {
 		.alg = "ghash",
