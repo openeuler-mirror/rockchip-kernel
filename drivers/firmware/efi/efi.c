@@ -31,7 +31,6 @@
 #include <linux/ucs2_string.h>
 #include <linux/memblock.h>
 #include <linux/security.h>
-#include <linux/crash_dump.h>
 
 #include <asm/early_ioremap.h>
 
@@ -210,7 +209,7 @@ static int __init efivar_ssdt_setup(char *str)
 		memcpy(efivar_ssdt, str, strlen(str));
 	else
 		pr_warn("efivar_ssdt: name too long: %s\n", str);
-	return 1;
+	return 0;
 }
 __setup("efivar_ssdt=", efivar_ssdt_setup);
 
@@ -436,37 +435,6 @@ err_put:
 
 subsys_initcall(efisubsys_init);
 
-void __init efi_find_mirror(void)
-{
-	efi_memory_desc_t *md;
-	u64 mirror_size = 0, total_size = 0;
-
-	if (!efi_enabled(EFI_MEMMAP))
-		return;
-
-	if (!mirrored_kernelcore)
-		return;
-
-	if (is_kdump_kernel()) {
-		mirrored_kernelcore = false;
-		return;
-	}
-
-	for_each_efi_memory_desc(md) {
-		unsigned long long start = md->phys_addr;
-		unsigned long long size = md->num_pages << EFI_PAGE_SHIFT;
-
-		total_size += size;
-		if (md->attribute & EFI_MEMORY_MORE_RELIABLE) {
-			memblock_mark_mirror(start, size);
-			mirror_size += size;
-		}
-	}
-	if (mirror_size)
-		pr_info("Memory: %lldM/%lldM mirrored memory\n",
-			mirror_size>>20, total_size>>20);
-}
-
 /*
  * Find the efi memory descriptor for a given physical address.  Given a
  * physical address, determine if it exists within an EFI Memory Map entry,
@@ -622,7 +590,7 @@ int __init efi_config_parse_tables(const efi_config_table_t *config_tables,
 
 		seed = early_memremap(efi_rng_seed, sizeof(*seed));
 		if (seed != NULL) {
-			size = min_t(u32, seed->size, SZ_1K); // sanity check
+			size = READ_ONCE(seed->size);
 			early_memunmap(seed, sizeof(*seed));
 		} else {
 			pr_err("Could not map UEFI random seed!\n");
@@ -631,8 +599,8 @@ int __init efi_config_parse_tables(const efi_config_table_t *config_tables,
 			seed = early_memremap(efi_rng_seed,
 					      sizeof(*seed) + size);
 			if (seed != NULL) {
+				pr_notice("seeding entropy pool\n");
 				add_bootloader_randomness(seed->bits, size);
-				memzero_explicit(seed->bits, size);
 				early_memunmap(seed, sizeof(*seed) + size);
 			} else {
 				pr_err("Could not map UEFI random seed!\n");
@@ -710,7 +678,7 @@ int __init efi_systab_check_header(const efi_table_hdr_t *systab_hdr,
 	return 0;
 }
 
-#if !defined(CONFIG_IA64) && !defined(CONFIG_SW64)
+#ifndef CONFIG_IA64
 static const efi_char16_t *__init map_fw_vendor(unsigned long fw_vendor,
 						size_t size)
 {
@@ -751,13 +719,6 @@ void __init efi_systab_report_header(const efi_table_hdr_t *systab_hdr,
 		systab_hdr->revision >> 16,
 		systab_hdr->revision & 0xffff,
 		vendor);
-
-	if (IS_ENABLED(CONFIG_X86_64) &&
-	    systab_hdr->revision > EFI_1_10_SYSTEM_TABLE_REVISION &&
-	    !strcmp(vendor, "Apple")) {
-		pr_info("Apple Mac detected, using EFI v1.10 runtime services only\n");
-		efi.runtime_version = EFI_1_10_SYSTEM_TABLE_REVISION;
-	}
 }
 
 static __initdata char memory_type_name[][13] = {
