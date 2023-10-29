@@ -15,20 +15,22 @@
 
 #include <net/inet_sock.h>
 #include <net/protocol.h>
-#include <net/raw_common.h>
 #include <linux/icmp.h>
 
 extern struct proto raw_prot;
 
-extern struct raw_hashinfo_new raw_v4_hashinfo;
-bool raw_v4_match(struct net *net, struct sock *sk, unsigned short num,
-		  __be32 raddr, __be32 laddr, int dif, int sdif);
+extern struct raw_hashinfo raw_v4_hashinfo;
+struct sock *__raw_v4_lookup(struct net *net, struct sock *sk,
+			     unsigned short num, __be32 raddr,
+			     __be32 laddr, int dif, int sdif);
 
 int raw_abort(struct sock *sk, int err);
 void raw_icmp_error(struct sk_buff *, int, u32);
 int raw_local_deliver(struct sk_buff *, int);
 
 int raw_rcv(struct sock *, struct sk_buff *);
+
+#define RAW_HTABLE_SIZE	MAX_INET_PROTOS
 
 struct raw_hashinfo {
 	rwlock_t lock;
@@ -73,7 +75,7 @@ static inline bool raw_sk_bound_dev_eq(struct net *net, int bound_dev_if,
 				       int dif, int sdif)
 {
 #if IS_ENABLED(CONFIG_NET_L3_MASTER_DEV)
-	return inet_bound_dev_eq(READ_ONCE(net->ipv4.sysctl_raw_l3mdev_accept),
+	return inet_bound_dev_eq(!!net->ipv4.sysctl_raw_l3mdev_accept,
 				 bound_dev_if, dif, sdif);
 #else
 	return inet_bound_dev_eq(true, bound_dev_if, dif, sdif);

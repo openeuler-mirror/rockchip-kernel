@@ -11,7 +11,6 @@
 #include <net/rtnetlink.h>
 #include <net/fib_notifier.h>
 #include <linux/indirect_call_wrapper.h>
-#include <linux/kabi.h>
 
 struct fib_kuid_range {
 	kuid_t start;
@@ -45,15 +44,6 @@ struct fib_rule {
 	struct fib_rule_port_range	sport_range;
 	struct fib_rule_port_range	dport_range;
 	struct rcu_head		rcu;
-
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
-	KABI_RESERVE(3)
-	KABI_RESERVE(4)
-	KABI_RESERVE(5)
-	KABI_RESERVE(6)
-	KABI_RESERVE(7)
-	KABI_RESERVE(8)
 };
 
 struct fib_lookup_arg {
@@ -79,7 +69,7 @@ struct fib_rules_ops {
 	int			(*action)(struct fib_rule *,
 					  struct flowi *, int,
 					  struct fib_lookup_arg *);
-	bool			(*suppress)(struct fib_rule *, int,
+	bool			(*suppress)(struct fib_rule *,
 					    struct fib_lookup_arg *);
 	int			(*match)(struct fib_rule *,
 					 struct flowi *, int);
@@ -228,9 +218,7 @@ INDIRECT_CALLABLE_DECLARE(int fib4_rule_action(struct fib_rule *rule,
 			    struct fib_lookup_arg *arg));
 
 INDIRECT_CALLABLE_DECLARE(bool fib6_rule_suppress(struct fib_rule *rule,
-						int flags,
 						struct fib_lookup_arg *arg));
 INDIRECT_CALLABLE_DECLARE(bool fib4_rule_suppress(struct fib_rule *rule,
-						int flags,
 						struct fib_lookup_arg *arg));
 #endif

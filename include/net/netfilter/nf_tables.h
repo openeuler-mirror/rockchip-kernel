@@ -176,18 +176,13 @@ struct nft_ctx {
 	bool				report;
 };
 
-enum nft_data_desc_flags {
-	NFT_DATA_DESC_SETELEM	= (1 << 0),
-};
-
 struct nft_data_desc {
 	enum nft_data_types		type;
-	unsigned int			size;
 	unsigned int			len;
-	unsigned int			flags;
 };
 
-int nft_data_init(const struct nft_ctx *ctx, struct nft_data *data,
+int nft_data_init(const struct nft_ctx *ctx,
+		  struct nft_data *data, unsigned int size,
 		  struct nft_data_desc *desc, const struct nlattr *nla);
 void nft_data_hold(const struct nft_data *data, enum nft_data_types type);
 void nft_data_release(const struct nft_data *data, enum nft_data_types type);
@@ -205,14 +200,14 @@ static inline enum nft_registers nft_type_to_reg(enum nft_data_types type)
 }
 
 int nft_parse_u32_check(const struct nlattr *attr, int max, u32 *dest);
-int nft_parse_register(const struct nlattr *attr, u32 *preg);
+unsigned int nft_parse_register(const struct nlattr *attr);
 int nft_dump_register(struct sk_buff *skb, unsigned int attr, unsigned int reg);
 
-int nft_parse_register_load(const struct nlattr *attr, u8 *sreg, u32 len);
-int nft_parse_register_store(const struct nft_ctx *ctx,
-			     const struct nlattr *attr, u8 *dreg,
-			     const struct nft_data *data,
-			     enum nft_data_types type, unsigned int len);
+int nft_validate_register_load(enum nft_registers reg, unsigned int len);
+int nft_validate_register_store(const struct nft_ctx *ctx,
+				enum nft_registers reg,
+				const struct nft_data *data,
+				enum nft_data_types type, unsigned int len);
 
 /**
  *	struct nft_userdata - user defined data associated with an object
@@ -507,7 +502,6 @@ struct nft_set_binding {
 };
 
 enum nft_trans_phase;
-void nf_tables_activate_set(const struct nft_ctx *ctx, struct nft_set *set);
 void nf_tables_deactivate_set(const struct nft_ctx *ctx, struct nft_set *set,
 			      struct nft_set_binding *binding,
 			      enum nft_trans_phase phase);
@@ -778,7 +772,6 @@ struct nft_expr_type {
 
 enum nft_trans_phase {
 	NFT_TRANS_PREPARE,
-	NFT_TRANS_PREPARE_ERROR,
 	NFT_TRANS_ABORT,
 	NFT_TRANS_COMMIT,
 	NFT_TRANS_RELEASE
@@ -832,7 +825,7 @@ struct nft_expr_ops {
 	int				(*offload)(struct nft_offload_ctx *ctx,
 						   struct nft_flow_rule *flow,
 						   const struct nft_expr *expr);
-	bool				(*offload_action)(const struct nft_expr *expr);
+	u32				offload_flags;
 	const struct nft_expr_type	*type;
 	void				*data;
 };
@@ -909,10 +902,7 @@ static inline struct nft_userdata *nft_userdata(const struct nft_rule *rule)
 	return (void *)&rule->data[rule->dlen];
 }
 
-void nft_rule_expr_activate(const struct nft_ctx *ctx, struct nft_rule *rule);
-void nft_rule_expr_deactivate(const struct nft_ctx *ctx, struct nft_rule *rule,
-			      enum nft_trans_phase phase);
-void nf_tables_rule_destroy(const struct nft_ctx *ctx, struct nft_rule *rule);
+void nf_tables_rule_release(const struct nft_ctx *ctx, struct nft_rule *rule);
 
 static inline void nft_set_elem_update_expr(const struct nft_set_ext *ext,
 					    struct nft_regs *regs,
@@ -971,8 +961,6 @@ struct nft_chain {
 };
 
 int nft_chain_validate(const struct nft_ctx *ctx, const struct nft_chain *chain);
-int nf_tables_bind_chain(const struct nft_ctx *ctx, struct nft_chain *chain);
-void nf_tables_unbind_chain(const struct nft_ctx *ctx, struct nft_chain *chain);
 
 enum nft_chain_types {
 	NFT_CHAIN_T_DEFAULT = 0,
@@ -1009,17 +997,11 @@ int nft_chain_validate_dependency(const struct nft_chain *chain,
 int nft_chain_validate_hooks(const struct nft_chain *chain,
                              unsigned int hook_flags);
 
-static inline bool nft_chain_binding(const struct nft_chain *chain)
-{
-	return chain->flags & NFT_CHAIN_BINDING;
-}
-
 static inline bool nft_chain_is_bound(struct nft_chain *chain)
 {
 	return (chain->flags & NFT_CHAIN_BINDING) && chain->bound;
 }
 
-int nft_chain_add(struct nft_table *table, struct nft_chain *chain);
 void nft_chain_del(struct nft_chain *chain);
 void nf_tables_chain_destroy(struct nft_ctx *ctx);
 
@@ -1031,6 +1013,7 @@ struct nft_stats {
 
 struct nft_hook {
 	struct list_head	list;
+	bool			inactive;
 	struct nf_hook_ops	ops;
 	struct rcu_head		rcu;
 };
@@ -1444,7 +1427,6 @@ struct nft_trans_rule {
 	struct nft_rule			*rule;
 	struct nft_flow_rule		*flow;
 	u32				rule_id;
-	bool				bound;
 };
 
 #define nft_trans_rule(trans)	\
@@ -1453,8 +1435,6 @@ struct nft_trans_rule {
 	(((struct nft_trans_rule *)trans->data)->flow)
 #define nft_trans_rule_id(trans)	\
 	(((struct nft_trans_rule *)trans->data)->rule_id)
-#define nft_trans_rule_bound(trans)	\
-	(((struct nft_trans_rule *)trans->data)->bound)
 
 struct nft_trans_set {
 	struct nft_set			*set;
@@ -1470,17 +1450,13 @@ struct nft_trans_set {
 	(((struct nft_trans_set *)trans->data)->bound)
 
 struct nft_trans_chain {
-	struct nft_chain		*chain;
 	bool				update;
 	char				*name;
 	struct nft_stats __percpu	*stats;
 	u8				policy;
-	bool				bound;
 	u32				chain_id;
 };
 
-#define nft_trans_chain(trans)	\
-	(((struct nft_trans_chain *)trans->data)->chain)
 #define nft_trans_chain_update(trans)	\
 	(((struct nft_trans_chain *)trans->data)->update)
 #define nft_trans_chain_name(trans)	\
@@ -1489,8 +1465,6 @@ struct nft_trans_chain {
 	(((struct nft_trans_chain *)trans->data)->stats)
 #define nft_trans_chain_policy(trans)	\
 	(((struct nft_trans_chain *)trans->data)->policy)
-#define nft_trans_chain_bound(trans)	\
-	(((struct nft_trans_chain *)trans->data)->bound)
 #define nft_trans_chain_id(trans)	\
 	(((struct nft_trans_chain *)trans->data)->chain_id)
 

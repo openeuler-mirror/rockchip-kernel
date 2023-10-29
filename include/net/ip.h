@@ -31,7 +31,9 @@
 #include <net/flow.h>
 #include <net/flow_dissector.h>
 #include <net/netns/hash.h>
+#ifndef __GENKSYMS__
 #include <net/lwtunnel.h>
+#endif
 
 #define IPV4_MAX_PMTU		65535U		/* RFC 2675, Section 5.1 */
 #define IPV4_MIN_MTU		68			/* RFC 791 */
@@ -291,11 +293,7 @@ void ip_send_unicast_reply(struct sock *sk, struct sk_buff *skb,
 #define NET_ADD_STATS(net, field, adnd)	SNMP_ADD_STATS((net)->mib.net_statistics, field, adnd)
 #define __NET_ADD_STATS(net, field, adnd) __SNMP_ADD_STATS((net)->mib.net_statistics, field, adnd)
 
-static inline u64 snmp_get_cpu_field(void __percpu *mib, int cpu, int offt)
-{
-	return  *(((unsigned long *)per_cpu_ptr(mib, cpu)) + offt);
-}
-
+u64 snmp_get_cpu_field(void __percpu *mib, int cpu, int offct);
 unsigned long snmp_fold_field(void __percpu *mib, int offt);
 #if BITS_PER_LONG==32
 u64 snmp_get_cpu_field64(void __percpu *mib, int cpu, int offct,
@@ -348,6 +346,13 @@ static inline bool inet_is_local_reserved_port(struct net *net, unsigned short p
 	return test_bit(port, net->ipv4.sysctl_local_reserved_ports);
 }
 
+static inline bool inet_is_local_unbindable_port(struct net *net, unsigned short port)
+{
+	if (!net->ipv4.sysctl_local_unbindable_ports)
+		return false;
+	return test_bit(port, net->ipv4.sysctl_local_unbindable_ports);
+}
+
 static inline bool sysctl_dev_name_is_allowed(const char *name)
 {
 	return strcmp(name, "default") != 0  && strcmp(name, "all") != 0;
@@ -355,11 +360,16 @@ static inline bool sysctl_dev_name_is_allowed(const char *name)
 
 static inline bool inet_port_requires_bind_service(struct net *net, unsigned short port)
 {
-	return port < READ_ONCE(net->ipv4.sysctl_ip_prot_sock);
+	return port < net->ipv4.sysctl_ip_prot_sock;
 }
 
 #else
 static inline bool inet_is_local_reserved_port(struct net *net, unsigned short port)
+{
+	return false;
+}
+
+static inline bool inet_is_local_unbindable_port(struct net *net, unsigned short port)
 {
 	return false;
 }
@@ -382,7 +392,7 @@ void ipfrag_init(void);
 void ip_static_sysctl_init(void);
 
 #define IP4_REPLY_MARK(net, mark) \
-	(READ_ONCE((net)->ipv4.sysctl_fwmark_reflect) ? (mark) : 0)
+	((net)->ipv4.sysctl_fwmark_reflect ? (mark) : 0)
 
 static inline bool ip_is_fragment(const struct iphdr *iph)
 {
@@ -443,7 +453,7 @@ static inline unsigned int ip_dst_mtu_maybe_forward(const struct dst_entry *dst,
 	struct net *net = dev_net(dst->dev);
 	unsigned int mtu;
 
-	if (READ_ONCE(net->ipv4.sysctl_ip_fwd_use_pmtu) ||
+	if (net->ipv4.sysctl_ip_fwd_use_pmtu ||
 	    ip_mtu_locked(dst) ||
 	    !forwarding)
 		return dst_mtu(dst);
@@ -510,18 +520,19 @@ static inline void ip_select_ident_segs(struct net *net, struct sk_buff *skb,
 {
 	struct iphdr *iph = ip_hdr(skb);
 
-	/* We had many attacks based on IPID, use the private
-	 * generator as much as we can.
-	 */
-	if (sk && inet_sk(sk)->inet_daddr) {
-		iph->id = htons(inet_sk(sk)->inet_id);
-		inet_sk(sk)->inet_id += segs;
-		return;
-	}
 	if ((iph->frag_off & htons(IP_DF)) && !skb->ignore_df) {
-		iph->id = 0;
+		/* This is only to work around buggy Windows95/2000
+		 * VJ compression implementations.  If the ID field
+		 * does not change, they drop every other packet in
+		 * a TCP stream using header compression.
+		 */
+		if (sk && inet_sk(sk)->inet_daddr) {
+			iph->id = htons(inet_sk(sk)->inet_id);
+			inet_sk(sk)->inet_id += segs;
+		} else {
+			iph->id = 0;
+		}
 	} else {
-		/* Unfortunately we need the big hammer to get a suitable IPID */
 		__ip_select_ident(net, iph, segs);
 	}
 }

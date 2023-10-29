@@ -8,7 +8,6 @@
 #include <linux/types.h>
 #include <linux/dma-mapping.h>
 #include <net/xdp.h>
-#include <linux/kabi.h>
 
 struct xsk_buff_pool;
 struct xdp_rxq_info;
@@ -79,8 +78,6 @@ struct xsk_buff_pool {
 	 * sockets share a single cq when the same netdev and queue id is shared.
 	 */
 	spinlock_t cq_lock;
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
 	struct xdp_buff_xsk *free_heads[];
 };
 
@@ -89,7 +86,7 @@ struct xsk_buff_pool *xp_create_and_assign_umem(struct xdp_sock *xs,
 						struct xdp_umem *umem);
 int xp_assign_dev(struct xsk_buff_pool *pool, struct net_device *dev,
 		  u16 queue_id, u16 flags);
-int xp_assign_dev_shared(struct xsk_buff_pool *pool, struct xdp_sock *umem_xs,
+int xp_assign_dev_shared(struct xsk_buff_pool *pool, struct xdp_umem *umem,
 			 struct net_device *dev, u16 queue_id);
 void xp_destroy(struct xsk_buff_pool *pool);
 void xp_release(struct xdp_buff_xsk *xskb);

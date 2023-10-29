@@ -63,13 +63,13 @@
 
 #include <linux/atomic.h>
 #include <linux/refcount.h>
-#include <linux/llist.h>
 #include <net/dst.h>
 #include <net/checksum.h>
 #include <net/tcp_states.h>
 #include <linux/net_tstamp.h>
 #include <net/l3mdev.h>
-#include <linux/kabi.h>
+#include <linux/android_kabi.h>
+#include <linux/android_vendor.h>
 
 /*
  * This structure really needs to be cleaned up.
@@ -162,6 +162,9 @@ typedef __u64 __bitwise __addrpair;
  *	for struct sock and struct inet_timewait_sock.
  */
 struct sock_common {
+	/* skc_daddr and skc_rcv_saddr must be grouped on a 8 bytes aligned
+	 * address on 64bit arches : cf INET_MATCH()
+	 */
 	union {
 		__addrpair	skc_addrpair;
 		struct {
@@ -300,7 +303,6 @@ struct bpf_local_storage;
   *	@sk_ack_backlog: current listen backlog
   *	@sk_max_ack_backlog: listen backlog set in listen()
   *	@sk_uid: user id of owner
-  *	@sk_gid: group id of owner
   *	@sk_priority: %SO_PRIORITY setting
   *	@sk_type: socket type (%SOCK_STREAM, etc)
   *	@sk_protocol: which protocol this socket belongs in this network family
@@ -318,7 +320,7 @@ struct bpf_local_storage;
   *	@sk_tskey: counter to disambiguate concurrent tstamp requests
   *	@sk_zckey: counter to order MSG_ZEROCOPY notifications
   *	@sk_socket: Identd and reporting IO signals
-  *	@sk_user_data: RPC layer private data. Write-protected by @sk_callback_lock.
+  *	@sk_user_data: RPC layer private data
   *	@sk_frag: cached page frag
   *	@sk_peek_off: current peek_offset value
   *	@sk_send_head: front of stuff to transmit
@@ -404,8 +406,6 @@ struct sock {
 		struct sk_buff	*head;
 		struct sk_buff	*tail;
 	} sk_backlog;
-	struct llist_head defer_list;
-
 #define sk_rmem_alloc sk_backlog.rmem_alloc
 
 	int			sk_forward_alloc;
@@ -426,7 +426,7 @@ struct sock {
 #ifdef CONFIG_XFRM
 	struct xfrm_policy __rcu *sk_policy[2];
 #endif
-	struct dst_entry __rcu  *sk_rx_dst;
+	struct dst_entry	*sk_rx_dst;
 	struct dst_entry __rcu	*sk_dst_cache;
 	atomic_t		sk_omem_alloc;
 	int			sk_sndbuf;
@@ -481,10 +481,8 @@ struct sock {
 	u32			sk_ack_backlog;
 	u32			sk_max_ack_backlog;
 	kuid_t			sk_uid;
-	spinlock_t		sk_peer_lock;
 	struct pid		*sk_peer_pid;
 	const struct cred	*sk_peer_cred;
-
 	long			sk_rcvtimeo;
 	ktime_t			sk_stamp;
 #if BITS_PER_LONG==32
@@ -525,21 +523,16 @@ struct sock {
 #endif
 	struct rcu_head		sk_rcu;
 
-#ifndef __GENKSYMS__
-	union {
-		kgid_t	sk_gid;
-		u64	sk_gid_padding;
-	};
-#else
-	KABI_RESERVE(1)
-#endif
-	KABI_RESERVE(2)
-	KABI_RESERVE(3)
-	KABI_RESERVE(4)
-	KABI_RESERVE(5)
-	KABI_RESERVE(6)
-	KABI_RESERVE(7)
-	KABI_RESERVE(8)
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
+	ANDROID_KABI_RESERVE(3);
+	ANDROID_KABI_RESERVE(4);
+	ANDROID_KABI_RESERVE(5);
+	ANDROID_KABI_RESERVE(6);
+	ANDROID_KABI_RESERVE(7);
+	ANDROID_KABI_RESERVE(8);
+
+	ANDROID_OEM_DATA(1);
 };
 
 enum sk_pacing {
@@ -548,26 +541,14 @@ enum sk_pacing {
 	SK_PACING_FQ		= 2,
 };
 
-/* flag bits in sk_user_data
- *
- * - SK_USER_DATA_NOCOPY:      Pointer stored in sk_user_data might
- *   not be suitable for copying when cloning the socket. For instance,
- *   it can point to a reference counted object. sk_user_data bottom
- *   bit is set if pointer must not be copied.
- *
- * - SK_USER_DATA_BPF:         Mark whether sk_user_data field is
- *   managed/owned by a BPF reuseport array. This bit should be set
- *   when sk_user_data's sk is added to the bpf's reuseport_array.
- *
- * - SK_USER_DATA_PSOCK:       Mark whether pointer stored in
- *   sk_user_data points to psock type. This bit should be set
- *   when sk_user_data is assigned to a psock object.
+/* Pointer stored in sk_user_data might not be suitable for copying
+ * when cloning the socket. For instance, it can point to a reference
+ * counted object. sk_user_data bottom bit is set if pointer must not
+ * be copied.
  */
 #define SK_USER_DATA_NOCOPY	1UL
-#define SK_USER_DATA_BPF	2UL
-#define SK_USER_DATA_PSOCK	4UL
-#define SK_USER_DATA_PTRMASK	~(SK_USER_DATA_NOCOPY | SK_USER_DATA_BPF |\
-				  SK_USER_DATA_PSOCK)
+#define SK_USER_DATA_BPF	2UL	/* Managed by BPF */
+#define SK_USER_DATA_PTRMASK	~(SK_USER_DATA_NOCOPY | SK_USER_DATA_BPF)
 
 /**
  * sk_user_data_is_nocopy - Test if sk_user_data pointer must not be copied
@@ -580,40 +561,24 @@ static inline bool sk_user_data_is_nocopy(const struct sock *sk)
 
 #define __sk_user_data(sk) ((*((void __rcu **)&(sk)->sk_user_data)))
 
-/**
- * __rcu_dereference_sk_user_data_with_flags - return the pointer
- * only if argument flags all has been set in sk_user_data. Otherwise
- * return NULL
- *
- * @sk: socket
- * @flags: flag bits
- */
-static inline void *
-__rcu_dereference_sk_user_data_with_flags(const struct sock *sk,
-					  uintptr_t flags)
-{
-	uintptr_t sk_user_data = (uintptr_t)rcu_dereference(__sk_user_data(sk));
-
-	WARN_ON_ONCE(flags & SK_USER_DATA_PTRMASK);
-
-	if ((sk_user_data & flags) == flags)
-		return (void *)(sk_user_data & SK_USER_DATA_PTRMASK);
-	return NULL;
-}
-
 #define rcu_dereference_sk_user_data(sk)				\
-	__rcu_dereference_sk_user_data_with_flags(sk, 0)
-#define __rcu_assign_sk_user_data_with_flags(sk, ptr, flags)		\
 ({									\
-	uintptr_t __tmp1 = (uintptr_t)(ptr),				\
-		  __tmp2 = (uintptr_t)(flags);				\
-	WARN_ON_ONCE(__tmp1 & ~SK_USER_DATA_PTRMASK);			\
-	WARN_ON_ONCE(__tmp2 & SK_USER_DATA_PTRMASK);			\
-	rcu_assign_pointer(__sk_user_data((sk)),			\
-			   __tmp1 | __tmp2);				\
+	void *__tmp = rcu_dereference(__sk_user_data((sk)));		\
+	(void *)((uintptr_t)__tmp & SK_USER_DATA_PTRMASK);		\
 })
 #define rcu_assign_sk_user_data(sk, ptr)				\
-	__rcu_assign_sk_user_data_with_flags(sk, ptr, 0)
+({									\
+	uintptr_t __tmp = (uintptr_t)(ptr);				\
+	WARN_ON_ONCE(__tmp & ~SK_USER_DATA_PTRMASK);			\
+	rcu_assign_pointer(__sk_user_data((sk)), __tmp);		\
+})
+#define rcu_assign_sk_user_data_nocopy(sk, ptr)				\
+({									\
+	uintptr_t __tmp = (uintptr_t)(ptr);				\
+	WARN_ON_ONCE(__tmp & ~SK_USER_DATA_PTRMASK);			\
+	rcu_assign_pointer(__sk_user_data((sk)),			\
+			   __tmp | SK_USER_DATA_NOCOPY);		\
+})
 
 /*
  * SK_CAN_REUSE and SK_NO_REUSE on a socket mean that the socket is OK
@@ -909,7 +874,6 @@ enum sock_flags {
 	SOCK_TXTIME,
 	SOCK_XDP, /* XDP is attached */
 	SOCK_TSTAMP_NEW, /* Indicates 64 bit timestamps always */
-	SOCK_COMP,
 };
 
 #define SK_FLAGS_TIMESTAMP ((1UL << SOCK_TIMESTAMP) | (1UL << SOCK_TIMESTAMPING_RX_SOFTWARE))
@@ -1155,7 +1119,6 @@ struct request_sock_ops;
 struct timewait_sock_ops;
 struct inet_hashinfo;
 struct raw_hashinfo;
-struct raw_hashinfo_new;
 struct smc_hashinfo;
 struct module;
 
@@ -1262,7 +1225,7 @@ struct proto {
 	unsigned int		useroffset;	/* Usercopy region offset */
 	unsigned int		usersize;	/* Usercopy region size */
 
-	unsigned int __percpu	*orphan_count;
+	struct percpu_counter	*orphan_count;
 
 	struct request_sock_ops	*rsk_prot;
 	struct timewait_sock_ops *twsk_prot;
@@ -1270,8 +1233,7 @@ struct proto {
 	union {
 		struct inet_hashinfo	*hashinfo;
 		struct udp_table	*udp_table;
-		KABI_REPLACE(struct raw_hashinfo *raw_hash,
-			     struct raw_hashinfo_new *raw_hash)
+		struct raw_hashinfo	*raw_hash;
 		struct smc_hashinfo	*smc_hash;
 	} h;
 
@@ -1284,15 +1246,6 @@ struct proto {
 	atomic_t		socks;
 #endif
 	int			(*diag_destroy)(struct sock *sk, int err);
-
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
-	KABI_RESERVE(3)
-	KABI_RESERVE(4)
-	KABI_RESERVE(5)
-	KABI_RESERVE(6)
-	KABI_RESERVE(7)
-	KABI_RESERVE(8)
 } __randomize_layout;
 
 int proto_register(struct proto *prot, int alloc_slab);
@@ -1503,7 +1456,7 @@ void __sk_mem_reclaim(struct sock *sk, int amount);
 /* sysctl_mem values are in pages, we convert them in SK_MEM_QUANTUM units */
 static inline long sk_prot_mem_limits(const struct sock *sk, int index)
 {
-	long val = READ_ONCE(sk->sk_prot->sysctl_mem[index]);
+	long val = sk->sk_prot->sysctl_mem[index];
 
 #if PAGE_SIZE > SK_MEM_QUANTUM
 	val <<= PAGE_SHIFT - SK_MEM_QUANTUM_SHIFT;
@@ -1526,23 +1479,19 @@ static inline bool sk_has_account(struct sock *sk)
 
 static inline bool sk_wmem_schedule(struct sock *sk, int size)
 {
-	int delta;
-
 	if (!sk_has_account(sk))
 		return true;
-	delta = size - sk->sk_forward_alloc;
-	return delta <= 0 || __sk_mem_schedule(sk, delta, SK_MEM_SEND);
+	return size <= sk->sk_forward_alloc ||
+		__sk_mem_schedule(sk, size, SK_MEM_SEND);
 }
 
 static inline bool
 sk_rmem_schedule(struct sock *sk, struct sk_buff *skb, int size)
 {
-	int delta;
-
 	if (!sk_has_account(sk))
 		return true;
-	delta = size - sk->sk_forward_alloc;
-	return delta <= 0 || __sk_mem_schedule(sk, delta, SK_MEM_RECV) ||
+	return size <= sk->sk_forward_alloc ||
+		__sk_mem_schedule(sk, size, SK_MEM_RECV) ||
 		skb_pfmemalloc(skb);
 }
 
@@ -1808,12 +1757,7 @@ void sk_common_release(struct sock *sk);
  *	Default socket callbacks and setup code
  */
 
-/* Initialise core socket variables using an explicit uid. */
-void sock_init_data_uid(struct socket *sock, struct sock *sk, kuid_t uid);
-
-/* Initialise core socket variables.
- * Assumes struct socket *sock is embedded in a struct socket_alloc.
- */
+/* Initialise core socket variables */
 void sock_init_data(struct socket *sock, struct sock *sk);
 
 /*
@@ -1948,7 +1892,6 @@ static inline void sock_graft(struct sock *sk, struct socket *parent)
 	parent->sk = sk;
 	sk_set_socket(sk, parent);
 	sk->sk_uid = SOCK_INODE(parent)->i_uid;
-	sk->sk_gid = SOCK_INODE(parent)->i_gid;
 	security_sock_graft(sk, parent);
 	write_unlock_bh(&sk->sk_callback_lock);
 }
@@ -1959,11 +1902,6 @@ unsigned long sock_i_ino(struct sock *sk);
 static inline kuid_t sock_net_uid(const struct net *net, const struct sock *sk)
 {
 	return sk ? sk->sk_uid : make_kuid(net->user_ns, 0);
-}
-
-static inline kgid_t sock_net_gid(const struct net *net, const struct sock *sk)
-{
-	return sk ? sk->sk_gid : make_kgid(net->user_ns, 0);
 }
 
 static inline u32 net_tx_rndhash(void)
@@ -2395,22 +2333,19 @@ struct sk_buff *sk_stream_alloc_skb(struct sock *sk, int size, gfp_t gfp,
  * @sk: socket
  *
  * Use the per task page_frag instead of the per socket one for
- * optimization when we know that we're in process context and own
+ * optimization when we know that we're in the normal context and owns
  * everything that's associated with %current.
  *
- * Both direct reclaim and page faults can nest inside other
- * socket operations and end up recursing into sk_page_frag()
- * while it's already in use: explicitly avoid task page_frag
- * usage if the caller is potentially doing any of them.
- * This assumes that page fault handlers use the GFP_NOFS flags.
+ * gfpflags_allow_blocking() isn't enough here as direct reclaim may nest
+ * inside other socket operations and end up recursing into sk_page_frag()
+ * while it's already in use.
  *
  * Return: a per task page_frag if context allows that,
  * otherwise a per socket one.
  */
 static inline struct page_frag *sk_page_frag(struct sock *sk)
 {
-	if ((sk->sk_allocation & (__GFP_DIRECT_RECLAIM | __GFP_MEMALLOC | __GFP_FS)) ==
-	    (__GFP_DIRECT_RECLAIM | __GFP_FS))
+	if (gfpflags_normal_context(sk->sk_allocation))
 		return &current->task_frag;
 
 	return &sk->sk_frag;
@@ -2743,25 +2678,24 @@ extern int sysctl_optmem_max;
 extern __u32 sysctl_wmem_default;
 extern __u32 sysctl_rmem_default;
 
-#define SKB_FRAG_PAGE_ORDER	get_order(32768)
 DECLARE_STATIC_KEY_FALSE(net_high_order_alloc_disable_key);
 
 static inline int sk_get_wmem0(const struct sock *sk, const struct proto *proto)
 {
 	/* Does this proto have per netns sysctl_wmem ? */
 	if (proto->sysctl_wmem_offset)
-		return READ_ONCE(*(int *)((void *)sock_net(sk) + proto->sysctl_wmem_offset));
+		return *(int *)((void *)sock_net(sk) + proto->sysctl_wmem_offset);
 
-	return READ_ONCE(*proto->sysctl_wmem);
+	return *proto->sysctl_wmem;
 }
 
 static inline int sk_get_rmem0(const struct sock *sk, const struct proto *proto)
 {
 	/* Does this proto have per netns sysctl_rmem ? */
 	if (proto->sysctl_rmem_offset)
-		return READ_ONCE(*(int *)((void *)sock_net(sk) + proto->sysctl_rmem_offset));
+		return *(int *)((void *)sock_net(sk) + proto->sysctl_rmem_offset);
 
-	return READ_ONCE(*proto->sysctl_rmem);
+	return *proto->sysctl_rmem;
 }
 
 /* Default TCP Small queue budget is ~1 ms of data (1sec >> 10)
