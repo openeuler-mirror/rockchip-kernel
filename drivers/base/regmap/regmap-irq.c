@@ -170,9 +170,11 @@ static void regmap_irq_sync_unlock(struct irq_data *data)
 				ret = regmap_write(map, reg, d->mask_buf[i]);
 			if (d->chip->clear_ack) {
 				if (d->chip->ack_invert && !ret)
-					ret = regmap_write(map, reg, UINT_MAX);
+					ret = regmap_write(map, reg,
+							   d->mask_buf[i]);
 				else if (!ret)
-					ret = regmap_write(map, reg, 0);
+					ret = regmap_write(map, reg,
+							   ~d->mask_buf[i]);
 			}
 			if (ret != 0)
 				dev_err(d->map->dev, "Failed to ack 0x%x: %d\n",
@@ -220,7 +222,6 @@ static void regmap_irq_enable(struct irq_data *data)
 	struct regmap_irq_chip_data *d = irq_data_get_irq_chip_data(data);
 	struct regmap *map = d->map;
 	const struct regmap_irq *irq_data = irq_to_regmap_irq(d, data->hwirq);
-	unsigned int reg = irq_data->reg_offset / map->reg_stride;
 	unsigned int mask, type;
 
 	type = irq_data->type.type_falling_val | irq_data->type.type_rising_val;
@@ -237,14 +238,14 @@ static void regmap_irq_enable(struct irq_data *data)
 	 * at the corresponding offset in regmap_irq_set_type().
 	 */
 	if (d->chip->type_in_mask && type)
-		mask = d->type_buf[reg] & irq_data->mask;
+		mask = d->type_buf[irq_data->reg_offset / map->reg_stride];
 	else
 		mask = irq_data->mask;
 
 	if (d->chip->clear_on_unmask)
 		d->clear_status = true;
 
-	d->mask_buf[reg] &= ~mask;
+	d->mask_buf[irq_data->reg_offset / map->reg_stride] &= ~mask;
 }
 
 static void regmap_irq_disable(struct irq_data *data)
@@ -508,9 +509,11 @@ static irqreturn_t regmap_irq_thread(int irq, void *d)
 						data->status_buf[i]);
 			if (chip->clear_ack) {
 				if (chip->ack_invert && !ret)
-					ret = regmap_write(map, reg, UINT_MAX);
+					ret = regmap_write(map, reg,
+							data->status_buf[i]);
 				else if (!ret)
-					ret = regmap_write(map, reg, 0);
+					ret = regmap_write(map, reg,
+							~data->status_buf[i]);
 			}
 			if (ret != 0)
 				dev_err(map->dev, "Failed to ack 0x%x: %d\n",
@@ -742,9 +745,13 @@ int regmap_add_irq_chip_fwnode(struct fwnode_handle *fwnode,
 					d->status_buf[i] & d->mask_buf[i]);
 			if (chip->clear_ack) {
 				if (chip->ack_invert && !ret)
-					ret = regmap_write(map, reg, UINT_MAX);
+					ret = regmap_write(map, reg,
+						(d->status_buf[i] &
+						 d->mask_buf[i]));
 				else if (!ret)
-					ret = regmap_write(map, reg, 0);
+					ret = regmap_write(map, reg,
+						~(d->status_buf[i] &
+						  d->mask_buf[i]));
 			}
 			if (ret != 0) {
 				dev_err(map->dev, "Failed to ack 0x%x: %d\n",
