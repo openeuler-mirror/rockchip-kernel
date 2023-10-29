@@ -183,7 +183,6 @@ static int __replace_page(struct vm_area_struct *vma, unsigned long addr,
 
 	if (new_page) {
 		get_page(new_page);
-		reliable_page_counter(new_page, mm, 1);
 		page_add_new_anon_rmap(new_page, vma, addr, false);
 		lru_cache_add_inactive_or_unevictable(new_page, vma);
 	} else
@@ -195,7 +194,6 @@ static int __replace_page(struct vm_area_struct *vma, unsigned long addr,
 		inc_mm_counter(mm, MM_ANONPAGES);
 	}
 
-	reliable_page_counter(old_page, mm, -1);
 	flush_cache_page(vma, addr, pte_pfn(*pvmw.pte));
 	ptep_clear_flush_notify(vma, addr, pvmw.pte);
 	if (new_page)
@@ -615,56 +613,41 @@ static void put_uprobe(struct uprobe *uprobe)
 	}
 }
 
-static __always_inline
-int uprobe_cmp(const struct inode *l_inode, const loff_t l_offset,
-	       const struct uprobe *r)
+static int match_uprobe(struct uprobe *l, struct uprobe *r)
 {
-	if (l_inode < r->inode)
+	if (l->inode < r->inode)
 		return -1;
 
-	if (l_inode > r->inode)
+	if (l->inode > r->inode)
 		return 1;
 
-	if (l_offset < r->offset)
+	if (l->offset < r->offset)
 		return -1;
 
-	if (l_offset > r->offset)
+	if (l->offset > r->offset)
 		return 1;
 
 	return 0;
 }
 
-#define __node_2_uprobe(node) \
-	rb_entry((node), struct uprobe, rb_node)
-
-struct __uprobe_key {
-	struct inode *inode;
-	loff_t offset;
-};
-
-static inline int __uprobe_cmp_key(const void *key, const struct rb_node *b)
-{
-	const struct __uprobe_key *a = key;
-	return uprobe_cmp(a->inode, a->offset, __node_2_uprobe(b));
-}
-
-static inline int __uprobe_cmp(struct rb_node *a, const struct rb_node *b)
-{
-	struct uprobe *u = __node_2_uprobe(a);
-	return uprobe_cmp(u->inode, u->offset, __node_2_uprobe(b));
-}
-
 static struct uprobe *__find_uprobe(struct inode *inode, loff_t offset)
 {
-	struct __uprobe_key key = {
-		.inode = inode,
-		.offset = offset,
-	};
-	struct rb_node *node = rb_find(&key, &uprobes_tree, __uprobe_cmp_key);
+	struct uprobe u = { .inode = inode, .offset = offset };
+	struct rb_node *n = uprobes_tree.rb_node;
+	struct uprobe *uprobe;
+	int match;
 
-	if (node)
-		return get_uprobe(__node_2_uprobe(node));
+	while (n) {
+		uprobe = rb_entry(n, struct uprobe, rb_node);
+		match = match_uprobe(&u, uprobe);
+		if (!match)
+			return get_uprobe(uprobe);
 
+		if (match < 0)
+			n = n->rb_left;
+		else
+			n = n->rb_right;
+	}
 	return NULL;
 }
 
@@ -685,15 +668,32 @@ static struct uprobe *find_uprobe(struct inode *inode, loff_t offset)
 
 static struct uprobe *__insert_uprobe(struct uprobe *uprobe)
 {
-	struct rb_node *node;
+	struct rb_node **p = &uprobes_tree.rb_node;
+	struct rb_node *parent = NULL;
+	struct uprobe *u;
+	int match;
 
-	node = rb_find_add(&uprobe->rb_node, &uprobes_tree, __uprobe_cmp);
-	if (node)
-		return get_uprobe(__node_2_uprobe(node));
+	while (*p) {
+		parent = *p;
+		u = rb_entry(parent, struct uprobe, rb_node);
+		match = match_uprobe(uprobe, u);
+		if (!match)
+			return get_uprobe(u);
 
+		if (match < 0)
+			p = &parent->rb_left;
+		else
+			p = &parent->rb_right;
+
+	}
+
+	u = NULL;
+	rb_link_node(&uprobe->rb_node, parent, p);
+	rb_insert_color(&uprobe->rb_node, &uprobes_tree);
 	/* get access + creation ref */
 	refcount_set(&uprobe->ref, 2);
-	return NULL;
+
+	return u;
 }
 
 /*
@@ -1735,7 +1735,7 @@ void uprobe_free_utask(struct task_struct *t)
 }
 
 /*
- * Allocate a uprobe_task object for the task if necessary.
+ * Allocate a uprobe_task object for the task if if necessary.
  * Called when the thread hits a breakpoint.
  *
  * Returns:
@@ -1973,7 +1973,7 @@ bool uprobe_deny_signal(void)
 
 	WARN_ON_ONCE(utask->state != UTASK_SSTEP);
 
-	if (task_sigpending(t)) {
+	if (signal_pending(t)) {
 		spin_lock_irq(&t->sighand->siglock);
 		clear_tsk_thread_flag(t, TIF_SIGPENDING);
 		spin_unlock_irq(&t->sighand->siglock);
@@ -2070,17 +2070,10 @@ static struct uprobe *find_active_uprobe(unsigned long bp_vaddr, int *is_swbp)
 	return uprobe;
 }
 
-#ifdef CONFIG_UPROBES_SUPPORT_PC_ALTER
-static bool handler_chain(struct uprobe *uprobe, struct pt_regs *regs)
-#else
 static void handler_chain(struct uprobe *uprobe, struct pt_regs *regs)
-#endif
 {
 	struct uprobe_consumer *uc;
 	int remove = UPROBE_HANDLER_REMOVE;
-#ifdef CONFIG_UPROBES_SUPPORT_PC_ALTER
-	bool need_skip = false;
-#endif
 	bool need_prep = false; /* prepare return uprobe, when needed */
 
 	down_read(&uprobe->register_rwsem);
@@ -2097,10 +2090,6 @@ static void handler_chain(struct uprobe *uprobe, struct pt_regs *regs)
 			need_prep = true;
 
 		remove &= rc;
-#ifdef CONFIG_UPROBES_SUPPORT_PC_ALTER
-		if (rc & UPROBE_ALTER_PC)
-			need_skip = true;
-#endif
 	}
 
 	if (need_prep && !remove)
@@ -2111,9 +2100,6 @@ static void handler_chain(struct uprobe *uprobe, struct pt_regs *regs)
 		unapply_uprobe(uprobe, current->mm);
 	}
 	up_read(&uprobe->register_rwsem);
-#ifdef CONFIG_UPROBES_SUPPORT_PC_ALTER
-	return need_skip;
-#endif
 }
 
 static void
@@ -2255,12 +2241,7 @@ static void handle_swbp(struct pt_regs *regs)
 	if (arch_uprobe_ignore(&uprobe->arch, regs))
 		goto out;
 
-#ifdef CONFIG_UPROBES_SUPPORT_PC_ALTER
-	if (handler_chain(uprobe, regs))
-		goto out;
-#else
 	handler_chain(uprobe, regs);
-#endif
 
 	if (arch_uprobe_skip_sstep(&uprobe->arch, regs))
 		goto out;

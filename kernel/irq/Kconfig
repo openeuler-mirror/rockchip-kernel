@@ -82,7 +82,6 @@ config IRQ_FASTEOI_HIERARCHY_HANDLERS
 # Generic IRQ IPI support
 config GENERIC_IRQ_IPI
 	bool
-	depends on SMP
 	select IRQ_DOMAIN_HIERARCHY
 
 # Generic MSI interrupt support
@@ -108,6 +107,9 @@ config GENERIC_IRQ_MATRIX_ALLOCATOR
 	bool
 
 config GENERIC_IRQ_RESERVATION_MODE
+	bool
+
+config ARCH_WANTS_IRQ_RAW
 	bool
 
 # Support forced irq threading

@@ -26,9 +26,6 @@
 #include <asm/syscall.h>	/* some archs define it here */
 #endif
 
-#define TRACE_MODE_WRITE	0640
-#define TRACE_MODE_READ		0440
-
 enum trace_type {
 	__TRACE_FIRST_TYPE = 0,
 
@@ -47,8 +44,6 @@ enum trace_type {
 	TRACE_BLK,
 	TRACE_BPUTS,
 	TRACE_HWLAT,
-	TRACE_OSNOISE,
-	TRACE_TIMERLAT,
 	TRACE_RAW_DATA,
 
 	__TRACE_LAST_TYPE,
@@ -309,8 +304,7 @@ struct trace_array {
 	struct array_buffer	max_buffer;
 	bool			allocated_snapshot;
 #endif
-#if defined(CONFIG_TRACER_MAX_TRACE) || defined(CONFIG_HWLAT_TRACER) \
-	|| defined(CONFIG_OSNOISE_TRACER)
+#if defined(CONFIG_TRACER_MAX_TRACE) || defined(CONFIG_HWLAT_TRACER)
 	unsigned long		max_latency;
 #ifdef CONFIG_FSNOTIFY
 	struct dentry		*d_max_latency;
@@ -456,8 +450,6 @@ extern void __ftrace_bad_type(void);
 		IF_ASSIGN(var, ent, struct bprint_entry, TRACE_BPRINT);	\
 		IF_ASSIGN(var, ent, struct bputs_entry, TRACE_BPUTS);	\
 		IF_ASSIGN(var, ent, struct hwlat_entry, TRACE_HWLAT);	\
-		IF_ASSIGN(var, ent, struct osnoise_entry, TRACE_OSNOISE);\
-		IF_ASSIGN(var, ent, struct timerlat_entry, TRACE_TIMERLAT);\
 		IF_ASSIGN(var, ent, struct raw_data_entry, TRACE_RAW_DATA);\
 		IF_ASSIGN(var, ent, struct trace_mmiotrace_rw,		\
 			  TRACE_MMIO_RW);				\
@@ -581,6 +573,18 @@ struct tracer {
  *    then this function calls...
  *   The function callback, which can use the FTRACE bits to
  *    check for recursion.
+ *
+ * Now if the arch does not support a feature, and it calls
+ * the global list function which calls the ftrace callback
+ * all three of these steps will do a recursion protection.
+ * There's no reason to do one if the previous caller already
+ * did. The recursion that we are protecting against will
+ * go through the same steps again.
+ *
+ * To prevent the multiple recursion checks, if a recursion
+ * bit is set that is higher than the MAX bit of the current
+ * check, then we know that the check was made by the previous
+ * caller, and we can skip the current check.
  */
 enum {
 	/* Function recursion bits */
@@ -588,14 +592,12 @@ enum {
 	TRACE_FTRACE_NMI_BIT,
 	TRACE_FTRACE_IRQ_BIT,
 	TRACE_FTRACE_SIRQ_BIT,
-	TRACE_FTRACE_TRANSITION_BIT,
 
-	/* Internal use recursion bits */
+	/* INTERNAL_BITs must be greater than FTRACE_BITs */
 	TRACE_INTERNAL_BIT,
 	TRACE_INTERNAL_NMI_BIT,
 	TRACE_INTERNAL_IRQ_BIT,
 	TRACE_INTERNAL_SIRQ_BIT,
-	TRACE_INTERNAL_TRANSITION_BIT,
 
 	TRACE_BRANCH_BIT,
 /*
@@ -635,6 +637,12 @@ enum {
 	 * function is called to clear it.
 	 */
 	TRACE_GRAPH_NOTRACE_BIT,
+
+	/*
+	 * When transitioning between context, the preempt_count() may
+	 * not be correct. Allow for a single recursion to cover this case.
+	 */
+	TRACE_TRANSITION_BIT,
 };
 
 #define trace_recursion_set(bit)	do { (current)->trace_recursion |= (1<<(bit)); } while (0)
@@ -654,18 +662,12 @@ enum {
 #define TRACE_CONTEXT_BITS	4
 
 #define TRACE_FTRACE_START	TRACE_FTRACE_BIT
+#define TRACE_FTRACE_MAX	((1 << (TRACE_FTRACE_START + TRACE_CONTEXT_BITS)) - 1)
 
 #define TRACE_LIST_START	TRACE_INTERNAL_BIT
+#define TRACE_LIST_MAX		((1 << (TRACE_LIST_START + TRACE_CONTEXT_BITS)) - 1)
 
-#define TRACE_CONTEXT_MASK	((1 << (TRACE_LIST_START + TRACE_CONTEXT_BITS)) - 1)
-
-enum {
-	TRACE_CTX_NMI,
-	TRACE_CTX_IRQ,
-	TRACE_CTX_SOFTIRQ,
-	TRACE_CTX_NORMAL,
-	TRACE_CTX_TRANSITION,
-};
+#define TRACE_CONTEXT_MASK	TRACE_LIST_MAX
 
 static __always_inline int trace_get_context_bit(void)
 {
@@ -673,22 +675,26 @@ static __always_inline int trace_get_context_bit(void)
 
 	if (in_interrupt()) {
 		if (in_nmi())
-			bit = TRACE_CTX_NMI;
+			bit = 0;
 
 		else if (in_irq())
-			bit = TRACE_CTX_IRQ;
+			bit = 1;
 		else
-			bit = TRACE_CTX_SOFTIRQ;
+			bit = 2;
 	} else
-		bit = TRACE_CTX_NORMAL;
+		bit = 3;
 
 	return bit;
 }
 
-static __always_inline int trace_test_and_set_recursion(int start)
+static __always_inline int trace_test_and_set_recursion(int start, int max)
 {
 	unsigned int val = current->trace_recursion;
 	int bit;
+
+	/* A previous recursion check was made */
+	if ((val & TRACE_CONTEXT_MASK) > max)
+		return 0;
 
 	bit = trace_get_context_bit() + start;
 	if (unlikely(val & (1 << bit))) {
@@ -696,25 +702,32 @@ static __always_inline int trace_test_and_set_recursion(int start)
 		 * It could be that preempt_count has not been updated during
 		 * a switch between contexts. Allow for a single recursion.
 		 */
-		bit = start + TRACE_CTX_TRANSITION;
+		bit = TRACE_TRANSITION_BIT;
 		if (trace_recursion_test(bit))
 			return -1;
 		trace_recursion_set(bit);
 		barrier();
-		return bit;
+		return bit + 1;
 	}
+
+	/* Normal check passed, clear the transition to allow it again */
+	trace_recursion_clear(TRACE_TRANSITION_BIT);
 
 	val |= 1 << bit;
 	current->trace_recursion = val;
 	barrier();
 
-	return bit;
+	return bit + 1;
 }
 
 static __always_inline void trace_clear_recursion(int bit)
 {
 	unsigned int val = current->trace_recursion;
 
+	if (!bit)
+		return;
+
+	bit--;
 	bit = 1 << bit;
 	val &= ~bit;
 
@@ -753,7 +766,8 @@ struct ring_buffer_event *
 trace_buffer_lock_reserve(struct trace_buffer *buffer,
 			  int type,
 			  unsigned long len,
-			  unsigned int trace_ctx);
+			  unsigned long flags,
+			  int pc);
 
 struct trace_entry *tracing_get_trace_entry(struct trace_array *tr,
 						struct trace_array_cpu *data);
@@ -778,11 +792,11 @@ unsigned long trace_total_entries(struct trace_array *tr);
 void trace_function(struct trace_array *tr,
 		    unsigned long ip,
 		    unsigned long parent_ip,
-		    unsigned int trace_ctx);
+		    unsigned long flags, int pc);
 void trace_graph_function(struct trace_array *tr,
 		    unsigned long ip,
 		    unsigned long parent_ip,
-		    unsigned int trace_ctx);
+		    unsigned long flags, int pc);
 void trace_latency_header(struct seq_file *m);
 void trace_default_header(struct seq_file *m);
 void print_trace_header(struct seq_file *m, struct trace_iterator *iter);
@@ -813,6 +827,8 @@ extern unsigned long tracing_thresh;
 
 /* PID filtering */
 
+extern int pid_max;
+
 bool trace_find_filtered_pid(struct trace_pid_list *filtered_pids,
 			     pid_t search_pid);
 bool trace_ignore_this_task(struct trace_pid_list *filtered_pids,
@@ -836,8 +852,8 @@ void update_max_tr_single(struct trace_array *tr,
 			  struct task_struct *tsk, int cpu);
 #endif /* CONFIG_TRACER_MAX_TRACE */
 
-#if (defined(CONFIG_TRACER_MAX_TRACE) || defined(CONFIG_HWLAT_TRACER) || \
-	defined(CONFIG_OSNOISE_TRACER)) && defined(CONFIG_FSNOTIFY)
+#if (defined(CONFIG_TRACER_MAX_TRACE) || defined(CONFIG_HWLAT_TRACER)) && \
+	defined(CONFIG_FSNOTIFY)
 
 void latency_fsnotify(struct trace_array *tr);
 
@@ -848,10 +864,11 @@ static inline void latency_fsnotify(struct trace_array *tr) { }
 #endif
 
 #ifdef CONFIG_STACKTRACE
-void __trace_stack(struct trace_array *tr, unsigned int trace_ctx, int skip);
+void __trace_stack(struct trace_array *tr, unsigned long flags, int skip,
+		   int pc);
 #else
-static inline void __trace_stack(struct trace_array *tr, unsigned int trace_ctx,
-				 int skip)
+static inline void __trace_stack(struct trace_array *tr, unsigned long flags,
+				 int skip, int pc)
 {
 }
 #endif /* CONFIG_STACKTRACE */
@@ -991,10 +1008,10 @@ extern void graph_trace_open(struct trace_iterator *iter);
 extern void graph_trace_close(struct trace_iterator *iter);
 extern int __trace_graph_entry(struct trace_array *tr,
 			       struct ftrace_graph_ent *trace,
-			       unsigned int trace_ctx);
+			       unsigned long flags, int pc);
 extern void __trace_graph_return(struct trace_array *tr,
 				 struct ftrace_graph_ret *trace,
-				 unsigned int trace_ctx);
+				 unsigned long flags, int pc);
 
 #ifdef CONFIG_DYNAMIC_FTRACE
 extern struct ftrace_hash __rcu *ftrace_graph_hash;
@@ -1457,15 +1474,15 @@ extern int call_filter_check_discard(struct trace_event_call *call, void *rec,
 void trace_buffer_unlock_commit_regs(struct trace_array *tr,
 				     struct trace_buffer *buffer,
 				     struct ring_buffer_event *event,
-				     unsigned int trcace_ctx,
+				     unsigned long flags, int pc,
 				     struct pt_regs *regs);
 
 static inline void trace_buffer_unlock_commit(struct trace_array *tr,
 					      struct trace_buffer *buffer,
 					      struct ring_buffer_event *event,
-					      unsigned int trace_ctx)
+					      unsigned long flags, int pc)
 {
-	trace_buffer_unlock_commit_regs(tr, buffer, event, trace_ctx, NULL);
+	trace_buffer_unlock_commit_regs(tr, buffer, event, flags, pc, NULL);
 }
 
 DECLARE_PER_CPU(struct ring_buffer_event *, trace_buffered_event);
@@ -1510,26 +1527,14 @@ __event_trigger_test_discard(struct trace_event_file *file,
 	if (eflags & EVENT_FILE_FL_TRIGGER_COND)
 		*tt = event_triggers_call(file, entry, event);
 
-	if (likely(!(file->flags & (EVENT_FILE_FL_SOFT_DISABLED |
-				    EVENT_FILE_FL_FILTERED |
-				    EVENT_FILE_FL_PID_FILTER))))
-		return false;
-
-	if (file->flags & EVENT_FILE_FL_SOFT_DISABLED)
-		goto discard;
-
-	if (file->flags & EVENT_FILE_FL_FILTERED &&
-	    !filter_match_preds(file->filter, entry))
-		goto discard;
-
-	if ((file->flags & EVENT_FILE_FL_PID_FILTER) &&
-	    trace_event_ignore_this_pid(file))
-		goto discard;
+	if (test_bit(EVENT_FILE_FL_SOFT_DISABLED_BIT, &file->flags) ||
+	    (unlikely(file->flags & EVENT_FILE_FL_FILTERED) &&
+	     !filter_match_preds(file->filter, entry))) {
+		__trace_event_discard_commit(buffer, event);
+		return true;
+	}
 
 	return false;
- discard:
-	__trace_event_discard_commit(buffer, event);
-	return true;
 }
 
 /**
@@ -1538,7 +1543,8 @@ __event_trigger_test_discard(struct trace_event_file *file,
  * @buffer: The ring buffer that the event is being written to
  * @event: The event meta data in the ring buffer
  * @entry: The event itself
- * @trace_ctx: The tracing context flags.
+ * @irq_flags: The state of the interrupts at the start of the event
+ * @pc: The state of the preempt count at the start of the event.
  *
  * This is a helper function to handle triggers that require data
  * from the event itself. It also tests the event against filters and
@@ -1548,12 +1554,12 @@ static inline void
 event_trigger_unlock_commit(struct trace_event_file *file,
 			    struct trace_buffer *buffer,
 			    struct ring_buffer_event *event,
-			    void *entry, unsigned int trace_ctx)
+			    void *entry, unsigned long irq_flags, int pc)
 {
 	enum event_trigger_type tt = ETT_NONE;
 
 	if (!__event_trigger_test_discard(file, buffer, event, entry, &tt))
-		trace_buffer_unlock_commit(file->tr, buffer, event, trace_ctx);
+		trace_buffer_unlock_commit(file->tr, buffer, event, irq_flags, pc);
 
 	if (tt)
 		event_triggers_post_call(file, tt);
@@ -1565,7 +1571,8 @@ event_trigger_unlock_commit(struct trace_event_file *file,
  * @buffer: The ring buffer that the event is being written to
  * @event: The event meta data in the ring buffer
  * @entry: The event itself
- * @trace_ctx: The tracing context flags.
+ * @irq_flags: The state of the interrupts at the start of the event
+ * @pc: The state of the preempt count at the start of the event.
  *
  * This is a helper function to handle triggers that require data
  * from the event itself. It also tests the event against filters and
@@ -1578,14 +1585,14 @@ static inline void
 event_trigger_unlock_commit_regs(struct trace_event_file *file,
 				 struct trace_buffer *buffer,
 				 struct ring_buffer_event *event,
-				 void *entry, unsigned int trace_ctx,
+				 void *entry, unsigned long irq_flags, int pc,
 				 struct pt_regs *regs)
 {
 	enum event_trigger_type tt = ETT_NONE;
 
 	if (!__event_trigger_test_discard(file, buffer, event, entry, &tt))
 		trace_buffer_unlock_commit_regs(file->tr, buffer, event,
-						trace_ctx, regs);
+						irq_flags, pc, regs);
 
 	if (tt)
 		event_triggers_post_call(file, tt);
@@ -2120,23 +2127,5 @@ static inline bool is_good_name(const char *name)
 	}
 	return true;
 }
-
-/*
- * This is a generic way to read and write a u64 value from a file in tracefs.
- *
- * The value is stored on the variable pointed by *val. The value needs
- * to be at least *min and at most *max. The write is protected by an
- * existing *lock.
- */
-struct trace_min_max_param {
-	struct mutex	*lock;
-	u64		*val;
-	u64		*min;
-	u64		*max;
-};
-
-#define U64_STR_SIZE		24	/* 20 digits max */
-
-extern const struct file_operations trace_min_max_fops;
 
 #endif /* _LINUX_KERNEL_TRACE_H */

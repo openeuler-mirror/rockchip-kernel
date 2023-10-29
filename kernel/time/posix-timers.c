@@ -273,8 +273,8 @@ static int posix_get_hrtimer_res(clockid_t which_clock, struct timespec64 *tp)
 static __init int init_posix_timers(void)
 {
 	posix_timers_cache = kmem_cache_create("posix_timers_cache",
-					sizeof(struct k_itimer), 0,
-					SLAB_PANIC | SLAB_ACCOUNT, NULL);
+					sizeof (struct k_itimer), 0, SLAB_PANIC,
+					NULL);
 	return 0;
 }
 __initcall(init_posix_timers);
@@ -1051,24 +1051,15 @@ retry_delete:
 }
 
 /*
- * This is called by do_exit or de_thread, only when nobody else can
- * modify the signal->posix_timers list. Yet we need sighand->siglock
- * to prevent the race with /proc/pid/timers.
+ * This is called by do_exit or de_thread, only when there are no more
+ * references to the shared signal_struct.
  */
-void exit_itimers(struct task_struct *tsk)
+void exit_itimers(struct signal_struct *sig)
 {
-	struct list_head timers;
 	struct k_itimer *tmr;
 
-	if (list_empty(&tsk->signal->posix_timers))
-		return;
-
-	spin_lock_irq(&tsk->sighand->siglock);
-	list_replace_init(&tsk->signal->posix_timers, &timers);
-	spin_unlock_irq(&tsk->sighand->siglock);
-
-	while (!list_empty(&timers)) {
-		tmr = list_first_entry(&timers, struct k_itimer, list);
+	while (!list_empty(&sig->posix_timers)) {
+		tmr = list_entry(sig->posix_timers.next, struct k_itimer, list);
 		itimer_delete(tmr);
 	}
 }

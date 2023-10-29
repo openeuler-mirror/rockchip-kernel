@@ -2913,7 +2913,7 @@ static int btf_struct_resolve(struct btf_verifier_env *env,
 	if (v->next_member) {
 		const struct btf_type *last_member_type;
 		const struct btf_member *last_member;
-		u32 last_member_type_id;
+		u16 last_member_type_id;
 
 		last_member = btf_type_member(v->t) + v->next_member - 1;
 		last_member_type_id = last_member->type;
@@ -3675,11 +3675,6 @@ static int btf_func_proto_check(struct btf_verifier_env *env,
 			break;
 		}
 
-		if (btf_type_is_resolve_source_only(arg_type)) {
-			btf_verifier_log_type(env, t, "Invalid arg#%u", i + 1);
-			return -EINVAL;
-		}
-
 		if (args[i].name_off &&
 		    (!btf_name_offset_valid(btf, args[i].name_off) ||
 		     !btf_name_valid_identifier(btf, args[i].name_off))) {
@@ -4140,7 +4135,8 @@ static struct btf *btf_parse(void __user *btf_data, u32 btf_data_size,
 		log->len_total = log_size;
 
 		/* log attributes have to be sane */
-		if (!bpf_verifier_log_attr_valid(log)) {
+		if (log->len_total < 128 || log->len_total > UINT_MAX >> 8 ||
+		    !log->level || !log->ubuf) {
 			err = -EINVAL;
 			goto errout;
 		}
@@ -4484,7 +4480,6 @@ bool btf_ctx_access(int off, int size, enum bpf_access_type type,
 				return true;
 			t = btf_type_by_id(btf, t->type);
 			break;
-		case BPF_SCHED:
 		case BPF_MODIFY_RETURN:
 			/* For now the BPF_MODIFY_RETURN can only be attached to
 			 * functions that return an int.
@@ -4530,12 +4525,10 @@ bool btf_ctx_access(int off, int size, enum bpf_access_type type,
 	/* check for PTR_TO_RDONLY_BUF_OR_NULL or PTR_TO_RDWR_BUF_OR_NULL */
 	for (i = 0; i < prog->aux->ctx_arg_info_size; i++) {
 		const struct bpf_ctx_arg_aux *ctx_arg_info = &prog->aux->ctx_arg_info[i];
-		u32 type, flag;
 
-		type = base_type(ctx_arg_info->reg_type);
-		flag = type_flag(ctx_arg_info->reg_type);
-		if (ctx_arg_info->offset == off && type == PTR_TO_BUF &&
-		    (flag & PTR_MAYBE_NULL)) {
+		if (ctx_arg_info->offset == off &&
+		    (ctx_arg_info->reg_type == PTR_TO_RDONLY_BUF_OR_NULL ||
+		     ctx_arg_info->reg_type == PTR_TO_RDWR_BUF_OR_NULL)) {
 			info->reg_type = ctx_arg_info->reg_type;
 			return true;
 		}
@@ -5212,7 +5205,7 @@ int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 						i, btf_kind_str[BTF_INFO_KIND(t->info)]);
 					goto out;
 				}
-				if (check_ptr_off_reg(env, &reg[i + 1], i + 1))
+				if (check_ctx_reg(env, &reg[i + 1], i + 1))
 					goto out;
 				continue;
 			}
