@@ -523,7 +523,7 @@ repeat:
 
 void emergency_thaw_bdev(struct super_block *sb)
 {
-	while (sb->s_bdev && !thaw_bdev(sb->s_bdev, sb))
+	while (sb->s_bdev && !thaw_bdev(sb->s_bdev))
 		printk(KERN_WARNING "Emergency Thaw on %pg\n", sb->s_bdev);
 }
 
@@ -562,7 +562,7 @@ void write_boundary_block(struct block_device *bdev,
 	struct buffer_head *bh = __find_get_block(bdev, bblock + 1, blocksize);
 	if (bh) {
 		if (buffer_dirty(bh))
-			write_dirty_buffer(bh, 0);
+			ll_rw_block(REQ_OP_WRITE, 0, 1, &bh);
 		put_bh(bh);
 	}
 }
@@ -657,7 +657,7 @@ int __set_page_dirty_buffers(struct page *page)
 		} while (bh != head);
 	}
 	/*
-	 * Lock out page's memcg migration to keep PageDirty
+	 * Lock out page->mem_cgroup migration to keep PageDirty
 	 * synchronized with per-memcg dirty page counters.
 	 */
 	lock_page_memcg(page);
@@ -1264,6 +1264,15 @@ static void bh_lru_install(struct buffer_head *bh)
 	int i;
 
 	check_irqs_on();
+	/*
+	 * the refcount of buffer_head in bh_lru prevents dropping the
+	 * attached page(i.e., try_to_free_buffers) so it could cause
+	 * failing page migration.
+	 * Skip putting upcoming bh into bh_lru until migration is done.
+	 */
+	if (lru_cache_disabled())
+		return;
+
 	bh_lru_lock();
 
 	b = this_cpu_ptr(&bh_lrus);
@@ -1363,7 +1372,7 @@ void __breadahead(struct block_device *bdev, sector_t block, unsigned size)
 {
 	struct buffer_head *bh = __getblk(bdev, block, size);
 	if (likely(bh)) {
-		bh_readahead(bh, REQ_RAHEAD);
+		ll_rw_block(REQ_OP_READ, REQ_RAHEAD, 1, &bh);
 		brelse(bh);
 	}
 }
@@ -1404,6 +1413,15 @@ __bread_gfp(struct block_device *bdev, sector_t block,
 }
 EXPORT_SYMBOL(__bread_gfp);
 
+static void __invalidate_bh_lrus(struct bh_lru *b)
+{
+	int i;
+
+	for (i = 0; i < BH_LRU_SIZE; i++) {
+		brelse(b->bhs[i]);
+		b->bhs[i] = NULL;
+	}
+}
 /*
  * invalidate_bh_lrus() is called rarely - but not only at unmount.
  * This doesn't race because it runs in each cpu either in irq
@@ -1412,16 +1430,12 @@ EXPORT_SYMBOL(__bread_gfp);
 static void invalidate_bh_lru(void *arg)
 {
 	struct bh_lru *b = &get_cpu_var(bh_lrus);
-	int i;
 
-	for (i = 0; i < BH_LRU_SIZE; i++) {
-		brelse(b->bhs[i]);
-		b->bhs[i] = NULL;
-	}
+	__invalidate_bh_lrus(b);
 	put_cpu_var(bh_lrus);
 }
 
-static bool has_bh_in_lru(int cpu, void *dummy)
+bool has_bh_in_lru(int cpu, void *dummy)
 {
 	struct bh_lru *b = per_cpu_ptr(&bh_lrus, cpu);
 	int i;
@@ -1439,6 +1453,20 @@ void invalidate_bh_lrus(void)
 	on_each_cpu_cond(has_bh_in_lru, invalidate_bh_lru, NULL, 1);
 }
 EXPORT_SYMBOL_GPL(invalidate_bh_lrus);
+
+/*
+ * It's called from workqueue context so we need a bh_lru_lock to close
+ * the race with preemption/irq.
+ */
+void invalidate_bh_lrus_cpu(void)
+{
+	struct bh_lru *b;
+
+	bh_lru_lock();
+	b = this_cpu_ptr(&bh_lrus);
+	__invalidate_bh_lrus(b);
+	bh_lru_unlock();
+}
 
 void set_bh_page(struct buffer_head *bh,
 		struct page *page, unsigned long offset)
@@ -2038,7 +2066,7 @@ int __block_write_begin_int(struct page *page, loff_t pos, unsigned len,
 		if (!buffer_uptodate(bh) && !buffer_delay(bh) &&
 		    !buffer_unwritten(bh) &&
 		     (block_start < from || block_end > to)) {
-			bh_read_nowait(bh, 0);
+			ll_rw_block(REQ_OP_READ, 0, 1, &bh);
 			*wait_bh++=bh;
 		}
 	}
@@ -2083,8 +2111,7 @@ static int __block_commit_write(struct inode *inode, struct page *page,
 			set_buffer_uptodate(bh);
 			mark_buffer_dirty(bh);
 		}
-		if (buffer_new(bh))
-			clear_buffer_new(bh);
+		clear_buffer_new(bh);
 
 		block_start = block_end;
 		bh = bh->b_this_page;
@@ -2351,7 +2378,7 @@ int generic_cont_expand_simple(struct inode *inode, loff_t size)
 {
 	struct address_space *mapping = inode->i_mapping;
 	struct page *page;
-	void *fsdata = NULL;
+	void *fsdata;
 	int err;
 
 	err = inode_newsize_ok(inode, size);
@@ -2377,7 +2404,7 @@ static int cont_expand_zero(struct file *file, struct address_space *mapping,
 	struct inode *inode = mapping->host;
 	unsigned int blocksize = i_blocksize(inode);
 	struct page *page;
-	void *fsdata = NULL;
+	void *fsdata;
 	pgoff_t index, curidx;
 	loff_t curpos;
 	unsigned zerofrom, offset, len;
@@ -2927,9 +2954,11 @@ int block_truncate_page(struct address_space *mapping,
 		set_buffer_uptodate(bh);
 
 	if (!buffer_uptodate(bh) && !buffer_delay(bh) && !buffer_unwritten(bh)) {
-		err = bh_read(bh, 0);
+		err = -EIO;
+		ll_rw_block(REQ_OP_READ, 0, 1, &bh);
+		wait_on_buffer(bh);
 		/* Uhhuh. Read error. Complain and punt. */
-		if (err < 0)
+		if (!buffer_uptodate(bh))
 			goto unlock;
 	}
 
@@ -3388,71 +3417,6 @@ int bh_uptodate_or_lock(struct buffer_head *bh)
 	return 1;
 }
 EXPORT_SYMBOL(bh_uptodate_or_lock);
-
-/**
- * __bh_read - Submit read for a locked buffer
- * @bh: struct buffer_head
- * @op_flags: appending REQ_OP_* flags besides REQ_OP_READ
- * @wait: wait until reading finish
- *
- * Returns zero on success or don't wait, and -EIO on error.
- */
-int __bh_read(struct buffer_head *bh, unsigned int op_flags, bool wait)
-{
-	int ret = 0;
-
-	BUG_ON(!buffer_locked(bh));
-
-	get_bh(bh);
-	bh->b_end_io = end_buffer_read_sync;
-	submit_bh(REQ_OP_READ, op_flags, bh);
-	if (wait) {
-		wait_on_buffer(bh);
-		if (!buffer_uptodate(bh))
-			ret = -EIO;
-	}
-	return ret;
-}
-EXPORT_SYMBOL(__bh_read);
-
-/**
- * __bh_read_batch - Submit read for a batch of unlocked buffers
- * @nr: entry number of the buffer batch
- * @bhs: a batch of struct buffer_head
- * @op_flags: appending REQ_OP_* flags besides REQ_OP_READ
- * @force_lock: force to get a lock on the buffer if set, otherwise drops any
- *              buffer that cannot lock.
- *
- * Returns zero on success or don't wait, and -EIO on error.
- */
-void __bh_read_batch(int nr, struct buffer_head *bhs[],
-		     unsigned int op_flags, bool force_lock)
-{
-	int i;
-
-	for (i = 0; i < nr; i++) {
-		struct buffer_head *bh = bhs[i];
-
-		if (buffer_uptodate(bh))
-			continue;
-
-		if (force_lock)
-			lock_buffer(bh);
-		else
-			if (!trylock_buffer(bh))
-				continue;
-
-		if (buffer_uptodate(bh)) {
-			unlock_buffer(bh);
-			continue;
-		}
-
-		bh->b_end_io = end_buffer_read_sync;
-		get_bh(bh);
-		submit_bh(REQ_OP_READ, op_flags, bh);
-	}
-}
-EXPORT_SYMBOL(__bh_read_batch);
 
 /**
  * bh_submit_read - Submit a locked buffer for reading

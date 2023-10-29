@@ -22,7 +22,6 @@
 #include <linux/xattr.h>
 #include <linux/export.h>
 #include <linux/user_namespace.h>
-#include <linux/namei.h>
 
 static struct posix_acl **acl_by_type(struct inode *inode, int type)
 {
@@ -57,17 +56,7 @@ EXPORT_SYMBOL(get_cached_acl);
 
 struct posix_acl *get_cached_acl_rcu(struct inode *inode, int type)
 {
-	struct posix_acl *acl = rcu_dereference(*acl_by_type(inode, type));
-
-	if (acl == ACL_DONT_CACHE && inode->i_op->get_acl2) {
-		struct posix_acl *ret;
-
-		ret = inode->i_op->get_acl2(inode, type, LOOKUP_RCU);
-		if (!IS_ERR(ret))
-			acl = ret;
-	}
-
-	return acl;
+	return rcu_dereference(*acl_by_type(inode, type));
 }
 EXPORT_SYMBOL(get_cached_acl_rcu);
 
@@ -145,14 +134,11 @@ struct posix_acl *get_acl(struct inode *inode, int type)
 	 * If the filesystem doesn't have a get_acl() function at all, we'll
 	 * just create the negative cache entry.
 	 */
-	if (!inode->i_op->get_acl && !inode->i_op->get_acl2) {
+	if (!inode->i_op->get_acl) {
 		set_cached_acl(inode, type, NULL);
 		return NULL;
 	}
-	if (inode->i_op->get_acl)
-		acl = inode->i_op->get_acl(inode, type);
-	else
-		acl = inode->i_op->get_acl2(inode, type, false);
+	acl = inode->i_op->get_acl(inode, type);
 
 	if (IS_ERR(acl)) {
 		/*
@@ -849,7 +835,7 @@ EXPORT_SYMBOL (posix_acl_to_xattr);
 static int
 posix_acl_xattr_get(const struct xattr_handler *handler,
 		    struct dentry *unused, struct inode *inode,
-		    const char *name, void *value, size_t size)
+		    const char *name, void *value, size_t size, int flags)
 {
 	struct posix_acl *acl;
 	int error;
