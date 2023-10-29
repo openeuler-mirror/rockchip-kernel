@@ -5,7 +5,6 @@
 
 #include <string.h>
 #include <stdlib.h>
-#include <inttypes.h>
 #include <sys/mman.h>
 
 #include "builtin.h"
@@ -196,7 +195,7 @@ static bool __dead_end_function(struct objtool_file *file, struct symbol *func,
 		return false;
 
 	insn = find_insn(file, func->sec, func->offset);
-	if (!insn || !insn->func)
+	if (!insn->func)
 		return false;
 
 	func_for_each_insn(file, func, insn) {
@@ -469,12 +468,12 @@ static int add_dead_ends(struct objtool_file *file)
 		else if (reloc->addend == reloc->sym->sec->len) {
 			insn = find_last_insn(file, reloc->sym->sec);
 			if (!insn) {
-				WARN("can't find unreachable insn at %s+0x%" PRIx64,
+				WARN("can't find unreachable insn at %s+0x%x",
 				     reloc->sym->sec->name, reloc->addend);
 				return -1;
 			}
 		} else {
-			WARN("can't find unreachable insn at %s+0x%" PRIx64,
+			WARN("can't find unreachable insn at %s+0x%x",
 			     reloc->sym->sec->name, reloc->addend);
 			return -1;
 		}
@@ -504,12 +503,12 @@ reachable:
 		else if (reloc->addend == reloc->sym->sec->len) {
 			insn = find_last_insn(file, reloc->sym->sec);
 			if (!insn) {
-				WARN("can't find reachable insn at %s+0x%" PRIx64,
+				WARN("can't find reachable insn at %s+0x%x",
 				     reloc->sym->sec->name, reloc->addend);
 				return -1;
 			}
 		} else {
-			WARN("can't find reachable insn at %s+0x%" PRIx64,
+			WARN("can't find reachable insn at %s+0x%x",
 			     reloc->sym->sec->name, reloc->addend);
 			return -1;
 		}
@@ -802,16 +801,6 @@ static const char *uaccess_safe_builtin[] = {
 	"__tsan_read_write4",
 	"__tsan_read_write8",
 	"__tsan_read_write16",
-	"__tsan_volatile_read1",
-	"__tsan_volatile_read2",
-	"__tsan_volatile_read4",
-	"__tsan_volatile_read8",
-	"__tsan_volatile_read16",
-	"__tsan_volatile_write1",
-	"__tsan_volatile_write2",
-	"__tsan_volatile_write4",
-	"__tsan_volatile_write8",
-	"__tsan_volatile_write16",
 	"__tsan_atomic8_load",
 	"__tsan_atomic16_load",
 	"__tsan_atomic32_load",
