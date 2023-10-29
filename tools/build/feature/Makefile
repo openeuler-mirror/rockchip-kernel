@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: GPL-2.0
-ARCH ?= $(shell uname -m)
 FILES=                                          \
          test-all.bin                           \
          test-backtrace.bin                     \
@@ -18,7 +17,6 @@ FILES=                                          \
          test-libbfd.bin                        \
          test-libbfd-buildid.bin		\
          test-disassembler-four-args.bin        \
-         test-disassembler-init-styled.bin	\
          test-reallocarray.bin			\
          test-libbfd-liberty.bin                \
          test-libbfd-liberty-z.bin              \
@@ -42,7 +40,7 @@ FILES=                                          \
          test-libunwind-x86_64.bin              \
          test-libunwind-arm.bin                 \
          test-libunwind-aarch64.bin             \
-         test-libunwind-sw_64.bin               \
+         test-libunwind-sw64.bin                \
          test-libunwind-debug-frame-arm.bin     \
          test-libunwind-debug-frame-aarch64.bin \
          test-pthread-attr-setaffinity-np.bin   \
@@ -183,7 +181,7 @@ $(OUTPUT)test-libunwind-arm.bin:
 $(OUTPUT)test-libunwind-aarch64.bin:
 	$(BUILD) -lelf -lunwind-aarch64
 
-$(OUTPUT)test-libunwind-sw_64.bin:
+$(OUTPUT)test-libunwind-sw64.bin:
 	$(BUILD) -lelf -lunwind-sw_64
 
 $(OUTPUT)test-libunwind-debug-frame-arm.bin:
@@ -233,19 +231,12 @@ $(OUTPUT)test-libpython.bin:
 	$(BUILD) $(FLAGS_PYTHON_EMBED)
 
 $(OUTPUT)test-libbfd.bin:
-ifeq ($(ARCH),sw_64)
-	$(BUILD) -DPACKAGE='"perf"' -lbfd -ldl -liberty -lz
-else
 	$(BUILD) -DPACKAGE='"perf"' -lbfd -ldl
-endif
 
 $(OUTPUT)test-libbfd-buildid.bin:
 	$(BUILD) -DPACKAGE='"perf"' -lbfd -ldl
 
 $(OUTPUT)test-disassembler-four-args.bin:
-	$(BUILD) -DPACKAGE='"perf"' -lbfd -lopcodes
-
-$(OUTPUT)test-disassembler-init-styled.bin:
 	$(BUILD) -DPACKAGE='"perf"' -lbfd -lopcodes
 
 $(OUTPUT)test-reallocarray.bin:
