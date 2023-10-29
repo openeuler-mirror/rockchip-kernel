@@ -132,15 +132,20 @@ nfnl_acct_fill_info(struct sk_buff *skb, u32 portid, u32 seq, u32 type,
 		   int event, struct nf_acct *acct)
 {
 	struct nlmsghdr *nlh;
+	struct nfgenmsg *nfmsg;
 	unsigned int flags = portid ? NLM_F_MULTI : 0;
 	u64 pkts, bytes;
 	u32 old_flags;
 
 	event = nfnl_msg_type(NFNL_SUBSYS_ACCT, event);
-	nlh = nfnl_msg_put(skb, portid, seq, event, flags, AF_UNSPEC,
-			   NFNETLINK_V0, 0);
-	if (!nlh)
+	nlh = nlmsg_put(skb, portid, seq, event, sizeof(*nfmsg), flags);
+	if (nlh == NULL)
 		goto nlmsg_failure;
+
+	nfmsg = nlmsg_data(nlh);
+	nfmsg->nfgen_family = AF_UNSPEC;
+	nfmsg->version = NFNETLINK_V0;
+	nfmsg->res_id = 0;
 
 	if (nla_put_string(skb, NFACCT_NAME, acct->name))
 		goto nla_put_failure;
@@ -303,8 +308,13 @@ static int nfnl_acct_get(struct net *net, struct sock *nfnl,
 			kfree_skb(skb2);
 			break;
 		}
-		ret = nfnetlink_unicast(skb2, net, NETLINK_CB(skb).portid);
-		break;
+		ret = netlink_unicast(nfnl, skb2, NETLINK_CB(skb).portid,
+					MSG_DONTWAIT);
+		if (ret > 0)
+			ret = 0;
+
+		/* this avoids a loop in nfnetlink. */
+		return ret == -EAGAIN ? -ENOBUFS : ret;
 	}
 	return ret;
 }

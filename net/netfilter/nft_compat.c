@@ -591,13 +591,18 @@ nfnl_compat_fill_info(struct sk_buff *skb, u32 portid, u32 seq, u32 type,
 		      int rev, int target)
 {
 	struct nlmsghdr *nlh;
+	struct nfgenmsg *nfmsg;
 	unsigned int flags = portid ? NLM_F_MULTI : 0;
 
 	event = nfnl_msg_type(NFNL_SUBSYS_NFT_COMPAT, event);
-	nlh = nfnl_msg_put(skb, portid, seq, event, flags, family,
-			   NFNETLINK_V0, 0);
-	if (!nlh)
+	nlh = nlmsg_put(skb, portid, seq, event, sizeof(*nfmsg), flags);
+	if (nlh == NULL)
 		goto nlmsg_failure;
+
+	nfmsg = nlmsg_data(nlh);
+	nfmsg->nfgen_family = family;
+	nfmsg->version = NFNETLINK_V0;
+	nfmsg->res_id = 0;
 
 	if (nla_put_string(skb, NFTA_COMPAT_NAME, name) ||
 	    nla_put_be32(skb, NFTA_COMPAT_REV, htonl(rev)) ||
@@ -682,12 +687,14 @@ static int nfnl_compat_get_rcu(struct net *net, struct sock *nfnl,
 		goto out_put;
 	}
 
-	ret = nfnetlink_unicast(skb2, net, NETLINK_CB(skb).portid);
+	ret = netlink_unicast(nfnl, skb2, NETLINK_CB(skb).portid,
+				MSG_DONTWAIT);
+	if (ret > 0)
+		ret = 0;
 out_put:
 	rcu_read_lock();
 	module_put(THIS_MODULE);
-
-	return ret;
+	return ret == -EAGAIN ? -ENOBUFS : ret;
 }
 
 static const struct nla_policy nfnl_compat_policy_get[NFTA_COMPAT_MAX+1] = {
