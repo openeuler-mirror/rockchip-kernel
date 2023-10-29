@@ -102,7 +102,7 @@ xfs_refcountbt_free_block(
 	struct xfs_mount	*mp = cur->bc_mp;
 	struct xfs_buf		*agbp = cur->bc_ag.agbp;
 	struct xfs_agf		*agf = agbp->b_addr;
-	xfs_fsblock_t		fsbno = XFS_DADDR_TO_FSB(mp, xfs_buf_daddr(bp));
+	xfs_fsblock_t		fsbno = XFS_DADDR_TO_FSB(mp, XFS_BUF_ADDR(bp));
 	int			error;
 
 	trace_xfs_refcountbt_free_block(cur->bc_mp, cur->bc_ag.agno,
@@ -209,7 +209,7 @@ xfs_refcountbt_verify(
 	if (!xfs_verify_magic(bp, block->bb_magic))
 		return __this_address;
 
-	if (!xfs_has_reflink(mp))
+	if (!xfs_sb_version_hasreflink(&mp->m_sb))
 		return __this_address;
 	fa = xfs_btree_sblock_v5hdr_verify(bp);
 	if (fa)
@@ -460,7 +460,7 @@ xfs_refcountbt_calc_reserves(
 	xfs_extlen_t		tree_len;
 	int			error;
 
-	if (!xfs_has_reflink(mp))
+	if (!xfs_sb_version_hasreflink(&mp->m_sb))
 		return 0;
 
 

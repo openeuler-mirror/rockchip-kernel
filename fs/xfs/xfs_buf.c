@@ -15,7 +15,6 @@
 #include "xfs_trace.h"
 #include "xfs_log.h"
 #include "xfs_log_recover.h"
-#include "xfs_log_priv.h"
 #include "xfs_trans.h"
 #include "xfs_buf_item.h"
 #include "xfs_errortag.h"
@@ -362,7 +361,7 @@ xfs_buf_allocate_memory(
 	unsigned short		page_count, i;
 	xfs_off_t		start, end;
 	int			error;
-	xfs_km_flags_t		kmflag_mask = KM_NOFS;
+	xfs_km_flags_t		kmflag_mask = 0;
 
 	/*
 	 * assure zeroed buffer for non-read cases.
@@ -379,7 +378,9 @@ xfs_buf_allocate_memory(
 	 */
 	size = BBTOB(bp->b_length);
 	if (size < PAGE_SIZE) {
-		bp->b_addr = kmem_alloc(size, kmflag_mask);
+		int align_mask = xfs_buftarg_dma_alignment(bp->b_target);
+		bp->b_addr = kmem_alloc_io(size, align_mask,
+					   KM_NOFS | kmflag_mask);
 		if (!bp->b_addr) {
 			/* low memory - use alloc_page loop instead */
 			goto use_alloc_page;
@@ -657,11 +658,6 @@ found:
 		XFS_STATS_INC(btp->bt_mount, xb_get_locked_waited);
 	}
 
-	if (xlog_is_shutdown(btp->bt_mount->m_log)) {
-		xfs_buf_relse(bp);
-		return -EIO;
-	}
-
 	/*
 	 * if the buffer is stale, clear all the external state associated with
 	 * it. We need to keep flags such as how we allocated the buffer memory
@@ -869,15 +865,7 @@ xfs_buf_read_map(
 	 * buffer.
 	 */
 	if (error) {
-		/*
-		 * Check against log shutdown for error reporting because
-		 * metadata writeback may require a read first and we need to
-		 * report errors in metadata writeback until the log is shut
-		 * down. High level transaction read functions already check
-		 * against mount shutdown, anyway, so we only need to be
-		 * concerned about low level IO interactions here.
-		 */
-		if (!xlog_is_shutdown(target->bt_mount->m_log))
+		if (!XFS_FORCED_SHUTDOWN(target->bt_mount))
 			xfs_buf_ioerror_alert(bp, fa);
 
 		bp->b_flags &= ~XBF_DONE;
@@ -1225,7 +1213,7 @@ xfs_buf_ioerror_permanent(
 		return true;
 
 	/* At unmount we may treat errors differently */
-	if (xfs_is_unmounting(mp) && mp->m_fail_unmount)
+	if ((mp->m_flags & XFS_MOUNT_UNMOUNTING) && mp->m_fail_unmount)
 		return true;
 
 	return false;
@@ -1256,10 +1244,10 @@ xfs_buf_ioend_handle_error(
 	struct xfs_error_cfg	*cfg;
 
 	/*
-	 * If we've already shutdown the journal because of I/O errors, there's
-	 * no point in giving this a retry.
+	 * If we've already decided to shutdown the filesystem because of I/O
+	 * errors, there's no point in giving this a retry.
 	 */
-	if (xlog_is_shutdown(mp->m_log))
+	if (XFS_FORCED_SHUTDOWN(mp))
 		goto out_stale;
 
 	xfs_buf_ioerror_alert_ratelimited(bp);
@@ -1416,7 +1404,7 @@ xfs_buf_ioerror_alert(
 {
 	xfs_buf_alert_ratelimited(bp, "XFS: metadata IO error",
 		"metadata I/O error in \"%pS\" at daddr 0x%llx len %d error %d",
-				  func, (uint64_t)xfs_buf_daddr(bp),
+				  func, (uint64_t)XFS_BUF_ADDR(bp),
 				  bp->b_length, -bp->b_error);
 }
 
@@ -1601,7 +1589,7 @@ _xfs_buf_ioapply(
 			 * non-crc filesystems don't attach verifiers during
 			 * log recovery, so don't warn for such filesystems.
 			 */
-			if (xfs_has_crc(mp)) {
+			if (xfs_sb_version_hascrc(&mp->m_sb)) {
 				xfs_warn(mp,
 					"%s: no buf ops on daddr 0x%llx len %d",
 					__func__, bp->b_bn, bp->b_length);
@@ -1671,23 +1659,8 @@ __xfs_buf_submit(
 
 	ASSERT(!(bp->b_flags & _XBF_DELWRI_Q));
 
-	/*
-	 * On log shutdown we stale and complete the buffer immediately. We can
-	 * be called to read the superblock before the log has been set up, so
-	 * be careful checking the log state.
-	 *
-	 * Checking the mount shutdown state here can result in the log tail
-	 * moving inappropriately on disk as the log may not yet be shut down.
-	 * i.e. failing this buffer on mount shutdown can remove it from the AIL
-	 * and move the tail of the log forwards without having written this
-	 * buffer to disk. This corrupts the log tail state in memory, and
-	 * because the log may not be shut down yet, it can then be propagated
-	 * to disk before the log is shutdown. Hence we check log shutdown
-	 * state here rather than mount state to avoid corrupting the log tail
-	 * on shutdown.
-	 */
-	if (bp->b_mount->m_log &&
-	    xlog_is_shutdown(bp->b_mount->m_log)) {
+	/* on shutdown we stale and complete the buffer immediately */
+	if (XFS_FORCED_SHUTDOWN(bp->b_mount)) {
 		xfs_buf_ioend_fail(bp);
 		return -EIO;
 	}
@@ -1892,10 +1865,10 @@ xfs_wait_buftarg(
 	 * If one or more failed buffers were freed, that means dirty metadata
 	 * was thrown away. This should only ever happen after I/O completion
 	 * handling has elevated I/O error(s) to permanent failures and shuts
-	 * down the journal.
+	 * down the fs.
 	 */
 	if (write_fail) {
-		ASSERT(xlog_is_shutdown(btp->bt_mount->m_log));
+		ASSERT(XFS_FORCED_SHUTDOWN(btp->bt_mount));
 		xfs_alert(btp->bt_mount,
 	      "Please run xfs_repair to determine the extent of the problem.");
 	}
@@ -1975,8 +1948,7 @@ xfs_free_buftarg(
 	percpu_counter_destroy(&btp->bt_io_count);
 	list_lru_destroy(&btp->bt_lru);
 
-	blkdev_issue_flush(btp->bt_bdev, GFP_NOFS);
-	invalidate_bdev(btp->bt_bdev);
+	xfs_blkdev_issue_flush(btp);
 
 	kmem_free(btp);
 }
@@ -2142,9 +2114,9 @@ xfs_buf_delwri_queue(
  */
 static int
 xfs_buf_cmp(
-	void			*priv,
-	const struct list_head	*a,
-	const struct list_head	*b)
+	void		*priv,
+	struct list_head *a,
+	struct list_head *b)
 {
 	struct xfs_buf	*ap = container_of(a, struct xfs_buf, b_list);
 	struct xfs_buf	*bp = container_of(b, struct xfs_buf, b_list);
@@ -2179,13 +2151,12 @@ xfs_buf_delwri_submit_buffers(
 	blk_start_plug(&plug);
 	list_for_each_entry_safe(bp, n, buffer_list, b_list) {
 		if (!wait_list) {
-			if (!xfs_buf_trylock(bp))
-				continue;
 			if (xfs_buf_ispinned(bp)) {
-				xfs_buf_unlock(bp);
 				pinned++;
 				continue;
 			}
+			if (!xfs_buf_trylock(bp))
+				continue;
 		} else {
 			xfs_buf_lock(bp);
 		}
@@ -2390,7 +2361,7 @@ xfs_verify_magic(
 	struct xfs_mount	*mp = bp->b_mount;
 	int			idx;
 
-	idx = xfs_has_crc(mp);
+	idx = xfs_sb_version_hascrc(&mp->m_sb);
 	if (WARN_ON(!bp->b_ops || !bp->b_ops->magic[idx]))
 		return false;
 	return dmagic == bp->b_ops->magic[idx];
@@ -2408,7 +2379,7 @@ xfs_verify_magic16(
 	struct xfs_mount	*mp = bp->b_mount;
 	int			idx;
 
-	idx = xfs_has_crc(mp);
+	idx = xfs_sb_version_hascrc(&mp->m_sb);
 	if (WARN_ON(!bp->b_ops || !bp->b_ops->magic16[idx]))
 		return false;
 	return dmagic == bp->b_ops->magic16[idx];

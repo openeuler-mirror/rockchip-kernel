@@ -51,7 +51,7 @@ xfs_agfl_size(
 {
 	unsigned int		size = mp->m_sb.sb_sectsize;
 
-	if (xfs_has_crc(mp))
+	if (xfs_sb_version_hascrc(&mp->m_sb))
 		size -= sizeof(struct xfs_agfl);
 
 	return size / sizeof(xfs_agblock_t);
@@ -61,9 +61,9 @@ unsigned int
 xfs_refc_block(
 	struct xfs_mount	*mp)
 {
-	if (xfs_has_rmapbt(mp))
+	if (xfs_sb_version_hasrmapbt(&mp->m_sb))
 		return XFS_RMAP_BLOCK(mp) + 1;
-	if (xfs_has_finobt(mp))
+	if (xfs_sb_version_hasfinobt(&mp->m_sb))
 		return XFS_FIBT_BLOCK(mp) + 1;
 	return XFS_IBT_BLOCK(mp) + 1;
 }
@@ -72,11 +72,11 @@ xfs_extlen_t
 xfs_prealloc_blocks(
 	struct xfs_mount	*mp)
 {
-	if (xfs_has_reflink(mp))
+	if (xfs_sb_version_hasreflink(&mp->m_sb))
 		return xfs_refc_block(mp) + 1;
-	if (xfs_has_rmapbt(mp))
+	if (xfs_sb_version_hasrmapbt(&mp->m_sb))
 		return XFS_RMAP_BLOCK(mp) + 1;
-	if (xfs_has_finobt(mp))
+	if (xfs_sb_version_hasfinobt(&mp->m_sb))
 		return XFS_FIBT_BLOCK(mp) + 1;
 	return XFS_IBT_BLOCK(mp) + 1;
 }
@@ -126,11 +126,11 @@ xfs_alloc_ag_max_usable(
 	blocks = XFS_BB_TO_FSB(mp, XFS_FSS_TO_BB(mp, 4)); /* ag headers */
 	blocks += XFS_ALLOC_AGFL_RESERVE;
 	blocks += 3;			/* AGF, AGI btree root blocks */
-	if (xfs_has_finobt(mp))
+	if (xfs_sb_version_hasfinobt(&mp->m_sb))
 		blocks++;		/* finobt root block */
-	if (xfs_has_rmapbt(mp))
+	if (xfs_sb_version_hasrmapbt(&mp->m_sb))
 		blocks++; 		/* rmap root block */
-	if (xfs_has_reflink(mp))
+	if (xfs_sb_version_hasreflink(&mp->m_sb))
 		blocks++;		/* refcount root block */
 
 	return mp->m_sb.sb_agblocks - blocks;
@@ -598,7 +598,7 @@ xfs_agfl_verify(
 	 * AGFL is what the AGF says is active. We can't get to the AGF, so we
 	 * can't verify just those entries are valid.
 	 */
-	if (!xfs_has_crc(mp))
+	if (!xfs_sb_version_hascrc(&mp->m_sb))
 		return NULL;
 
 	if (!xfs_verify_magic(bp, agfl->agfl_magicnum))
@@ -638,7 +638,7 @@ xfs_agfl_read_verify(
 	 * AGFL is what the AGF says is active. We can't get to the AGF, so we
 	 * can't verify just those entries are valid.
 	 */
-	if (!xfs_has_crc(mp))
+	if (!xfs_sb_version_hascrc(&mp->m_sb))
 		return;
 
 	if (!xfs_buf_verify_cksum(bp, XFS_AGFL_CRC_OFF))
@@ -659,7 +659,7 @@ xfs_agfl_write_verify(
 	xfs_failaddr_t		fa;
 
 	/* no verification of non-crc AGFLs */
-	if (!xfs_has_crc(mp))
+	if (!xfs_sb_version_hascrc(&mp->m_sb))
 		return;
 
 	fa = xfs_agfl_verify(bp);
@@ -718,6 +718,7 @@ xfs_alloc_update_counters(
 	agbp->b_pag->pagf_freeblks += len;
 	be32_add_cpu(&agf->agf_freeblks, len);
 
+	xfs_trans_agblocks_delta(tp, len);
 	if (unlikely(be32_to_cpu(agf->agf_freeblks) >
 		     be32_to_cpu(agf->agf_length))) {
 		xfs_buf_mark_corrupt(agbp);
@@ -2264,7 +2265,7 @@ xfs_alloc_min_freelist(
 	min_free += min_t(unsigned int, levels[XFS_BTNUM_CNTi] + 1,
 				       mp->m_ag_maxlevels);
 	/* space needed reverse mapping used space btree */
-	if (xfs_has_rmapbt(mp))
+	if (xfs_sb_version_hasrmapbt(&mp->m_sb))
 		min_free += min_t(unsigned int, levels[XFS_BTNUM_RMAPi] + 1,
 						mp->m_rmap_maxlevels);
 
@@ -2373,7 +2374,7 @@ xfs_agfl_needs_reset(
 	int			active;
 
 	/* no agfl header on v4 supers */
-	if (!xfs_has_crc(mp))
+	if (!xfs_sb_version_hascrc(&mp->m_sb))
 		return false;
 
 	/*
@@ -2516,12 +2517,7 @@ xfs_alloc_fix_freelist(
 		goto out_agbp_relse;
 	}
 
-	/*
-	 * Also need to fulfill freespace btree splits by reservaing more
-	 * blocks to perform multiple allocations from a single AG and
-	 * transaction if needed.
-	 */
-	need = xfs_alloc_min_freelist(mp, pag) * (1 + args->postallocs);
+	need = xfs_alloc_min_freelist(mp, pag);
 	if (!xfs_alloc_space_available(args, need, flags |
 			XFS_ALLOC_FLAG_CHECK))
 		goto out_agbp_relse;
@@ -2545,7 +2541,7 @@ xfs_alloc_fix_freelist(
 		xfs_agfl_reset(tp, agbp, pag);
 
 	/* If there isn't enough total space or single-extent, reject it. */
-	need = xfs_alloc_min_freelist(mp, pag) * (1 + args->postallocs);
+	need = xfs_alloc_min_freelist(mp, pag);
 	if (!xfs_alloc_space_available(args, need, flags))
 		goto out_agbp_relse;
 
@@ -2693,6 +2689,7 @@ xfs_alloc_get_freelist(
 	pag = agbp->b_pag;
 	ASSERT(!pag->pagf_agflreset);
 	be32_add_cpu(&agf->agf_flcount, -1);
+	xfs_trans_agflist_delta(tp, -1);
 	pag->pagf_flcount--;
 
 	logflags = XFS_AGF_FLFIRST | XFS_AGF_FLCOUNT;
@@ -2799,6 +2796,7 @@ xfs_alloc_put_freelist(
 	pag = agbp->b_pag;
 	ASSERT(!pag->pagf_agflreset);
 	be32_add_cpu(&agf->agf_flcount, 1);
+	xfs_trans_agflist_delta(tp, 1);
 	pag->pagf_flcount++;
 
 	logflags = XFS_AGF_FLLAST | XFS_AGF_FLCOUNT;
@@ -2832,7 +2830,7 @@ xfs_agf_verify(
 	struct xfs_mount	*mp = bp->b_mount;
 	struct xfs_agf		*agf = bp->b_addr;
 
-	if (xfs_has_crc(mp)) {
+	if (xfs_sb_version_hascrc(&mp->m_sb)) {
 		if (!uuid_equal(&agf->agf_uuid, &mp->m_sb.sb_meta_uuid))
 			return __this_address;
 		if (!xfs_log_check_lsn(mp, be64_to_cpu(agf->agf_lsn)))
@@ -2862,12 +2860,12 @@ xfs_agf_verify(
 	    be32_to_cpu(agf->agf_levels[XFS_BTNUM_CNT]) > XFS_BTREE_MAXLEVELS)
 		return __this_address;
 
-	if (xfs_has_rmapbt(mp) &&
+	if (xfs_sb_version_hasrmapbt(&mp->m_sb) &&
 	    (be32_to_cpu(agf->agf_levels[XFS_BTNUM_RMAP]) < 1 ||
 	     be32_to_cpu(agf->agf_levels[XFS_BTNUM_RMAP]) > XFS_BTREE_MAXLEVELS))
 		return __this_address;
 
-	if (xfs_has_rmapbt(mp) &&
+	if (xfs_sb_version_hasrmapbt(&mp->m_sb) &&
 	    be32_to_cpu(agf->agf_rmap_blocks) > be32_to_cpu(agf->agf_length))
 		return __this_address;
 
@@ -2880,16 +2878,16 @@ xfs_agf_verify(
 	if (bp->b_pag && be32_to_cpu(agf->agf_seqno) != bp->b_pag->pag_agno)
 		return __this_address;
 
-	if (xfs_has_lazysbcount(mp) &&
+	if (xfs_sb_version_haslazysbcount(&mp->m_sb) &&
 	    be32_to_cpu(agf->agf_btreeblks) > be32_to_cpu(agf->agf_length))
 		return __this_address;
 
-	if (xfs_has_reflink(mp) &&
+	if (xfs_sb_version_hasreflink(&mp->m_sb) &&
 	    be32_to_cpu(agf->agf_refcount_blocks) >
 	    be32_to_cpu(agf->agf_length))
 		return __this_address;
 
-	if (xfs_has_reflink(mp) &&
+	if (xfs_sb_version_hasreflink(&mp->m_sb) &&
 	    (be32_to_cpu(agf->agf_refcount_level) < 1 ||
 	     be32_to_cpu(agf->agf_refcount_level) > XFS_BTREE_MAXLEVELS))
 		return __this_address;
@@ -2905,7 +2903,7 @@ xfs_agf_read_verify(
 	struct xfs_mount *mp = bp->b_mount;
 	xfs_failaddr_t	fa;
 
-	if (xfs_has_crc(mp) &&
+	if (xfs_sb_version_hascrc(&mp->m_sb) &&
 	    !xfs_buf_verify_cksum(bp, XFS_AGF_CRC_OFF))
 		xfs_verifier_error(bp, -EFSBADCRC, __this_address);
 	else {
@@ -2930,7 +2928,7 @@ xfs_agf_write_verify(
 		return;
 	}
 
-	if (!xfs_has_crc(mp))
+	if (!xfs_sb_version_hascrc(&mp->m_sb))
 		return;
 
 	if (bip)
@@ -2988,7 +2986,6 @@ xfs_alloc_read_agf(
 	struct xfs_agf		*agf;		/* ag freelist header */
 	struct xfs_perag	*pag;		/* per allocation group data */
 	int			error;
-	int			allocbt_blks;
 
 	trace_xfs_alloc_read_agf(mp, agno);
 
@@ -3019,22 +3016,9 @@ xfs_alloc_read_agf(
 		pag->pagf_refcount_level = be32_to_cpu(agf->agf_refcount_level);
 		pag->pagf_init = 1;
 		pag->pagf_agflreset = xfs_agfl_needs_reset(mp, agf);
-
-		/*
-		 * Update the in-core allocbt counter. Filter out the rmapbt
-		 * subset of the btreeblks counter because the rmapbt is managed
-		 * by perag reservation. Subtract one for the rmapbt root block
-		 * because the rmap counter includes it while the btreeblks
-		 * counter only tracks non-root blocks.
-		 */
-		allocbt_blks = pag->pagf_btreeblks;
-		if (xfs_has_rmapbt(mp))
-			allocbt_blks -= be32_to_cpu(agf->agf_rmap_blocks) - 1;
-		if (allocbt_blks > 0)
-			atomic64_add(allocbt_blks, &mp->m_allocbt_blks);
 	}
 #ifdef DEBUG
-	else if (!xfs_is_shutdown(mp)) {
+	else if (!XFS_FORCED_SHUTDOWN(mp)) {
 		ASSERT(pag->pagf_freeblks == be32_to_cpu(agf->agf_freeblks));
 		ASSERT(pag->pagf_btreeblks == be32_to_cpu(agf->agf_btreeblks));
 		ASSERT(pag->pagf_flcount == be32_to_cpu(agf->agf_flcount));
@@ -3121,7 +3105,7 @@ xfs_alloc_vextent(
 		 * the first a.g. fails.
 		 */
 		if ((args->datatype & XFS_ALLOC_INITIAL_USER_DATA) &&
-		    xfs_is_inode32(mp)) {
+		    (mp->m_flags & XFS_MOUNT_32BITINODES)) {
 			args->fsbno = XFS_AGB_TO_FSB(mp,
 					((mp->m_agfrotor / rotorstep) %
 					mp->m_sb.sb_agcount), 0);
@@ -3129,7 +3113,7 @@ xfs_alloc_vextent(
 		}
 		args->agbno = XFS_FSB_TO_AGBNO(mp, args->fsbno);
 		args->type = XFS_ALLOCTYPE_NEAR_BNO;
-		fallthrough;
+		/* FALLTHROUGH */
 	case XFS_ALLOCTYPE_FIRST_AG:
 		/*
 		 * Rotate through the allocation groups looking for a winner.

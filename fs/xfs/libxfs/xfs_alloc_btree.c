@@ -71,9 +71,9 @@ xfs_allocbt_alloc_block(
 		return 0;
 	}
 
-	atomic64_inc(&cur->bc_mp->m_allocbt_blks);
 	xfs_extent_busy_reuse(cur->bc_mp, cur->bc_ag.agno, bno, 1, false);
 
+	xfs_trans_agbtree_delta(cur->bc_tp, 1);
 	new->s = cpu_to_be32(bno);
 
 	*stat = 1;
@@ -90,14 +90,14 @@ xfs_allocbt_free_block(
 	xfs_agblock_t		bno;
 	int			error;
 
-	bno = xfs_daddr_to_agbno(cur->bc_mp, xfs_buf_daddr(bp));
+	bno = xfs_daddr_to_agbno(cur->bc_mp, XFS_BUF_ADDR(bp));
 	error = xfs_alloc_put_freelist(cur->bc_tp, agbp, NULL, bno, 1);
 	if (error)
 		return error;
 
-	atomic64_dec(&cur->bc_mp->m_allocbt_blks);
 	xfs_extent_busy_insert(cur->bc_tp, be32_to_cpu(agf->agf_seqno), bno, 1,
 			      XFS_EXTENT_BUSY_SKIP_DISCARD);
+	xfs_trans_agbtree_delta(cur->bc_tp, -1);
 	return 0;
 }
 
@@ -298,7 +298,7 @@ xfs_allocbt_verify(
 	if (!xfs_verify_magic(bp, block->bb_magic))
 		return __this_address;
 
-	if (xfs_has_crc(mp)) {
+	if (xfs_sb_version_hascrc(&mp->m_sb)) {
 		fa = xfs_btree_sblock_v5hdr_verify(bp);
 		if (fa)
 			return fa;
@@ -499,7 +499,7 @@ xfs_allocbt_init_common(
 	cur->bc_ag.agno = agno;
 	cur->bc_ag.abt.active = false;
 
-	if (xfs_has_crc(mp))
+	if (xfs_sb_version_hascrc(&mp->m_sb))
 		cur->bc_flags |= XFS_BTREE_CRC_BLOCKS;
 
 	return cur;

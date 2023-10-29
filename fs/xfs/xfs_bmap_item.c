@@ -40,7 +40,6 @@ STATIC void
 xfs_bui_item_free(
 	struct xfs_bui_log_item	*buip)
 {
-	kmem_free(buip->bui_item.li_lv_shadow);
 	kmem_cache_free(xfs_bui_zone, buip);
 }
 
@@ -200,7 +199,6 @@ xfs_bud_item_release(
 	struct xfs_bud_log_item	*budp = BUD_ITEM(lip);
 
 	xfs_bui_release(budp->bud_buip);
-	kmem_free(budp->bud_item.li_lv_shadow);
 	kmem_cache_free(xfs_bud_zone, budp);
 }
 
@@ -267,8 +265,8 @@ xfs_trans_log_finish_bmap_update(
 static int
 xfs_bmap_update_diff_items(
 	void				*priv,
-	const struct list_head		*a,
-	const struct list_head		*b)
+	struct list_head		*a,
+	struct list_head		*b)
 {
 	struct xfs_bmap_intent		*ba;
 	struct xfs_bmap_intent		*bb;
@@ -432,7 +430,7 @@ xfs_bui_item_recover(
 	struct xfs_bui_log_item		*buip = BUI_ITEM(lip);
 	struct xfs_trans		*tp;
 	struct xfs_inode		*ip = NULL;
-	struct xfs_mount		*mp = lip->li_log->l_mp;
+	struct xfs_mount		*mp = lip->li_mountp;
 	struct xfs_map_extent		*bmap;
 	struct xfs_bud_log_item		*budp;
 	xfs_fsblock_t			startblock_fsb;
@@ -441,7 +439,6 @@ xfs_bui_item_recover(
 	xfs_exntst_t			state;
 	unsigned int			bui_type;
 	int				whichfork;
-	int				iext_delta;
 	int				error = 0;
 
 	/* Only one mapping operation per BUI... */
@@ -499,15 +496,6 @@ xfs_bui_item_recover(
 	budp = xfs_trans_get_bud(tp, buip);
 	xfs_ilock(ip, XFS_ILOCK_EXCL);
 	xfs_trans_ijoin(tp, ip, 0);
-
-	if (bui_type == XFS_BMAP_MAP)
-		iext_delta = XFS_IEXT_ADD_NOSPLIT_CNT;
-	else
-		iext_delta = XFS_IEXT_PUNCH_HOLE_CNT;
-
-	error = xfs_iext_count_may_overflow(ip, whichfork, iext_delta);
-	if (error)
-		goto err_cancel;
 
 	count = bmap->me_len;
 	error = xfs_trans_log_finish_bmap_update(tp, budp, bui_type, ip,
@@ -590,18 +578,28 @@ static const struct xfs_item_ops xfs_bui_item_ops = {
 	.iop_relog	= xfs_bui_item_relog,
 };
 
-static inline void
+/*
+ * Copy an BUI format buffer from the given buf, and into the destination
+ * BUI format structure.  The BUI/BUD items were designed not to need any
+ * special alignment handling.
+ */
+static int
 xfs_bui_copy_format(
-	struct xfs_bui_log_format	*dst,
-	const struct xfs_bui_log_format	*src)
+	struct xfs_log_iovec		*buf,
+	struct xfs_bui_log_format	*dst_bui_fmt)
 {
-	unsigned int			i;
+	struct xfs_bui_log_format	*src_bui_fmt;
+	uint				len;
 
-	memcpy(dst, src, offsetof(struct xfs_bui_log_format, bui_extents));
+	src_bui_fmt = buf->i_addr;
+	len = xfs_bui_log_format_sizeof(src_bui_fmt->bui_nextents);
 
-	for (i = 0; i < src->bui_nextents; i++)
-		memcpy(&dst->bui_extents[i], &src->bui_extents[i],
-				sizeof(struct xfs_map_extent));
+	if (buf->i_len == len) {
+		memcpy(dst_bui_fmt, src_bui_fmt, len);
+		return 0;
+	}
+	XFS_ERROR_REPORT(__func__, XFS_ERRLEVEL_LOW, NULL);
+	return -EFSCORRUPTED;
 }
 
 /*
@@ -618,31 +616,23 @@ xlog_recover_bui_commit_pass2(
 	struct xlog_recover_item	*item,
 	xfs_lsn_t			lsn)
 {
+	int				error;
 	struct xfs_mount		*mp = log->l_mp;
 	struct xfs_bui_log_item		*buip;
 	struct xfs_bui_log_format	*bui_formatp;
-	size_t				len;
 
 	bui_formatp = item->ri_buf[0].i_addr;
-
-	if (item->ri_buf[0].i_len < xfs_bui_log_format_sizeof(0)) {
-		XFS_ERROR_REPORT(__func__, XFS_ERRLEVEL_LOW, log->l_mp);
-		return -EFSCORRUPTED;
-	}
 
 	if (bui_formatp->bui_nextents != XFS_BUI_MAX_FAST_EXTENTS) {
 		XFS_ERROR_REPORT(__func__, XFS_ERRLEVEL_LOW, log->l_mp);
 		return -EFSCORRUPTED;
 	}
-
-	len = xfs_bui_log_format_sizeof(bui_formatp->bui_nextents);
-	if (item->ri_buf[0].i_len != len) {
-		XFS_ERROR_REPORT(__func__, XFS_ERRLEVEL_LOW, log->l_mp);
-		return -EFSCORRUPTED;
-	}
-
 	buip = xfs_bui_init(mp);
-	xfs_bui_copy_format(&buip->bui_format, bui_formatp);
+	error = xfs_bui_copy_format(&item->ri_buf[0], &buip->bui_format);
+	if (error) {
+		xfs_bui_item_free(buip);
+		return error;
+	}
 	atomic_set(&buip->bui_next_extent, bui_formatp->bui_nextents);
 	/*
 	 * Insert the intent into the AIL directly and drop one reference so

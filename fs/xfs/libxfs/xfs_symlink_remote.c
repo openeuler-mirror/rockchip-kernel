@@ -42,7 +42,7 @@ xfs_symlink_hdr_set(
 {
 	struct xfs_dsymlink_hdr	*dsl = bp->b_addr;
 
-	if (!xfs_has_crc(mp))
+	if (!xfs_sb_version_hascrc(&mp->m_sb))
 		return 0;
 
 	memset(dsl, 0, sizeof(struct xfs_dsymlink_hdr));
@@ -89,7 +89,7 @@ xfs_symlink_verify(
 	struct xfs_mount	*mp = bp->b_mount;
 	struct xfs_dsymlink_hdr	*dsl = bp->b_addr;
 
-	if (!xfs_has_crc(mp))
+	if (!xfs_sb_version_hascrc(&mp->m_sb))
 		return __this_address;
 	if (!xfs_verify_magic(bp, dsl->sl_magic))
 		return __this_address;
@@ -116,7 +116,7 @@ xfs_symlink_read_verify(
 	xfs_failaddr_t	fa;
 
 	/* no verification of non-crc buffers */
-	if (!xfs_has_crc(mp))
+	if (!xfs_sb_version_hascrc(&mp->m_sb))
 		return;
 
 	if (!xfs_buf_verify_cksum(bp, XFS_SYMLINK_CRC_OFF))
@@ -137,7 +137,7 @@ xfs_symlink_write_verify(
 	xfs_failaddr_t		fa;
 
 	/* no verification of non-crc buffers */
-	if (!xfs_has_crc(mp))
+	if (!xfs_sb_version_hascrc(&mp->m_sb))
 		return;
 
 	fa = xfs_symlink_verify(bp);
@@ -173,7 +173,7 @@ xfs_symlink_local_to_remote(
 
 	xfs_trans_buf_set_type(tp, bp, XFS_BLFT_SYMLINK_BUF);
 
-	if (!xfs_has_crc(mp)) {
+	if (!xfs_sb_version_hascrc(&mp->m_sb)) {
 		bp->b_ops = NULL;
 		memcpy(bp->b_addr, ifp->if_u1.if_data, ifp->if_bytes);
 		xfs_trans_log_buf(tp, bp, 0, ifp->if_bytes - 1);
@@ -204,7 +204,7 @@ xfs_failaddr_t
 xfs_symlink_shortform_verify(
 	struct xfs_inode	*ip)
 {
-	struct xfs_ifork	*ifp = xfs_ifork_ptr(ip, XFS_DATA_FORK);
+	struct xfs_ifork	*ifp = XFS_IFORK_PTR(ip, XFS_DATA_FORK);
 	char			*sfp = (char *)ifp->if_u1.if_data;
 	int			size = ifp->if_bytes;
 	char			*endp = sfp + size;

@@ -21,7 +21,6 @@
 #include "xfs_trans_space.h"
 #include "xfs_trace.h"
 #include "xfs_trans.h"
-#include "xfs_error.h"
 
 /* ----- Kernel only functions below ----- */
 int
@@ -63,7 +62,7 @@ xfs_readlink_bmap_ilocked(
 			byte_cnt = pathlen;
 
 		cur_chunk = bp->b_addr;
-		if (xfs_has_crc(mp)) {
+		if (xfs_sb_version_hascrc(&mp->m_sb)) {
 			if (!xfs_symlink_hdr_ok(ip->i_ino, offset,
 							byte_cnt, bp)) {
 				error = -EFSCORRUPTED;
@@ -96,16 +95,18 @@ xfs_readlink_bmap_ilocked(
 
 int
 xfs_readlink(
-	struct xfs_inode	*ip,
-	char			*link)
+	struct xfs_inode *ip,
+	char		*link)
 {
-	struct xfs_mount	*mp = ip->i_mount;
-	xfs_fsize_t		pathlen;
-	int			error = -EFSCORRUPTED;
+	struct xfs_mount *mp = ip->i_mount;
+	xfs_fsize_t	pathlen;
+	int		error = 0;
 
 	trace_xfs_readlink(ip);
 
-	if (xfs_is_shutdown(mp))
+	ASSERT(!(ip->i_df.if_flags & XFS_IFINLINE));
+
+	if (XFS_FORCED_SHUTDOWN(mp))
 		return -EIO;
 
 	xfs_ilock(ip, XFS_ILOCK_SHARED);
@@ -119,22 +120,12 @@ xfs_readlink(
 			 __func__, (unsigned long long) ip->i_ino,
 			 (long long) pathlen);
 		ASSERT(0);
+		error = -EFSCORRUPTED;
 		goto out;
 	}
 
-	if (ip->i_df.if_format == XFS_DINODE_FMT_LOCAL) {
-		/*
-		 * The VFS crashes on a NULL pointer, so return -EFSCORRUPTED
-		 * if if_data is junk.
-		 */
-		if (XFS_IS_CORRUPT(ip->i_mount, !ip->i_df.if_u1.if_data))
-			goto out;
 
-		memcpy(link, ip->i_df.if_u1.if_data, pathlen + 1);
-		error = 0;
-	} else {
-		error = xfs_readlink_bmap_ilocked(ip, link);
-	}
+	error = xfs_readlink_bmap_ilocked(ip, link);
 
  out:
 	xfs_iunlock(ip, XFS_ILOCK_SHARED);
@@ -174,7 +165,7 @@ xfs_symlink(
 
 	trace_xfs_symlink(dp, link_name);
 
-	if (xfs_is_shutdown(mp))
+	if (XFS_FORCED_SHUTDOWN(mp))
 		return -EIO;
 
 	/*
@@ -206,10 +197,9 @@ xfs_symlink(
 		fs_blocks = xfs_symlink_blocks(mp, pathlen);
 	resblks = XFS_SYMLINK_SPACE_RES(mp, link_name->len, fs_blocks);
 
-	error = xfs_trans_alloc_icreate(mp, &M_RES(mp)->tr_symlink, udqp, gdqp,
-			pdqp, resblks, &tp);
+	error = xfs_trans_alloc(mp, &M_RES(mp)->tr_symlink, resblks, 0, 0, &tp);
 	if (error)
-		goto out_release_dquots;
+		goto out_release_inode;
 
 	xfs_ilock(dp, XFS_ILOCK_EXCL | XFS_ILOCK_PARENT);
 	unlock_dp_on_error = true;
@@ -222,8 +212,11 @@ xfs_symlink(
 		goto out_trans_cancel;
 	}
 
-	error = xfs_iext_count_may_overflow(dp, XFS_DATA_FORK,
-			XFS_IEXT_DIR_MANIP_CNT(mp));
+	/*
+	 * Reserve disk quota : blocks and inode.
+	 */
+	error = xfs_trans_reserve_quota(tp, mp, udqp, gdqp,
+						pdqp, resblks, 1, 0);
 	if (error)
 		goto out_trans_cancel;
 
@@ -254,7 +247,7 @@ xfs_symlink(
 	/*
 	 * If the symlink will fit into the inode, write it inline.
 	 */
-	if (pathlen <= xfs_inode_data_fork_size(ip)) {
+	if (pathlen <= XFS_IFORK_DSIZE(ip)) {
 		xfs_init_local_fork(ip, XFS_DATA_FORK, target_path, pathlen);
 
 		ip->i_d.di_size = pathlen;
@@ -307,7 +300,6 @@ xfs_symlink(
 		}
 		ASSERT(pathlen == 0);
 	}
-	i_size_write(VFS_I(ip), ip->i_d.di_size);
 
 	/*
 	 * Create the directory entry for the symlink.
@@ -323,8 +315,9 @@ xfs_symlink(
 	 * symlink transaction goes to disk before returning to
 	 * the user.
 	 */
-	if (xfs_has_wsync(mp) || xfs_has_dirsync(mp))
+	if (mp->m_flags & (XFS_MOUNT_WSYNC|XFS_MOUNT_DIRSYNC)) {
 		xfs_trans_set_sync(tp);
+	}
 
 	error = xfs_trans_commit(tp);
 	if (error)
@@ -349,7 +342,7 @@ out_release_inode:
 		xfs_finish_inode_setup(ip);
 		xfs_irele(ip);
 	}
-out_release_dquots:
+
 	xfs_qm_dqrele(udqp);
 	xfs_qm_dqrele(gdqp);
 	xfs_qm_dqrele(pdqp);
@@ -446,7 +439,7 @@ xfs_inactive_symlink_rmt(
 	xfs_trans_log_inode(tp, ip, XFS_ILOG_CORE);
 	error = xfs_trans_commit(tp);
 	if (error) {
-		ASSERT(xfs_is_shutdown(mp));
+		ASSERT(XFS_FORCED_SHUTDOWN(mp));
 		goto error_unlock;
 	}
 
@@ -479,7 +472,7 @@ xfs_inactive_symlink(
 
 	trace_xfs_inactive_symlink(ip);
 
-	if (xfs_is_shutdown(mp))
+	if (XFS_FORCED_SHUTDOWN(mp))
 		return -EIO;
 
 	xfs_ilock(ip, XFS_ILOCK_EXCL);

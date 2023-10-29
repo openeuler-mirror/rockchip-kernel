@@ -81,9 +81,6 @@ struct xfs_iwalk_ag {
 
 	/* Skip empty inobt records? */
 	unsigned int			skip_empty:1;
-
-	/* Drop the (hopefully empty) transaction when calling iwalk_fn. */
-	unsigned int			drop_trans:1;
 };
 
 /*
@@ -354,6 +351,7 @@ xfs_iwalk_run_callbacks(
 	int				*has_more)
 {
 	struct xfs_mount		*mp = iwag->mp;
+	struct xfs_trans		*tp = iwag->tp;
 	struct xfs_inobt_rec_incore	*irec;
 	xfs_agino_t			next_agino;
 	int				error;
@@ -363,14 +361,9 @@ xfs_iwalk_run_callbacks(
 	ASSERT(iwag->nr_recs > 0);
 
 	/* Delete cursor but remember the last record we cached... */
-	xfs_iwalk_del_inobt(iwag->tp, curpp, agi_bpp, 0);
+	xfs_iwalk_del_inobt(tp, curpp, agi_bpp, 0);
 	irec = &iwag->recs[iwag->nr_recs - 1];
-	ASSERT(next_agino >= irec->ir_startino + XFS_INODES_PER_CHUNK);
-
-	if (iwag->drop_trans) {
-		xfs_trans_cancel(iwag->tp);
-		iwag->tp = NULL;
-	}
+	ASSERT(next_agino == irec->ir_startino + XFS_INODES_PER_CHUNK);
 
 	error = xfs_iwalk_ag_recs(iwag);
 	if (error)
@@ -382,15 +375,8 @@ xfs_iwalk_run_callbacks(
 	if (!has_more)
 		return 0;
 
-	if (iwag->drop_trans) {
-		error = xfs_trans_alloc_empty(mp, &iwag->tp);
-		if (error)
-			return error;
-	}
-
 	/* ...and recreate the cursor just past where we left off. */
-	error = xfs_inobt_cur(mp, iwag->tp, agno, XFS_BTNUM_INO, curpp,
-			agi_bpp);
+	error = xfs_inobt_cur(mp, tp, agno, XFS_BTNUM_INO, curpp, agi_bpp);
 	if (error)
 		return error;
 
@@ -403,6 +389,7 @@ xfs_iwalk_ag(
 	struct xfs_iwalk_ag		*iwag)
 {
 	struct xfs_mount		*mp = iwag->mp;
+	struct xfs_trans		*tp = iwag->tp;
 	struct xfs_buf			*agi_bp = NULL;
 	struct xfs_btree_cur		*cur = NULL;
 	xfs_agnumber_t			agno;
@@ -482,7 +469,7 @@ xfs_iwalk_ag(
 	error = xfs_iwalk_run_callbacks(iwag, agno, &cur, &agi_bp, &has_more);
 
 out:
-	xfs_iwalk_del_inobt(iwag->tp, &cur, &agi_bp, error);
+	xfs_iwalk_del_inobt(tp, &cur, &agi_bp, error);
 	return error;
 }
 
@@ -607,18 +594,8 @@ xfs_iwalk_ag_work(
 	error = xfs_iwalk_alloc(iwag);
 	if (error)
 		goto out;
-	/*
-	 * Grab an empty transaction so that we can use its recursive buffer
-	 * locking abilities to detect cycles in the inobt without deadlocking.
-	 */
-	error = xfs_trans_alloc_empty(mp, &iwag->tp);
-	if (error)
-		goto out;
-	iwag->drop_trans = 1;
 
 	error = xfs_iwalk_ag(iwag);
-	if (iwag->tp)
-		xfs_trans_cancel(iwag->tp);
 	xfs_iwalk_free(iwag);
 out:
 	kmem_free(iwag);
@@ -641,12 +618,15 @@ xfs_iwalk_threaded(
 {
 	struct xfs_pwork_ctl	pctl;
 	xfs_agnumber_t		agno = XFS_INO_TO_AGNO(mp, startino);
+	unsigned int		nr_threads;
 	int			error;
 
 	ASSERT(agno < mp->m_sb.sb_agcount);
 	ASSERT(!(flags & ~XFS_IWALK_FLAGS_ALL));
 
-	error = xfs_pwork_init(mp, &pctl, xfs_iwalk_ag_work, "xfs_iwalk");
+	nr_threads = xfs_pwork_guess_datadev_parallelism(mp);
+	error = xfs_pwork_init(mp, &pctl, xfs_iwalk_ag_work, "xfs_iwalk",
+			nr_threads);
 	if (error)
 		return error;
 

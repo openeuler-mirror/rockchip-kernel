@@ -136,7 +136,7 @@ xfs_bmbt_to_bmdr(
 	xfs_bmbt_key_t		*tkp;
 	__be64			*tpp;
 
-	if (xfs_has_crc(mp)) {
+	if (xfs_sb_version_hascrc(&mp->m_sb)) {
 		ASSERT(rblock->bb_magic == cpu_to_be32(XFS_BMAP_CRC_MAGIC));
 		ASSERT(uuid_equal(&rblock->bb_u.l.bb_uuid,
 		       &mp->m_sb.sb_meta_uuid));
@@ -282,7 +282,7 @@ xfs_bmbt_free_block(
 	struct xfs_mount	*mp = cur->bc_mp;
 	struct xfs_inode	*ip = cur->bc_ino.ip;
 	struct xfs_trans	*tp = cur->bc_tp;
-	xfs_fsblock_t		fsbno = XFS_DADDR_TO_FSB(mp, xfs_buf_daddr(bp));
+	xfs_fsblock_t		fsbno = XFS_DADDR_TO_FSB(mp, XFS_BUF_ADDR(bp));
 	struct xfs_owner_info	oinfo;
 
 	xfs_rmap_ino_bmbt_owner(&oinfo, ip->i_ino, cur->bc_ino.whichfork);
@@ -302,7 +302,7 @@ xfs_bmbt_get_minrecs(
 	if (level == cur->bc_nlevels - 1) {
 		struct xfs_ifork	*ifp;
 
-		ifp = xfs_ifork_ptr(cur->bc_ino.ip,
+		ifp = XFS_IFORK_PTR(cur->bc_ino.ip,
 				    cur->bc_ino.whichfork);
 
 		return xfs_bmbt_maxrecs(cur->bc_mp,
@@ -320,7 +320,7 @@ xfs_bmbt_get_maxrecs(
 	if (level == cur->bc_nlevels - 1) {
 		struct xfs_ifork	*ifp;
 
-		ifp = xfs_ifork_ptr(cur->bc_ino.ip,
+		ifp = XFS_IFORK_PTR(cur->bc_ino.ip,
 				    cur->bc_ino.whichfork);
 
 		return xfs_bmbt_maxrecs(cur->bc_mp,
@@ -428,7 +428,7 @@ xfs_bmbt_verify(
 	if (!xfs_verify_magic(bp, block->bb_magic))
 		return __this_address;
 
-	if (xfs_has_crc(mp)) {
+	if (xfs_sb_version_hascrc(&mp->m_sb)) {
 		/*
 		 * XXX: need a better way of verifying the owner here. Right now
 		 * just make sure there has been one set.
@@ -548,7 +548,7 @@ xfs_bmbt_init_cursor(
 	struct xfs_inode	*ip,		/* inode owning the btree */
 	int			whichfork)	/* data or attr fork */
 {
-	struct xfs_ifork	*ifp = xfs_ifork_ptr(ip, whichfork);
+	struct xfs_ifork	*ifp = XFS_IFORK_PTR(ip, whichfork);
 	struct xfs_btree_cur	*cur;
 	ASSERT(whichfork != XFS_COW_FORK);
 
@@ -563,10 +563,10 @@ xfs_bmbt_init_cursor(
 
 	cur->bc_ops = &xfs_bmbt_ops;
 	cur->bc_flags = XFS_BTREE_LONG_PTRS | XFS_BTREE_ROOT_IN_INODE;
-	if (xfs_has_crc(mp))
+	if (xfs_sb_version_hascrc(&mp->m_sb))
 		cur->bc_flags |= XFS_BTREE_CRC_BLOCKS;
 
-	cur->bc_ino.forksize = xfs_inode_fork_size(ip, whichfork);
+	cur->bc_ino.forksize = XFS_IFORK_SIZE(ip, whichfork);
 	cur->bc_ino.ip = ip;
 	cur->bc_ino.allocated = 0;
 	cur->bc_ino.flags = 0;
@@ -636,7 +636,7 @@ xfs_bmbt_change_owner(
 
 	ASSERT(tp || buffer_list);
 	ASSERT(!(tp && buffer_list));
-	ASSERT(xfs_ifork_ptr(ip, whichfork)->if_format == XFS_DINODE_FMT_BTREE);
+	ASSERT(XFS_IFORK_PTR(ip, whichfork)->if_format == XFS_DINODE_FMT_BTREE);
 
 	cur = xfs_bmbt_init_cursor(ip->i_mount, tp, ip, whichfork);
 	if (!cur)

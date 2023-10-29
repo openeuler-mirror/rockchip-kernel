@@ -371,7 +371,7 @@ int
 xfs_ioc_attr_list(
 	struct xfs_inode		*dp,
 	void __user			*ubuf,
-	size_t				bufsize,
+	int				bufsize,
 	int				flags,
 	struct xfs_attrlist_cursor __user *ucursor)
 {
@@ -557,7 +557,7 @@ xfs_ioc_attrmulti_one(
 	case ATTR_OP_REMOVE:
 		value = NULL;
 		*len = 0;
-		fallthrough;
+		/* fall through */
 	case ATTR_OP_SET:
 		error = mnt_want_write_file(parfilp);
 		if (error)
@@ -686,8 +686,7 @@ xfs_ioc_space(
 
 	if (bf->l_start > XFS_ISIZE(ip)) {
 		error = xfs_alloc_file_space(ip, XFS_ISIZE(ip),
-				bf->l_start - XFS_ISIZE(ip),
-				XFS_BMAPI_PREALLOC);
+				bf->l_start - XFS_ISIZE(ip), 0);
 		if (error)
 			goto out_unlock;
 	}
@@ -753,7 +752,7 @@ xfs_ioc_fsbulkstat(
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
 
-	if (xfs_is_shutdown(mp))
+	if (XFS_FORCED_SHUTDOWN(mp))
 		return -EIO;
 
 	if (copy_from_user(&bulkreq, arg, sizeof(struct xfs_fsop_bulkreq)))
@@ -830,7 +829,7 @@ xfs_bulkstat_fmt(
 static int
 xfs_bulk_ireq_setup(
 	struct xfs_mount	*mp,
-	const struct xfs_bulk_ireq *hdr,
+	struct xfs_bulk_ireq	*hdr,
 	struct xfs_ibulk	*breq,
 	void __user		*ubuffer)
 {
@@ -856,7 +855,7 @@ xfs_bulk_ireq_setup(
 
 		switch (hdr->ino) {
 		case XFS_BULK_IREQ_SPECIAL_ROOT:
-			breq->startino = mp->m_sb.sb_rootino;
+			hdr->ino = mp->m_sb.sb_rootino;
 			break;
 		default:
 			return -EINVAL;
@@ -922,7 +921,7 @@ xfs_ioc_bulkstat(
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
 
-	if (xfs_is_shutdown(mp))
+	if (XFS_FORCED_SHUTDOWN(mp))
 		return -EIO;
 
 	if (copy_from_user(&hdr, &arg->hdr, sizeof(hdr)))
@@ -972,7 +971,7 @@ xfs_ioc_inumbers(
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
 
-	if (xfs_is_shutdown(mp))
+	if (XFS_FORCED_SHUTDOWN(mp))
 		return -EIO;
 
 	if (copy_from_user(&hdr, &arg->hdr, sizeof(hdr)))
@@ -1005,7 +1004,7 @@ xfs_ioc_fsgeometry(
 	struct xfs_fsop_geom	fsgeo;
 	size_t			len;
 
-	xfs_fs_geometry(mp, &fsgeo, struct_version);
+	xfs_fs_geometry(&mp->m_sb, &fsgeo, struct_version);
 
 	if (struct_version <= 3)
 		len = sizeof(struct xfs_fsop_geom_v1);
@@ -1113,7 +1112,7 @@ xfs_fill_fsxattr(
 	bool			attr,
 	struct fsxattr		*fa)
 {
-	struct xfs_ifork	*ifp = attr ? &ip->i_af : &ip->i_df;
+	struct xfs_ifork	*ifp = attr ? ip->i_afp : &ip->i_df;
 
 	simple_fill_fsxattr(fa, xfs_ip2xflags(ip));
 	fa->fsx_extsize = ip->i_d.di_extsize << ip->i_mount->m_sb.sb_blocklog;
@@ -1233,7 +1232,7 @@ xfs_ioctl_setattr_xflags(
 
 	/* diflags2 only valid for v3 inodes. */
 	di_flags2 = xfs_flags2diflags2(ip, fa->fsx_xflags);
-	if (di_flags2 && !xfs_has_v3inodes(mp))
+	if (di_flags2 && !xfs_sb_version_has_v3inode(&mp->m_sb))
 		return -EINVAL;
 
 	ip->i_d.di_flags = xfs_flags2diflags(ip, fa->fsx_xflags);
@@ -1257,7 +1256,8 @@ xfs_ioctl_setattr_prepare_dax(
 	if (S_ISDIR(inode->i_mode))
 		return;
 
-	if (xfs_has_dax_always(mp) || xfs_has_dax_never(mp))
+	if ((mp->m_flags & XFS_MOUNT_DAX_ALWAYS) ||
+	    (mp->m_flags & XFS_MOUNT_DAX_NEVER))
 		return;
 
 	if (((fa->fsx_xflags & FS_XFLAG_DAX) &&
@@ -1275,23 +1275,24 @@ xfs_ioctl_setattr_prepare_dax(
  */
 static struct xfs_trans *
 xfs_ioctl_setattr_get_trans(
-	struct xfs_inode	*ip,
-	struct xfs_dquot	*pdqp)
+	struct xfs_inode	*ip)
 {
 	struct xfs_mount	*mp = ip->i_mount;
 	struct xfs_trans	*tp;
 	int			error = -EROFS;
 
-	if (xfs_is_readonly(mp))
-		goto out_error;
+	if (mp->m_flags & XFS_MOUNT_RDONLY)
+		goto out_unlock;
 	error = -EIO;
-	if (xfs_is_shutdown(mp))
-		goto out_error;
+	if (XFS_FORCED_SHUTDOWN(mp))
+		goto out_unlock;
 
-	error = xfs_trans_alloc_ichange(ip, NULL, NULL, pdqp,
-			has_capability_noaudit(current, CAP_FOWNER), &tp);
+	error = xfs_trans_alloc(mp, &M_RES(mp)->tr_ichange, 0, 0, 0, &tp);
 	if (error)
-		goto out_error;
+		goto out_unlock;
+
+	xfs_ilock(ip, XFS_ILOCK_EXCL);
+	xfs_trans_ijoin(tp, ip, XFS_ILOCK_EXCL);
 
 	/*
 	 * CAP_FOWNER overrides the following restrictions:
@@ -1304,14 +1305,14 @@ xfs_ioctl_setattr_get_trans(
 		goto out_cancel;
 	}
 
-	if (xfs_has_wsync(mp))
+	if (mp->m_flags & XFS_MOUNT_WSYNC)
 		xfs_trans_set_sync(tp);
 
 	return tp;
 
 out_cancel:
 	xfs_trans_cancel(tp);
-out_error:
+out_unlock:
 	return ERR_PTR(error);
 }
 
@@ -1393,7 +1394,7 @@ xfs_ioctl_setattr_check_cowextsize(
 	if (!(fa->fsx_xflags & FS_XFLAG_COWEXTSIZE))
 		return 0;
 
-	if (!xfs_has_reflink(mp))
+	if (!xfs_sb_version_hasreflink(&ip->i_mount->m_sb))
 		return -EINVAL;
 
 	if (fa->fsx_cowextsize == 0)
@@ -1418,9 +1419,9 @@ xfs_ioctl_setattr_check_projid(
 	struct xfs_inode	*ip,
 	struct fsxattr		*fa)
 {
-	/* Disallow 32bit project ids if 32bit IDs are not enabled. */
+	/* Disallow 32bit project ids if projid32bit feature is not enabled. */
 	if (fa->fsx_projid > (uint16_t)-1 &&
-	    !xfs_has_projid32(ip->i_mount))
+	    !xfs_sb_version_hasprojid32bit(&ip->i_mount->m_sb))
 		return -EINVAL;
 	return 0;
 }
@@ -1435,13 +1436,13 @@ xfs_ioctl_setattr(
 	struct xfs_trans	*tp;
 	struct xfs_dquot	*pdqp = NULL;
 	struct xfs_dquot	*olddquot = NULL;
-	int			error;
+	int			code;
 
 	trace_xfs_ioctl_setattr(ip);
 
-	error = xfs_ioctl_setattr_check_projid(ip, fa);
-	if (error)
-		return error;
+	code = xfs_ioctl_setattr_check_projid(ip, fa);
+	if (code)
+		return code;
 
 	/*
 	 * If disk quotas is on, we make sure that the dquots do exist on disk,
@@ -1452,36 +1453,44 @@ xfs_ioctl_setattr(
 	 * because the i_*dquot fields will get updated anyway.
 	 */
 	if (XFS_IS_QUOTA_ON(mp)) {
-		error = xfs_qm_vop_dqalloc(ip, VFS_I(ip)->i_uid,
+		code = xfs_qm_vop_dqalloc(ip, VFS_I(ip)->i_uid,
 				VFS_I(ip)->i_gid, fa->fsx_projid,
 				XFS_QMOPT_PQUOTA, NULL, NULL, &pdqp);
-		if (error)
-			return error;
+		if (code)
+			return code;
 	}
 
 	xfs_ioctl_setattr_prepare_dax(ip, fa);
 
-	tp = xfs_ioctl_setattr_get_trans(ip, pdqp);
+	tp = xfs_ioctl_setattr_get_trans(ip);
 	if (IS_ERR(tp)) {
-		error = PTR_ERR(tp);
+		code = PTR_ERR(tp);
 		goto error_free_dquots;
 	}
 
+	if (XFS_IS_QUOTA_RUNNING(mp) && XFS_IS_PQUOTA_ON(mp) &&
+	    ip->i_d.di_projid != fa->fsx_projid) {
+		code = xfs_qm_vop_chown_reserve(tp, ip, NULL, NULL, pdqp,
+				capable(CAP_FOWNER) ?  XFS_QMOPT_FORCE_RES : 0);
+		if (code)	/* out of quota */
+			goto error_trans_cancel;
+	}
+
 	xfs_fill_fsxattr(ip, false, &old_fa);
-	error = vfs_ioc_fssetxattr_check(VFS_I(ip), &old_fa, fa);
-	if (error)
+	code = vfs_ioc_fssetxattr_check(VFS_I(ip), &old_fa, fa);
+	if (code)
 		goto error_trans_cancel;
 
-	error = xfs_ioctl_setattr_check_extsize(ip, fa);
-	if (error)
+	code = xfs_ioctl_setattr_check_extsize(ip, fa);
+	if (code)
 		goto error_trans_cancel;
 
-	error = xfs_ioctl_setattr_check_cowextsize(ip, fa);
-	if (error)
+	code = xfs_ioctl_setattr_check_cowextsize(ip, fa);
+	if (code)
 		goto error_trans_cancel;
 
-	error = xfs_ioctl_setattr_xflags(tp, ip, fa);
-	if (error)
+	code = xfs_ioctl_setattr_xflags(tp, ip, fa);
+	if (code)
 		goto error_trans_cancel;
 
 	/*
@@ -1498,7 +1507,7 @@ xfs_ioctl_setattr(
 
 	/* Change the ownerships and register project quota modifications */
 	if (ip->i_d.di_projid != fa->fsx_projid) {
-		if (XFS_IS_PQUOTA_ON(mp)) {
+		if (XFS_IS_QUOTA_RUNNING(mp) && XFS_IS_PQUOTA_ON(mp)) {
 			olddquot = xfs_qm_vop_chown(tp, ip,
 						&ip->i_pdquot, pdqp);
 		}
@@ -1514,14 +1523,14 @@ xfs_ioctl_setattr(
 		ip->i_d.di_extsize = fa->fsx_extsize >> mp->m_sb.sb_blocklog;
 	else
 		ip->i_d.di_extsize = 0;
-	if (xfs_has_v3inodes(mp) &&
+	if (xfs_sb_version_has_v3inode(&mp->m_sb) &&
 	    (ip->i_d.di_flags2 & XFS_DIFLAG2_COWEXTSIZE))
 		ip->i_d.di_cowextsize = fa->fsx_cowextsize >>
 				mp->m_sb.sb_blocklog;
 	else
 		ip->i_d.di_cowextsize = 0;
 
-	error = xfs_trans_commit(tp);
+	code = xfs_trans_commit(tp);
 
 	/*
 	 * Release any dquot(s) the inode had kept before chown.
@@ -1529,13 +1538,13 @@ xfs_ioctl_setattr(
 	xfs_qm_dqrele(olddquot);
 	xfs_qm_dqrele(pdqp);
 
-	return error;
+	return code;
 
 error_trans_cancel:
 	xfs_trans_cancel(tp);
 error_free_dquots:
 	xfs_qm_dqrele(pdqp);
-	return error;
+	return code;
 }
 
 STATIC int
@@ -1599,7 +1608,7 @@ xfs_ioc_setxflags(
 
 	xfs_ioctl_setattr_prepare_dax(ip, &fa);
 
-	tp = xfs_ioctl_setattr_get_trans(ip, NULL);
+	tp = xfs_ioctl_setattr_get_trans(ip);
 	if (IS_ERR(tp)) {
 		error = PTR_ERR(tp);
 		goto out_drop_write;
@@ -1660,7 +1669,7 @@ xfs_ioc_getbmap(
 	switch (cmd) {
 	case XFS_IOC_GETBMAPA:
 		bmx.bmv_iflags = BMV_IF_ATTRFORK;
-		fallthrough;
+		/*FALLTHRU*/
 	case XFS_IOC_GETBMAP:
 		if (file->f_mode & FMODE_NOCMTIME)
 			bmx.bmv_iflags |= BMV_IF_NO_DMAPI_READ;
@@ -1679,7 +1688,7 @@ xfs_ioc_getbmap(
 
 	if (bmx.bmv_count < 2)
 		return -EINVAL;
-	if (bmx.bmv_count >= INT_MAX / recsize)
+	if (bmx.bmv_count > ULONG_MAX / recsize)
 		return -ENOMEM;
 
 	buf = kvzalloc(bmx.bmv_count * sizeof(*buf), GFP_KERNEL);
@@ -1839,7 +1848,7 @@ out_free:
 
 STATIC int
 xfs_ioc_scrub_metadata(
-	struct file			*file,
+	struct xfs_inode		*ip,
 	void				__user *arg)
 {
 	struct xfs_scrub_metadata	scrub;
@@ -1851,7 +1860,7 @@ xfs_ioc_scrub_metadata(
 	if (copy_from_user(&scrub, arg, sizeof(scrub)))
 		return -EFAULT;
 
-	error = xfs_scrub_metadata(file, &scrub);
+	error = xfs_scrub_metadata(ip, &scrub);
 	if (error)
 		return error;
 
@@ -1926,7 +1935,7 @@ xfs_ioc_swapext(
 		goto out_put_tmp_file;
 	}
 
-	if (xfs_is_shutdown(ip->i_mount)) {
+	if (XFS_FORCED_SHUTDOWN(ip->i_mount)) {
 		error = -EIO;
 		goto out_put_tmp_file;
 	}
@@ -2026,7 +2035,7 @@ out:
 static inline int
 xfs_fs_eofblocks_from_user(
 	struct xfs_fs_eofblocks		*src,
-	struct xfs_icwalk		*dst)
+	struct xfs_eofblocks		*dst)
 {
 	if (src->eof_version != XFS_EOFBLOCKS_VERSION)
 		return -EINVAL;
@@ -2038,32 +2047,21 @@ xfs_fs_eofblocks_from_user(
 	    memchr_inv(src->pad64, 0, sizeof(src->pad64)))
 		return -EINVAL;
 
-	dst->icw_flags = 0;
-	if (src->eof_flags & XFS_EOF_FLAGS_SYNC)
-		dst->icw_flags |= XFS_ICWALK_FLAG_SYNC;
-	if (src->eof_flags & XFS_EOF_FLAGS_UID)
-		dst->icw_flags |= XFS_ICWALK_FLAG_UID;
-	if (src->eof_flags & XFS_EOF_FLAGS_GID)
-		dst->icw_flags |= XFS_ICWALK_FLAG_GID;
-	if (src->eof_flags & XFS_EOF_FLAGS_PRID)
-		dst->icw_flags |= XFS_ICWALK_FLAG_PRID;
-	if (src->eof_flags & XFS_EOF_FLAGS_MINFILESIZE)
-		dst->icw_flags |= XFS_ICWALK_FLAG_MINFILESIZE;
+	dst->eof_flags = src->eof_flags;
+	dst->eof_prid = src->eof_prid;
+	dst->eof_min_file_size = src->eof_min_file_size;
 
-	dst->icw_prid = src->eof_prid;
-	dst->icw_min_file_size = src->eof_min_file_size;
-
-	dst->icw_uid = INVALID_UID;
+	dst->eof_uid = INVALID_UID;
 	if (src->eof_flags & XFS_EOF_FLAGS_UID) {
-		dst->icw_uid = make_kuid(current_user_ns(), src->eof_uid);
-		if (!uid_valid(dst->icw_uid))
+		dst->eof_uid = make_kuid(current_user_ns(), src->eof_uid);
+		if (!uid_valid(dst->eof_uid))
 			return -EINVAL;
 	}
 
-	dst->icw_gid = INVALID_GID;
+	dst->eof_gid = INVALID_GID;
 	if (src->eof_flags & XFS_EOF_FLAGS_GID) {
-		dst->icw_gid = make_kgid(current_user_ns(), src->eof_gid);
-		if (!gid_valid(dst->icw_gid))
+		dst->eof_gid = make_kgid(current_user_ns(), src->eof_gid);
+		if (!gid_valid(dst->eof_gid))
 			return -EINVAL;
 	}
 	return 0;
@@ -2161,7 +2159,7 @@ xfs_file_ioctl(
 		return xfs_ioc_getfsmap(ip, arg);
 
 	case XFS_IOC_SCRUB_METADATA:
-		return xfs_ioc_scrub_metadata(filp, arg);
+		return xfs_ioc_scrub_metadata(ip, arg);
 
 	case XFS_IOC_FD_TO_HANDLE:
 	case XFS_IOC_PATH_TO_HANDLE:
@@ -2223,7 +2221,7 @@ xfs_file_ioctl(
 		if (!capable(CAP_SYS_ADMIN))
 			return -EPERM;
 
-		if (xfs_is_readonly(mp))
+		if (mp->m_flags & XFS_MOUNT_RDONLY)
 			return -EROFS;
 
 		if (copy_from_user(&inout, arg, sizeof(inout)))
@@ -2334,26 +2332,24 @@ xfs_file_ioctl(
 		return xfs_errortag_clearall(mp);
 
 	case XFS_IOC_FREE_EOFBLOCKS: {
-		struct xfs_fs_eofblocks	eofb;
-		struct xfs_icwalk	icw;
+		struct xfs_fs_eofblocks eofb;
+		struct xfs_eofblocks keofb;
 
 		if (!capable(CAP_SYS_ADMIN))
 			return -EPERM;
 
-		if (xfs_is_readonly(mp))
+		if (mp->m_flags & XFS_MOUNT_RDONLY)
 			return -EROFS;
 
 		if (copy_from_user(&eofb, arg, sizeof(eofb)))
 			return -EFAULT;
 
-		error = xfs_fs_eofblocks_from_user(&eofb, &icw);
+		error = xfs_fs_eofblocks_from_user(&eofb, &keofb);
 		if (error)
 			return error;
 
-		trace_xfs_ioc_free_eofblocks(mp, &icw, _RET_IP_);
-
 		sb_start_write(mp->m_super);
-		error = xfs_blockgc_free_space(mp, &icw);
+		error = xfs_icache_free_eofblocks(mp, &keofb);
 		sb_end_write(mp->m_super);
 		return error;
 	}

@@ -24,7 +24,4 @@ extern int xfs_setattr_nonsize(struct xfs_inode *ip, struct iattr *vap,
 extern int xfs_vn_setattr_nonsize(struct dentry *dentry, struct iattr *vap);
 extern int xfs_vn_setattr_size(struct dentry *dentry, struct iattr *vap);
 
-int xfs_inode_init_security(struct inode *inode, struct inode *dir,
-		const struct qstr *qstr);
-
 #endif /* __XFS_IOPS_H__ */

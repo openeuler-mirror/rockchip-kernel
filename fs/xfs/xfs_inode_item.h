@@ -33,7 +33,7 @@ struct xfs_inode_log_item {
 	unsigned int		ili_fields;	   /* fields to be logged */
 	unsigned int		ili_fsync_fields;  /* logged since last fsync */
 	xfs_lsn_t		ili_flush_lsn;	   /* lsn at last flush */
-	xfs_csn_t		ili_commit_seq;	   /* last transaction commit */
+	xfs_lsn_t		ili_last_lsn;	   /* lsn at last transaction */
 };
 
 static inline int xfs_inode_clean(struct xfs_inode *ip)
@@ -44,7 +44,6 @@ static inline int xfs_inode_clean(struct xfs_inode *ip)
 extern void xfs_inode_item_init(struct xfs_inode *, struct xfs_mount *);
 extern void xfs_inode_item_destroy(struct xfs_inode *);
 extern void xfs_iflush_abort(struct xfs_inode *);
-extern void xfs_iflush_shutdown_abort(struct xfs_inode *);
 extern int xfs_inode_item_format_convert(xfs_log_iovec_t *,
 					 struct xfs_inode_log_format *);
 
