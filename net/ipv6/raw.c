@@ -61,30 +61,46 @@
 
 #define	ICMPV6_HDRLEN	4	/* ICMPv6 header, RFC 4443 Section 2.1 */
 
-struct raw_hashinfo_new raw_v6_hashinfo;
+struct raw_hashinfo raw_v6_hashinfo = {
+	.lock = __RW_LOCK_UNLOCKED(raw_v6_hashinfo.lock),
+};
 EXPORT_SYMBOL_GPL(raw_v6_hashinfo);
 
-bool raw_v6_match(struct net *net, struct sock *sk, unsigned short num,
-		  const struct in6_addr *loc_addr,
-		  const struct in6_addr *rmt_addr, int dif, int sdif)
+struct sock *__raw_v6_lookup(struct net *net, struct sock *sk,
+		unsigned short num, const struct in6_addr *loc_addr,
+		const struct in6_addr *rmt_addr, int dif, int sdif)
 {
-	if (inet_sk(sk)->inet_num != num ||
-	    !net_eq(sock_net(sk), net) ||
-	    (!ipv6_addr_any(&sk->sk_v6_daddr) &&
-	     !ipv6_addr_equal(&sk->sk_v6_daddr, rmt_addr)) ||
-	    !raw_sk_bound_dev_eq(net, sk->sk_bound_dev_if,
-				 dif, sdif))
-		return false;
+	bool is_multicast = ipv6_addr_is_multicast(loc_addr);
 
-	if (ipv6_addr_any(&sk->sk_v6_rcv_saddr) ||
-	    ipv6_addr_equal(&sk->sk_v6_rcv_saddr, loc_addr) ||
-	    (ipv6_addr_is_multicast(loc_addr) &&
-	     inet6_mc_check(sk, loc_addr, rmt_addr)))
-		return true;
+	sk_for_each_from(sk)
+		if (inet_sk(sk)->inet_num == num) {
 
-	return false;
+			if (!net_eq(sock_net(sk), net))
+				continue;
+
+			if (!ipv6_addr_any(&sk->sk_v6_daddr) &&
+			    !ipv6_addr_equal(&sk->sk_v6_daddr, rmt_addr))
+				continue;
+
+			if (!raw_sk_bound_dev_eq(net, sk->sk_bound_dev_if,
+						 dif, sdif))
+				continue;
+
+			if (!ipv6_addr_any(&sk->sk_v6_rcv_saddr)) {
+				if (ipv6_addr_equal(&sk->sk_v6_rcv_saddr, loc_addr))
+					goto found;
+				if (is_multicast &&
+				    inet6_mc_check(sk, loc_addr, rmt_addr))
+					goto found;
+				continue;
+			}
+			goto found;
+		}
+	sk = NULL;
+found:
+	return sk;
 }
-EXPORT_SYMBOL_GPL(raw_v6_match);
+EXPORT_SYMBOL_GPL(__raw_v6_lookup);
 
 /*
  *	0 - deliver
@@ -140,27 +156,31 @@ EXPORT_SYMBOL(rawv6_mh_filter_unregister);
  */
 static bool ipv6_raw_deliver(struct sk_buff *skb, int nexthdr)
 {
-	struct net *net = dev_net(skb->dev);
-	struct hlist_nulls_head *hlist;
-	struct hlist_nulls_node *hnode;
 	const struct in6_addr *saddr;
 	const struct in6_addr *daddr;
 	struct sock *sk;
 	bool delivered = false;
 	__u8 hash;
+	struct net *net;
 
 	saddr = &ipv6_hdr(skb)->saddr;
 	daddr = saddr + 1;
 
 	hash = nexthdr & (RAW_HTABLE_SIZE - 1);
-	hlist = &raw_v6_hashinfo.ht[hash];
-	rcu_read_lock();
-	sk_nulls_for_each(sk, hnode, hlist) {
+
+	read_lock(&raw_v6_hashinfo.lock);
+	sk = sk_head(&raw_v6_hashinfo.ht[hash]);
+
+	if (!sk)
+		goto out;
+
+	net = dev_net(skb->dev);
+	sk = __raw_v6_lookup(net, sk, nexthdr, daddr, saddr,
+			     inet6_iif(skb), inet6_sdif(skb));
+
+	while (sk) {
 		int filtered;
 
-		if (!raw_v6_match(net, sk, nexthdr, daddr, saddr,
-				  inet6_iif(skb), inet6_sdif(skb)))
-			continue;
 		delivered = true;
 		switch (nexthdr) {
 		case IPPROTO_ICMPV6:
@@ -199,14 +219,23 @@ static bool ipv6_raw_deliver(struct sk_buff *skb, int nexthdr)
 				rawv6_rcv(sk, clone);
 			}
 		}
+		sk = __raw_v6_lookup(net, sk_next(sk), nexthdr, daddr, saddr,
+				     inet6_iif(skb), inet6_sdif(skb));
 	}
-	rcu_read_unlock();
+out:
+	read_unlock(&raw_v6_hashinfo.lock);
 	return delivered;
 }
 
 bool raw6_local_deliver(struct sk_buff *skb, int nexthdr)
 {
-	return ipv6_raw_deliver(skb, nexthdr);
+	struct sock *raw_sk;
+
+	raw_sk = sk_head(&raw_v6_hashinfo.ht[nexthdr & (RAW_HTABLE_SIZE - 1)]);
+	if (raw_sk && !ipv6_raw_deliver(skb, nexthdr))
+		raw_sk = NULL;
+
+	return raw_sk != NULL;
 }
 
 /* This cleans up af_inet6 a bit. -DaveM */
@@ -332,25 +361,30 @@ static void rawv6_err(struct sock *sk, struct sk_buff *skb,
 void raw6_icmp_error(struct sk_buff *skb, int nexthdr,
 		u8 type, u8 code, int inner_offset, __be32 info)
 {
-	struct net *net = dev_net(skb->dev);
-	struct hlist_nulls_head *hlist;
-	struct hlist_nulls_node *hnode;
 	struct sock *sk;
 	int hash;
+	const struct in6_addr *saddr, *daddr;
+	struct net *net;
 
 	hash = nexthdr & (RAW_HTABLE_SIZE - 1);
-	hlist = &raw_v6_hashinfo.ht[hash];
-	rcu_read_lock();
-	sk_nulls_for_each(sk, hnode, hlist) {
+
+	read_lock(&raw_v6_hashinfo.lock);
+	sk = sk_head(&raw_v6_hashinfo.ht[hash]);
+	if (sk) {
 		/* Note: ipv6_hdr(skb) != skb->data */
 		const struct ipv6hdr *ip6h = (const struct ipv6hdr *)skb->data;
+		saddr = &ip6h->saddr;
+		daddr = &ip6h->daddr;
+		net = dev_net(skb->dev);
 
-		if (!raw_v6_match(net, sk, nexthdr, &ip6h->saddr, &ip6h->daddr,
-				  inet6_iif(skb), inet6_iif(skb)))
-			continue;
-		rawv6_err(sk, skb, NULL, type, code, inner_offset, info);
+		while ((sk = __raw_v6_lookup(net, sk, nexthdr, saddr, daddr,
+					     inet6_iif(skb), inet6_iif(skb)))) {
+			rawv6_err(sk, skb, NULL, type, code,
+					inner_offset, info);
+			sk = sk_next(sk);
+		}
 	}
-	rcu_read_unlock();
+	read_unlock(&raw_v6_hashinfo.lock);
 }
 
 static inline int rawv6_rcv_skb(struct sock *sk, struct sk_buff *skb)
@@ -505,7 +539,6 @@ csum_copy_err:
 static int rawv6_push_pending_frames(struct sock *sk, struct flowi6 *fl6,
 				     struct raw6_sock *rp)
 {
-	struct ipv6_txoptions *opt;
 	struct sk_buff *skb;
 	int err = 0;
 	int offset;
@@ -523,9 +556,6 @@ static int rawv6_push_pending_frames(struct sock *sk, struct flowi6 *fl6,
 
 	offset = rp->offset;
 	total_len = inet_sk(sk)->cork.base.length;
-	opt = inet6_sk(sk)->cork.opt;
-	total_len -= opt ? opt->opt_flen : 0;
-
 	if (offset >= total_len - 1) {
 		err = -EINVAL;
 		ip6_flush_pending_frames(sk);
@@ -885,7 +915,7 @@ static int rawv6_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 		fl6.flowi6_oif = np->mcast_oif;
 	else if (!fl6.flowi6_oif)
 		fl6.flowi6_oif = np->ucast_oif;
-	security_sk_classify_flow(sk, flowi6_to_flowi_common(&fl6));
+	security_sk_classify_flow(sk, flowi6_to_flowi(&fl6));
 
 	if (hdrincl)
 		fl6.flowi6_flags |= FLOWI_FLAG_KNOWN_NH;
@@ -989,9 +1019,6 @@ static int do_rawv6_setsockopt(struct sock *sk, int level, int optname,
 {
 	struct raw6_sock *rp = raw6_sk(sk);
 	int val;
-
-	if (optlen < sizeof(val))
-		return -EINVAL;
 
 	if (copy_from_sockptr(&val, optval, sizeof(val)))
 		return -EFAULT;
@@ -1177,6 +1204,8 @@ static void raw6_destroy(struct sock *sk)
 	lock_sock(sk);
 	ip6_flush_pending_frames(sk);
 	release_sock(sk);
+
+	inet6_destroy_sock(sk);
 }
 
 static int rawv6_init_sk(struct sock *sk)
