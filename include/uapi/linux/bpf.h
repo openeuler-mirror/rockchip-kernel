@@ -78,7 +78,7 @@ struct bpf_lpm_trie_key {
 
 struct bpf_cgroup_storage_key {
 	__u64	cgroup_inode_id;	/* cgroup inode id */
-	__u32	attach_type;		/* program attach type (enum bpf_attach_type) */
+	__u32	attach_type;		/* program attach type */
 };
 
 union bpf_iter_link_info {
@@ -199,9 +199,6 @@ enum bpf_prog_type {
 	BPF_PROG_TYPE_EXT,
 	BPF_PROG_TYPE_LSM,
 	BPF_PROG_TYPE_SK_LOOKUP,
-#ifndef __GENKSYMS__
-	BPF_PROG_TYPE_SCHED,
-#endif
 };
 
 enum bpf_attach_type {
@@ -243,9 +240,6 @@ enum bpf_attach_type {
 	BPF_XDP_CPUMAP,
 	BPF_SK_LOOKUP,
 	BPF_XDP,
-#ifndef __GENKSYMS__
-	BPF_SCHED,
-#endif
 	__MAX_BPF_ATTACH_TYPE
 };
 
@@ -1496,8 +1490,8 @@ union bpf_attr {
  * 	Return
  * 		The return value depends on the result of the test, and can be:
  *
- *		* 1, if current task belongs to the cgroup2.
- *		* 0, if current task does not belong to the cgroup2.
+ *		* 0, if current task belongs to the cgroup2.
+ *		* 1, if current task does not belong to the cgroup2.
  * 		* A negative error code, if an error occurred.
  *
  * long bpf_skb_change_tail(struct sk_buff *skb, u32 len, u64 flags)
@@ -2169,8 +2163,8 @@ union bpf_attr {
  *
  * 			# sysctl kernel.perf_event_max_stack=<new value>
  * 	Return
- * 		The non-negative copied *buf* length equal to or less than
- * 		*size* on success, or a negative error in case of failure.
+ * 		A non-negative value equal to or less than *size* on success,
+ * 		or a negative error in case of failure.
  *
  * long bpf_skb_load_bytes_relative(const void *skb, u32 offset, void *to, u32 len, u32 start_header)
  * 	Description
@@ -3454,8 +3448,8 @@ union bpf_attr {
  *
  *			# sysctl kernel.perf_event_max_stack=<new value>
  *	Return
- * 		The non-negative copied *buf* length equal to or less than
- * 		*size* on success, or a negative error in case of failure.
+ *		A non-negative value equal to or less than *size* on success,
+ *		or a negative error in case of failure.
  *
  * long bpf_load_hdr_opt(struct bpf_sock_ops *skops, void *searchby_res, u32 len, u64 flags)
  *	Description
@@ -3748,136 +3742,6 @@ union bpf_attr {
  * 	Return
  * 		The helper returns **TC_ACT_REDIRECT** on success or
  * 		**TC_ACT_SHOT** on error.
- *
- * u64 bpf_get_sockops_uid_gid(void *sockops)
- *     Description
- *             Get sock's uid and gid
- *     Return
- *             A 64-bit integer containing the current GID and UID, and
- *             created as such: *current_gid* **<< 32 \|** *current_uid*.
- *
- * int bpf_sk_original_addr(void *bpf_socket, int optname, char *optval, int optlen)
- *     Description
- *             Get Ipv4 origdst or replysrc. Works with IPv4.
- *     Return
- *             0 on success, or a negative error in case of failure.
- *
- * long bpf_sched_tg_tag_of(struct task_group *tg)
- *	Description
- *		Return task group tag of *tg* if CONFIG_CGROUP_SCHED enabled.
- *		The bpf prog obtains the tags to detect different workloads.
- *	Return
- *		Task group tag, if CONFIG_CGROUP_SCHED enabled, 0 as default tag, or
- *		a negative error in case of failure.
- *
- * long bpf_sched_task_tag_of(struct task_struct *tsk)
- *	Description
- *		Return task tag of *tsk*.The bpf prog obtains the tags to detect
- *		different workloads.
- *	Return
- *		Task tag, if used, 0 as default tag, or a negative error in case of failure.
- *
- * int bpf_sched_set_tg_tag(struct task_group *tg, s64 tag)
- *	Description
- *		Set tag to *tg* and its descendants.
- *	Return
- *		0 on success, or a negative error in case of failure.
- *
- * int bpf_sched_set_task_tag(struct task_struct *tsk, s64 tag)
- *	Description
- *		Set tag to *tsk*.
- *	Return
- *		0 on success, or a negative error in case of failure.
- *
- * int bpf_sched_cpu_stats_of(int cpu, struct bpf_sched_cpu_stats *ctx, int len)
- *	Description
- *		Get multiple types of *cpu* statistics and store in *ctx*.
- *	Return
- *		0 on success, or a negative error in case of failure.
- *
- * long bpf_init_cpu_topology(struct bpf_map *map)
- *	Description
- *		Initializing the cpu topology which used for bpf prog.
- *	Return
- *		0 on success, or a negative error in case of failure.
- *
- * int bpf_get_cpumask_info(struct bpf_map *map, struct bpf_cpumask_info *cpus)
- *	Description
- *		Get system cpus returned in *cpus*.
- *	Return
- *		0 on success, or a negative error in case of failure.
- *
- * long bpf_sched_entity_is_task(struct sched_entity *se)
- *	Description
- *		Checks whether the sched entity is a task.
- *	Return
- *		1 if true, 0 otherwise.
- *
- * struct task_struct *bpf_sched_entity_to_task(struct sched_entity *se)
- *	Description
- *		Return task struct of *se* if se is a task.
- *	Return
- *		Task struct if se is a task, NULL otherwise.
- *
- * struct task_group *bpf_sched_entity_to_tg(struct sched_entity *se)
- *	Description
- *		Return task group of *se* if se is a task group.
- *	Return
- *		Task struct if se is a task group, NULL otherwise.
- *
- * int bpf_cpumask_op(struct cpumask_op_args *op, int len)
- *	Description
- *		A series of cpumask-related operations. Perform different
- *		operations base on *op*->type. User also need fill other
- *		*op* field base on *op*->type. *op*->type is one of them
- *
- *		**CPUMASK_EMPTY**
- *			*(op->arg1) == 0 returned.
- *		**CPUMASK_AND**
- *			*(op->arg1) = *(op->arg2) & *(op->arg3)
- *		**CPUMASK_ANDNOT**
- *			*(op->arg1) = *(op->arg2) & ~*(op->arg3)
- *		**CPUMASK_SUBSET**
- *			*(op->arg1) & ~*(op->arg2) == 0 returned
- *		**CPUMASK_EQUAL**
- *			*(op->arg1) == *(op->arg2) returned
- *		**CPUMASK_TEST_CPU**
- *			test for a cpu *(int)(op->arg1) in *(op->arg2)
- *			returns 1 if *op*->arg1 is set in *op*->arg2, else returns 0
- *		**CPUMASK_COPY**
- *			*(op->arg1) = *(op->arg2), return 0 always
- *		**CPUMASK_WEIGHT**
- *			count of bits in *(op->arg1)
- *		**CPUMASK_NEXT**
- *			get the next cpu in *(struct cpumask *)(op->arg2)
- *			*(int *)(op->arg1): the cpu prior to the place to search
- *		**CPUMASK_NEXT_WRAP**
- *			helper to implement for_each_cpu_wrap
- *			@op->arg1: the cpu prior to the place to search
- *			@op->arg2: the cpumask pointer
- *			@op->arg3: the start point of the iteration
- *			@op->arg4: assume @op->arg1 crossing @op->arg3 terminates the iteration
- *			returns >= nr_cpu_ids on completion
- *		**CPUMASK_NEXT_AND**
- *			get the next cpu in *(op->arg1) & *(op->arg2)
- *		**CPUMASK_CPULIST_PARSE**
- *			extract a cpumask from a user string of ranges.
- *			(char *)op->arg1 -> (struct cpumask *)(op->arg2)
- *			0 on success, or a negative error in case of failure.
- *	Return
- *		View above.
- *
- * int bpf_cpus_share_cache(int src_cpu, int dst_cpu)
- *	Description
- *		check src_cpu whether share cache with dst_cpu.
- *	Return
- *		yes 1, no 0.
- *
- * long bpf_is_local_ipaddr(u32 ipaddr)
- *	Description
- *		Check the ipaddr is local address or not.
- *	Return
- *		1 is local address, 0 is not.
  */
 #define __BPF_FUNC_MAPPER(FN)		\
 	FN(unspec),			\
@@ -4036,21 +3900,6 @@ union bpf_attr {
 	FN(per_cpu_ptr),		\
 	FN(this_cpu_ptr),		\
 	FN(redirect_peer),		\
-	FN(get_sockops_uid_gid),	\
-	FN(sk_original_addr),		\
-	FN(sched_tg_tag_of),		\
-	FN(sched_task_tag_of),		\
-	FN(sched_set_tg_tag),		\
-	FN(sched_set_task_tag),		\
-	FN(sched_cpu_stats_of),		\
-	FN(init_cpu_topology),		\
-	FN(get_cpumask_info),		\
-	FN(sched_entity_is_task),	\
-	FN(sched_entity_to_task),	\
-	FN(sched_entity_to_tg),		\
-	FN(cpumask_op),			\
-	FN(cpus_share_cache),		\
-	FN(is_local_ipaddr),		\
 	/* */
 
 /* integer value in 'imm' field of BPF_CALL instruction selects which helper
@@ -4331,8 +4180,7 @@ struct bpf_sock {
 	__u32 src_ip4;
 	__u32 src_ip6[4];
 	__u32 src_port;		/* host byte order */
-	__be16 dst_port;	/* network byte order */
-	__u16 :16;		/* zero padding */
+	__u32 dst_port;		/* network byte order */
 	__u32 dst_ip4;
 	__u32 dst_ip6[4];
 	__u32 state;
@@ -5158,10 +5006,7 @@ struct bpf_pidns_info {
 
 /* User accessible data for SK_LOOKUP programs. Add new fields at the end. */
 struct bpf_sk_lookup {
-	union {
-		__bpf_md_ptr(struct bpf_sock *, sk); /* Selected socket */
-		__u64 cookie; /* Non-zero if socket was selected in PROG_TEST_RUN */
-	};
+	__bpf_md_ptr(struct bpf_sock *, sk); /* Selected socket */
 
 	__u32 family;		/* Protocol family (AF_INET, AF_INET6) */
 	__u32 protocol;		/* IP protocol (IPPROTO_TCP, IPPROTO_UDP) */

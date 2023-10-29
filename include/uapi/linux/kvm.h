@@ -250,10 +250,6 @@ struct kvm_hyperv_exit {
 #define KVM_EXIT_ARM_NISV         28
 #define KVM_EXIT_X86_RDMSR        29
 #define KVM_EXIT_X86_WRMSR        30
-#define KVM_EXIT_RISCV_SBI        31
-#define KVM_EXIT_X86_BUS_LOCK     33
-#define KVM_EXIT_LOONGARCH_IOCSR  36
-#define KVM_EXIT_NOTIFY           37
 
 /* For KVM_EXIT_INTERNAL_ERROR */
 /* Emulate instruction failed. */
@@ -323,13 +319,6 @@ struct kvm_run {
 			__u32 len;
 			__u8  is_write;
 		} mmio;
-		/* KVM_EXIT_LOONGARCH_IOCSR */
-		struct {
-			__u64 phys_addr;
-			__u8  data[8];
-			__u32 len;
-			__u8  is_write;
-		} iocsr_io;
 		/* KVM_EXIT_HYPERCALL */
 		struct {
 			__u64 nr;
@@ -437,18 +426,6 @@ struct kvm_run {
 			__u32 index; /* kernel -> user */
 			__u64 data; /* kernel <-> user */
 		} msr;
-		/* KVM_EXIT_RISCV_SBI */
-		struct {
-			unsigned long extension_id;
-			unsigned long function_id;
-			unsigned long args[6];
-			unsigned long ret[2];
-		} riscv_sbi;
-		/* KVM_EXIT_NOTIFY */
-		struct {
-#define KVM_NOTIFY_CONTEXT_INVALID	(1 << 0)
-			__u32 flags;
-		} notify;
 		/* Fix the size of the union. */
 		char padding[256];
 	};
@@ -716,16 +693,6 @@ struct kvm_s390_irq_state {
 	__u32 flags;        /* will stay unused for compatibility reasons */
 	__u32 len;
 	__u32 reserved[4];  /* will stay unused for compatibility reasons */
-};
-
-struct kvm_loongarch_vcpu_state {
-	__u8 online_vcpus;
-	__u8 is_migrate;
-	__u32 cpu_freq;
-	__u32 count_ctl;
-	__u64 irq_pending;
-	__u64 irq_clear;
-	__u64 core_ext_ioisr[4];
 };
 
 /* for KVM_SET_GUEST_DEBUG */
@@ -1086,18 +1053,6 @@ struct kvm_ppc_resize_hpt {
 #define KVM_CAP_X86_USER_SPACE_MSR 188
 #define KVM_CAP_X86_MSR_FILTER 189
 #define KVM_CAP_ENFORCE_PV_FEATURE_CPUID 190
-#define KVM_CAP_X86_BUS_LOCK_EXIT 193
-#define KVM_CAP_SGX_ATTRIBUTE 196
-#define KVM_CAP_XSAVE2 208
-#define KVM_CAP_SYS_ATTRIBUTES 209
-#define KVM_CAP_X86_TRIPLE_FAULT_EVENT 218
-#define KVM_CAP_X86_NOTIFY_VMEXIT 219
-
-#define KVM_CAP_ARM_CPU_FEATURE 555
-
-#define KVM_CAP_LOONGARCH_FPU 800
-#define KVM_CAP_LOONGARCH_LSX 801
-#define KVM_CAP_LOONGARCH_VZ 802
 
 #ifdef KVM_CAP_IRQ_ROUTING
 
@@ -1245,7 +1200,6 @@ struct kvm_dirty_tlb {
 #define KVM_REG_ARM64		0x6000000000000000ULL
 #define KVM_REG_MIPS		0x7000000000000000ULL
 #define KVM_REG_RISCV		0x8000000000000000ULL
-#define KVM_REG_LOONGARCH	0x9000000000000000ULL
 
 #define KVM_REG_SIZE_SHIFT	52
 #define KVM_REG_SIZE_MASK	0x00f0000000000000ULL
@@ -1334,17 +1288,6 @@ enum kvm_device_type {
 struct kvm_vfio_spapr_tce {
 	__s32	groupfd;
 	__s32	tablefd;
-};
-
-#define ID_REG_MAX_NUMS 64
-struct id_reg_info {
-	__u64 sys_id;
-	__u64 sys_val;
-};
-
-struct id_registers {
-	struct id_reg_info regs[ID_REG_MAX_NUMS];
-	__u64 num;
 };
 
 /*
@@ -1450,11 +1393,6 @@ struct kvm_s390_ucas_mapping {
 /* Available with KVM_CAP_PMU_EVENT_FILTER */
 #define KVM_SET_PMU_EVENT_FILTER  _IOW(KVMIO,  0xb2, struct kvm_pmu_event_filter)
 #define KVM_PPC_SVM_OFF		  _IO(KVMIO,  0xb3)
-
-/* ioctl for SW vcpu init */
-#define KVM_SW64_VCPU_INIT	  _IO(KVMIO,  0xba)
-#define KVM_SW64_GET_VCB          _IO(KVMIO,  0xbc)
-#define KVM_SW64_SET_VCB          _IO(KVMIO,  0xbd)
 
 /* ioctl for vm fd */
 #define KVM_CREATE_DEVICE	  _IOWR(KVMIO,  0xe0, struct kvm_create_device)
@@ -1582,17 +1520,6 @@ struct kvm_enc_region {
 /* Available with  KVM_CAP_S390_VCPU_RESETS */
 #define KVM_S390_NORMAL_RESET	_IO(KVMIO,   0xc3)
 #define KVM_S390_CLEAR_RESET	_IO(KVMIO,   0xc4)
-
-/* Add for LOONGSON read nodecounter */
-#define KVM_LOONGARCH_GET_VCPU_STATE	_IOR(KVMIO,   0xc0, struct kvm_loongarch_vcpu_state)
-#define KVM_LOONGARCH_SET_VCPU_STATE	_IOW(KVMIO,   0xc1, struct kvm_loongarch_vcpu_state)
-#define KVM_LOONGARCH_GET_CPUCFG	_IOR(KVMIO,   0xc2, struct kvm_cpucfg)
-#define KVM_LOONGARCH_GET_IOCSR		_IOR(KVMIO,   0xc3, struct kvm_iocsr_entry)
-#define KVM_LOONGARCH_SET_IOCSR		_IOW(KVMIO,   0xc4, struct kvm_iocsr_entry)
-#define KVM_LOONGARCH_SET_CPUCFG	_IOR(KVMIO,   0xc5, struct kvm_cpucfg)
-
-/* Available with KVM_CAP_XSAVE2 */
-#define KVM_GET_XSAVE2		  _IOR(KVMIO,  0xcf, struct kvm_xsave)
 
 struct kvm_s390_pv_sec_parm {
 	__u64 origin;
@@ -1782,11 +1709,5 @@ struct kvm_hyperv_eventfd {
 
 #define KVM_DIRTY_LOG_MANUAL_PROTECT_ENABLE    (1 << 0)
 #define KVM_DIRTY_LOG_INITIALLY_SET            (1 << 1)
-
-#define KVM_BUS_LOCK_DETECTION_OFF             (1 << 0)
-#define KVM_BUS_LOCK_DETECTION_EXIT            (1 << 1)
-/* Available with KVM_CAP_X86_NOTIFY_VMEXIT */
-#define KVM_X86_NOTIFY_VMEXIT_ENABLED		(1ULL << 0)
-#define KVM_X86_NOTIFY_VMEXIT_USER			(1ULL << 1)
 
 #endif /* __LINUX_KVM_H */
