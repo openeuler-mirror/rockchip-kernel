@@ -2,7 +2,6 @@
 #ifndef TARGET_CORE_BASE_H
 #define TARGET_CORE_BASE_H
 
-#include <linux/kabi.h>
 #include <linux/configfs.h>      /* struct config_group */
 #include <linux/dma-direction.h> /* enum dma_data_direction */
 #include <linux/sbitmap.h>
@@ -543,9 +542,6 @@ struct se_cmd {
 	sense_reason_t		pi_err;
 	sector_t		bad_sector;
 	int			cpuid;
-
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
 };
 
 struct se_ua {
@@ -792,9 +788,8 @@ struct se_device {
 	atomic_long_t		read_bytes;
 	atomic_long_t		write_bytes;
 	/* Active commands on this virtual SE device */
-	atomic_t		non_ordered;
-	bool			ordered_sync_in_progress;
-	atomic_t		delayed_cmd_count;
+	atomic_t		simple_cmds;
+	atomic_t		dev_ordered_sync;
 	atomic_t		dev_qf_count;
 	u32			export_count;
 	spinlock_t		delayed_cmd_lock;
@@ -816,7 +811,6 @@ struct se_device {
 	struct list_head	dev_sep_list;
 	struct list_head	dev_tmr_list;
 	struct work_struct	qf_work_queue;
-	struct work_struct	delayed_cmd_work;
 	struct list_head	delayed_cmd_list;
 	struct list_head	state_list;
 	struct list_head	qf_cmd_list;
@@ -845,9 +839,6 @@ struct se_device {
 	/* For se_lun->lun_se_dev RCU read-side critical access */
 	u32			hba_index;
 	struct rcu_head		rcu_head;
-
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
 };
 
 struct se_hba {
