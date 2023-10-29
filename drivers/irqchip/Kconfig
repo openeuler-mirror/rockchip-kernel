@@ -11,24 +11,6 @@ config ARM_GIC
 	select GENERIC_IRQ_MULTI_HANDLER
 	select GENERIC_IRQ_EFFECTIVE_AFF_MASK
 
-config SW64_INTC_V2
-	bool "SW64 Interrupt Controller V2"
-	depends on SW64_CHIP3
-	default y
-	select GENERIC_IRQ_CHIP
-	select IRQ_DOMAIN
-	help
-           This enables support for the INTC chip found in SW CHIP3 systems.
-           The INTC controls devices interrupts and connects them to each
-           core's local interrupt controller.
-
-config SW64_LPC_INTC
-	bool "SW64 cpu builtin LPC Interrupt Controller"
-	depends on SW64_INTC_V2
-	help
-	   Say yes here to add support for the SW64 cpu builtin LPC
-	   IRQ controller.
-
 config ARM_GIC_PM
 	bool
 	depends on PM
@@ -73,15 +55,6 @@ config ARM_GIC_V3_ITS_FSL_MC
 	depends on ARM_GIC_V3_ITS
 	depends on FSL_MC_BUS
 	default ARM_GIC_V3_ITS
-
-config ARM_GIC_PHYTIUM_2500
-    bool
-    select IRQ_DOMAIN
-    select GENERIC_IRQ_MULTI_HANDLER
-    select IRQ_DOMAIN_HIERARCHY
-    select PARTITION_PERCPU
-    select GENERIC_IRQ_EFFECTIVE_AFF_MASK
-    select GENERIC_MSI_IRQ_DOMAIN
 
 config ARM_NVIC
 	bool
@@ -188,16 +161,6 @@ config HISILICON_IRQ_MBIGEN
 	select ARM_GIC_V3
 	select ARM_GIC_V3_ITS
 
-if ASCEND_FEATURES
-
-config ASCEND_INIT_ALL_GICR
-	bool "Enable init all GICR for Ascend"
-	depends on ARM_GIC_V3
-	depends on ARM_GIC_V3_ITS
-	default n
-
-endif
-
 config IMGPDC_IRQ
 	bool
 	select GENERIC_IRQ_CHIP
@@ -215,7 +178,7 @@ config MADERA_IRQ
 config IRQ_MIPS_CPU
 	bool
 	select GENERIC_IRQ_CHIP
-	select GENERIC_IRQ_IPI if SMP && SYS_SUPPORTS_MULTITHREADING
+	select GENERIC_IRQ_IPI if SYS_SUPPORTS_MULTITHREADING
 	select IRQ_DOMAIN
 	select GENERIC_IRQ_EFFECTIVE_AFF_MASK
 
@@ -350,8 +313,7 @@ config KEYSTONE_IRQ
 
 config MIPS_GIC
 	bool
-	select GENERIC_IRQ_IPI if SMP
-	select IRQ_DOMAIN_HIERARCHY
+	select GENERIC_IRQ_IPI
 	select MIPS_CM
 
 config INGENIC_IRQ
@@ -454,8 +416,9 @@ config IRQ_UNIPHIER_AIDET
 	  Support for the UniPhier AIDET (ARM Interrupt Detector).
 
 config MESON_IRQ_GPIO
-       bool "Meson GPIO Interrupt Multiplexer"
-       depends on ARCH_MESON
+       tristate "Meson GPIO Interrupt Multiplexer"
+       depends on ARCH_MESON || COMPILE_TEST
+       default ARCH_MESON
        select IRQ_DOMAIN_HIERARCHY
        help
          Support Meson SoC Family GPIO Interrupt Multiplexer
@@ -463,15 +426,15 @@ config MESON_IRQ_GPIO
 config GOLDFISH_PIC
        bool "Goldfish programmable interrupt controller"
        depends on MIPS && (GOLDFISH || COMPILE_TEST)
-       select GENERIC_IRQ_CHIP
        select IRQ_DOMAIN
        help
          Say yes here to enable Goldfish interrupt controller driver used
          for Goldfish based virtual platforms.
 
 config QCOM_PDC
-	bool "QCOM PDC"
+	tristate "QCOM PDC"
 	depends on ARCH_QCOM
+	depends on QCOM_SCM || !QCOM_SCM
 	select IRQ_DOMAIN_HIERARCHY
 	help
 	  Power Domain Controller driver to manage and configure wakeup
@@ -582,21 +545,6 @@ config EXYNOS_IRQ_COMBINER
 	  Say yes here to add support for the IRQ combiner devices embedded
 	  in Samsung Exynos chips.
 
-config IRQ_LOONGARCH_CPU
-	bool
-	select GENERIC_IRQ_CHIP
-	select IRQ_DOMAIN
-	select GENERIC_IRQ_EFFECTIVE_AFF_MASK
-	select LOONGSON_LIOINTC
-	select LOONGSON_EIOINTC
-	select LOONGSON_PCH_PIC
-	select LOONGSON_PCH_MSI
-	select LOONGSON_PCH_LPC
-	help
-	  Support for the LoongArch CPU Interrupt Controller. For details of
-	  irq chip hierarchy on LoongArch platforms please read the document
-	  Documentation/loongarch/irq-chip-model.rst.
-
 config LOONGSON_LIOINTC
 	bool "Loongson Local I/O Interrupt Controller"
 	depends on MACH_LOONGSON64
@@ -606,19 +554,9 @@ config LOONGSON_LIOINTC
 	help
 	  Support for the Loongson Local I/O Interrupt Controller.
 
-config LOONGSON_EIOINTC
-	bool "Loongson Extend I/O Interrupt Controller"
-	depends on LOONGARCH
-	depends on MACH_LOONGSON64
-	default MACH_LOONGSON64
-	select IRQ_DOMAIN_HIERARCHY
-	select GENERIC_IRQ_CHIP
-	help
-	  Support for the Loongson3 Extend I/O Interrupt Vector Controller.
-
 config LOONGSON_HTPIC
 	bool "Loongson3 HyperTransport PIC Controller"
-	depends on MACH_LOONGSON64 && MIPS
+	depends on MACH_LOONGSON64
 	default y
 	select IRQ_DOMAIN
 	select GENERIC_IRQ_CHIP
@@ -626,16 +564,16 @@ config LOONGSON_HTPIC
 	  Support for the Loongson-3 HyperTransport PIC Controller.
 
 config LOONGSON_HTVEC
-	bool "Loongson HyperTransport Interrupt Vector Controller"
+	bool "Loongson3 HyperTransport Interrupt Vector Controller"
 	depends on MACH_LOONGSON64
 	default MACH_LOONGSON64
 	select IRQ_DOMAIN_HIERARCHY
 	help
-	  Support for the Loongson HyperTransport Interrupt Vector Controller.
+	  Support for the Loongson3 HyperTransport Interrupt Vector Controller.
 
 config LOONGSON_PCH_PIC
 	bool "Loongson PCH PIC Controller"
-	depends on MACH_LOONGSON64
+	depends on MACH_LOONGSON64 || COMPILE_TEST
 	default MACH_LOONGSON64
 	select IRQ_DOMAIN_HIERARCHY
 	select IRQ_FASTEOI_HIERARCHY_HANDLERS
@@ -644,21 +582,13 @@ config LOONGSON_PCH_PIC
 
 config LOONGSON_PCH_MSI
 	bool "Loongson PCH MSI Controller"
-	depends on MACH_LOONGSON64
+	depends on MACH_LOONGSON64 || COMPILE_TEST
 	depends on PCI
 	default MACH_LOONGSON64
 	select IRQ_DOMAIN_HIERARCHY
 	select PCI_MSI
 	help
 	  Support for the Loongson PCH MSI Controller.
-
-config LOONGSON_PCH_LPC
-	bool "Loongson PCH LPC Controller"
-	depends on MACH_LOONGSON64
-	default (MACH_LOONGSON64 && LOONGARCH)
-	select IRQ_DOMAIN_HIERARCHY
-	help
-	  Support for the Loongson PCH LPC Controller.
 
 config MST_IRQ
 	bool "MStar Interrupt Controller"
