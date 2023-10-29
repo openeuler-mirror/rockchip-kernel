@@ -1307,11 +1307,12 @@ static int virtio_mem_mb_unplug_sb_online(struct virtio_mem *vm,
 	const unsigned long nr_pages = PFN_DOWN(vm->subblock_size) * count;
 	unsigned long start_pfn;
 	int rc;
+	struct acr_info dummy;
 
 	start_pfn = PFN_DOWN(virtio_mem_mb_id_to_phys(mb_id) +
 			     sb_id * vm->subblock_size);
 	rc = alloc_contig_range(start_pfn, start_pfn + nr_pages,
-				MIGRATE_MOVABLE, GFP_KERNEL);
+				MIGRATE_MOVABLE, GFP_KERNEL, &dummy);
 	if (rc == -ENOMEM)
 		/* whoops, out of memory */
 		return rc;
@@ -1889,7 +1890,7 @@ static void virtio_mem_remove(struct virtio_device *vdev)
 	vfree(vm->sb_bitmap);
 
 	/* reset the device and cleanup the queues */
-	virtio_reset_device(vdev);
+	vdev->config->reset(vdev);
 	vdev->config->del_vqs(vdev);
 
 	kfree(vm);
