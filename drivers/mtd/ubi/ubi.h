@@ -142,6 +142,17 @@ enum {
 	UBI_BAD_FASTMAP,
 };
 
+/*
+ * Flags for emulate_power_cut in ubi_debug_info
+ *
+ * POWER_CUT_EC_WRITE: Emulate a power cut when writing an EC header
+ * POWER_CUT_VID_WRITE: Emulate a power cut when writing a VID header
+ */
+enum {
+	POWER_CUT_EC_WRITE = 0x01,
+	POWER_CUT_VID_WRITE = 0x02,
+};
+
 /**
  * struct ubi_vid_io_buf - VID buffer used to read/write VID info to/from the
  *			   flash.
@@ -386,28 +397,46 @@ struct ubi_wl_entry;
  * @chk_io: if UBI I/O extra checks are enabled
  * @chk_fastmap: if UBI fastmap extra checks are enabled
  * @disable_bgt: disable the background task for testing purposes
- * @emulate_failures: emulate failures for testing purposes
+ * @emulate_bitflips: emulate bit-flips for testing purposes
+ * @emulate_io_failures: emulate write/erase failures for testing purposes
+ * @emulate_power_cut: emulate power cut for testing purposes
+ * @power_cut_counter: count down for writes left until emulated power cut
+ * @power_cut_min: minimum number of writes before emulating a power cut
+ * @power_cut_max: maximum number of writes until emulating a power cut
  * @dfs_dir_name: name of debugfs directory containing files of this UBI device
  * @dfs_dir: direntry object of the UBI device debugfs directory
  * @dfs_chk_gen: debugfs knob to enable UBI general extra checks
  * @dfs_chk_io: debugfs knob to enable UBI I/O extra checks
  * @dfs_chk_fastmap: debugfs knob to enable UBI fastmap extra checks
  * @dfs_disable_bgt: debugfs knob to disable the background task
- * @dfs_emulate_failures: debugfs entry to control the fault injection type
+ * @dfs_emulate_bitflips: debugfs knob to emulate bit-flips
+ * @dfs_emulate_io_failures: debugfs knob to emulate write/erase failures
+ * @dfs_emulate_power_cut: debugfs knob to emulate power cuts
+ * @dfs_power_cut_min: debugfs knob for minimum writes before power cut
+ * @dfs_power_cut_max: debugfs knob for maximum writes until power cut
  */
 struct ubi_debug_info {
 	unsigned int chk_gen:1;
 	unsigned int chk_io:1;
 	unsigned int chk_fastmap:1;
 	unsigned int disable_bgt:1;
-	unsigned int emulate_failures;
+	unsigned int emulate_bitflips:1;
+	unsigned int emulate_io_failures:1;
+	unsigned int emulate_power_cut:2;
+	unsigned int power_cut_counter;
+	unsigned int power_cut_min;
+	unsigned int power_cut_max;
 	char dfs_dir_name[UBI_DFS_DIR_LEN + 1];
 	struct dentry *dfs_dir;
 	struct dentry *dfs_chk_gen;
 	struct dentry *dfs_chk_io;
 	struct dentry *dfs_chk_fastmap;
 	struct dentry *dfs_disable_bgt;
-	struct dentry *dfs_emulate_failures;
+	struct dentry *dfs_emulate_bitflips;
+	struct dentry *dfs_emulate_io_failures;
+	struct dentry *dfs_emulate_power_cut;
+	struct dentry *dfs_power_cut_min;
+	struct dentry *dfs_power_cut_max;
 };
 
 /**
@@ -462,7 +491,8 @@ struct ubi_debug_info {
  * @fm_work: fastmap work queue
  * @fm_work_scheduled: non-zero if fastmap work was scheduled
  * @fast_attach: non-zero if UBI was attached by fastmap
- * @fm_anchor: The next anchor PEB to use for fastmap
+ * @fm_anchor: The new anchor PEB used during fastmap update
+ * @fm_next_anchor: An anchor PEB candidate for the next time fastmap is updated
  * @fm_do_produce_anchor: If true produce an anchor PEB in wl
  *
  * @used: RB-tree of used physical eraseblocks
@@ -573,6 +603,7 @@ struct ubi_device {
 	int fm_work_scheduled;
 	int fast_attach;
 	struct ubi_wl_entry *fm_anchor;
+	struct ubi_wl_entry *fm_next_anchor;
 	int fm_do_produce_anchor;
 
 	/* Wear-leveling sub-system's stuff */
@@ -910,8 +941,7 @@ int ubi_io_write_vid_hdr(struct ubi_device *ubi, int pnum,
 
 /* build.c */
 int ubi_attach_mtd_dev(struct mtd_info *mtd, int ubi_num,
-		       int vid_hdr_offset, int max_beb_per1024,
-		       bool disable_fm);
+		       int vid_hdr_offset, int max_beb_per1024);
 int ubi_detach_mtd_dev(int ubi_num, int anyway);
 struct ubi_device *ubi_get_device(int ubi_num);
 void ubi_put_device(struct ubi_device *ubi);
@@ -1109,6 +1139,18 @@ static inline int ubi_io_read_data(const struct ubi_device *ubi, void *buf,
 	return ubi_io_read(ubi, buf, pnum, offset + ubi->leb_start, len);
 }
 
+/*
+ * This function is equivalent to 'ubi_io_write()', but @offset is relative to
+ * the beginning of the logical eraseblock, not to the beginning of the
+ * physical eraseblock.
+ */
+static inline int ubi_io_write_data(struct ubi_device *ubi, const void *buf,
+				    int pnum, int offset, int len)
+{
+	ubi_assert(offset >= 0);
+	return ubi_io_write(ubi, buf, pnum, offset + ubi->leb_start, len);
+}
+
 /**
  * ubi_ro_mode - switch to read-only mode.
  * @ubi: UBI device description object
@@ -1120,25 +1162,6 @@ static inline void ubi_ro_mode(struct ubi_device *ubi)
 		ubi_warn(ubi, "switch to read-only mode");
 		dump_stack();
 	}
-}
-
-/*
- * This function is equivalent to 'ubi_io_write()', but @offset is relative to
- * the beginning of the logical eraseblock, not to the beginning of the
- * physical eraseblock.
- */
-static inline int ubi_io_write_data(struct ubi_device *ubi, const void *buf,
-				    int pnum, int offset, int len)
-{
-	ubi_assert(offset >= 0);
-
-	if (ubi_dbg_power_cut(ubi, MASK_POWER_CUT_DATA)) {
-		ubi_warn(ubi, "XXXXX emulating a power cut when writing data XXXXX");
-		ubi_ro_mode(ubi);
-		return -EROFS;
-	}
-
-	return ubi_io_write(ubi, buf, pnum, offset + ubi->leb_start, len);
 }
 
 /**
