@@ -302,7 +302,7 @@ static void virtscsi_handle_transport_reset(struct virtio_scsi *vscsi,
 		}
 		break;
 	default:
-		pr_info("Unsupported virtio scsi event reason %x\n", event->reason);
+		pr_info("Unsupport virtio scsi event reason %x\n", event->reason);
 	}
 }
 
@@ -355,7 +355,7 @@ static void virtscsi_rescan_hotunplug(struct virtio_scsi *vscsi)
 		if (result == 0 && inq_result[0] >> 5) {
 			/* PQ indicates the LUN is not attached */
 			scsi_remove_device(sdev);
-		} else if (result > 0 && host_byte(result) == DID_BAD_TARGET) {
+		} else if (host_byte(result) == DID_BAD_TARGET) {
 			/*
 			 * If all LUNs of a virtio-scsi device are unplugged
 			 * it will respond with BAD TARGET on any INQUIRY
@@ -394,7 +394,7 @@ static void virtscsi_handle_event(struct work_struct *work)
 		virtscsi_handle_param_change(vscsi, event);
 		break;
 	default:
-		pr_err("Unsupported virtio scsi event %x\n", event->event);
+		pr_err("Unsupport virtio scsi event %x\n", event->event);
 	}
 	virtscsi_kick_event(vscsi, event_node);
 }
@@ -780,7 +780,7 @@ static void virtscsi_init_vq(struct virtio_scsi_vq *virtscsi_vq,
 static void virtscsi_remove_vqs(struct virtio_device *vdev)
 {
 	/* Stop all the virtqueues. */
-	virtio_reset_device(vdev);
+	vdev->config->reset(vdev);
 	vdev->config->del_vqs(vdev);
 }
 

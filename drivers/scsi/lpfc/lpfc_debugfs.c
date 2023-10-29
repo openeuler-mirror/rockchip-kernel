@@ -2159,13 +2159,10 @@ lpfc_debugfs_lockstat_write(struct file *file, const char __user *buf,
 	char mybuf[64];
 	char *pbuf;
 	int i;
-	size_t bsize;
 
 	memset(mybuf, 0, sizeof(mybuf));
 
-	bsize = min(nbytes, (sizeof(mybuf) - 1));
-
-	if (copy_from_user(mybuf, buf, bsize))
+	if (copy_from_user(mybuf, buf, nbytes))
 		return -EFAULT;
 	pbuf = &mybuf[0];
 
@@ -2186,7 +2183,7 @@ lpfc_debugfs_lockstat_write(struct file *file, const char __user *buf,
 			qp->lock_conflict.wq_access = 0;
 		}
 	}
-	return bsize;
+	return nbytes;
 }
 #endif
 
@@ -2612,8 +2609,8 @@ lpfc_debugfs_multixripools_write(struct file *file, const char __user *buf,
 	struct lpfc_sli4_hdw_queue *qp;
 	struct lpfc_multixri_pool *multixri_pool;
 
-	if (nbytes > sizeof(mybuf) - 1)
-		nbytes = sizeof(mybuf) - 1;
+	if (nbytes > 64)
+		nbytes = 64;
 
 	memset(mybuf, 0, sizeof(mybuf));
 
@@ -2693,8 +2690,8 @@ lpfc_debugfs_nvmestat_write(struct file *file, const char __user *buf,
 	if (!phba->targetport)
 		return -ENXIO;
 
-	if (nbytes > sizeof(mybuf) - 1)
-		nbytes = sizeof(mybuf) - 1;
+	if (nbytes > 64)
+		nbytes = 64;
 
 	memset(mybuf, 0, sizeof(mybuf));
 
@@ -2831,8 +2828,8 @@ lpfc_debugfs_ioktime_write(struct file *file, const char __user *buf,
 	char mybuf[64];
 	char *pbuf;
 
-	if (nbytes > sizeof(mybuf) - 1)
-		nbytes = sizeof(mybuf) - 1;
+	if (nbytes > 64)
+		nbytes = 64;
 
 	memset(mybuf, 0, sizeof(mybuf));
 
@@ -2959,8 +2956,8 @@ lpfc_debugfs_nvmeio_trc_write(struct file *file, const char __user *buf,
 	char mybuf[64];
 	char *pbuf;
 
-	if (nbytes > sizeof(mybuf) - 1)
-		nbytes = sizeof(mybuf) - 1;
+	if (nbytes > 64)
+		nbytes = 64;
 
 	memset(mybuf, 0, sizeof(mybuf));
 
@@ -3065,8 +3062,8 @@ lpfc_debugfs_hdwqstat_write(struct file *file, const char __user *buf,
 	char *pbuf;
 	int i;
 
-	if (nbytes > sizeof(mybuf) - 1)
-		nbytes = sizeof(mybuf) - 1;
+	if (nbytes > 64)
+		nbytes = 64;
 
 	memset(mybuf, 0, sizeof(mybuf));
 

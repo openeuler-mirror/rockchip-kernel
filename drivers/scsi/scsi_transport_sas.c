@@ -716,17 +716,12 @@ int sas_phy_add(struct sas_phy *phy)
 	int error;
 
 	error = device_add(&phy->dev);
-	if (error)
-		return error;
-
-	error = transport_add_device(&phy->dev);
-	if (error) {
-		device_del(&phy->dev);
-		return error;
+	if (!error) {
+		transport_add_device(&phy->dev);
+		transport_configure_device(&phy->dev);
 	}
-	transport_configure_device(&phy->dev);
 
-	return 0;
+	return error;
 }
 EXPORT_SYMBOL(sas_phy_add);
 
