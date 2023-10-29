@@ -20,8 +20,6 @@
 #include <linux/tick.h>
 #include <linux/cpuidle.h>
 #include <linux/cpu.h>
-#include <linux/perf_event.h>
-#include <linux/perf_event_lopwr.h>
 #include <acpi/processor.h>
 
 /*
@@ -538,27 +536,10 @@ static void wait_for_freeze(void)
 	/* No delay is needed if we are in guest */
 	if (boot_cpu_has(X86_FEATURE_HYPERVISOR))
 		return;
-	/*
-	 * Modern (>=Nehalem) Intel systems use ACPI via intel_idle,
-	 * not this code.  Assume that any Intel systems using this
-	 * are ancient and may need the dummy wait.  This also assumes
-	 * that the motivating chipset issue was Intel-only.
-	 */
-	if (boot_cpu_data.x86_vendor != X86_VENDOR_INTEL)
-		return;
 #endif
-	/*
-	 * Dummy wait op - must do something useless after P_LVL2 read
-	 * because chipsets cannot guarantee that STPCLK# signal gets
-	 * asserted in time to freeze execution properly
-	 *
-	 * This workaround has been in place since the original ACPI
-	 * implementation was merged, circa 2002.
-	 *
-	 * If a profile is pointing to this instruction, please first
-	 * consider moving your system to a more modern idle
-	 * mechanism.
-	 */
+	/* Dummy wait op - must do something useless after P_LVL2 read
+	   because chipsets cannot guarantee that STPCLK# signal
+	   gets asserted in time to freeze execution properly. */
 	inl(acpi_gbl_FADT.xpm_timer_block.address);
 }
 
@@ -570,8 +551,6 @@ static void wait_for_freeze(void)
  */
 static void __cpuidle acpi_idle_do_entry(struct acpi_processor_cx *cx)
 {
-	perf_lopwr_cb(true);
-
 	if (cx->entry_method == ACPI_CSTATE_FFH) {
 		/* Call into architectural FFH based C-state */
 		acpi_processor_ffh_cstate_enter(cx);
@@ -582,8 +561,6 @@ static void __cpuidle acpi_idle_do_entry(struct acpi_processor_cx *cx)
 		inb(cx->address);
 		wait_for_freeze();
 	}
-
-	perf_lopwr_cb(false);
 }
 
 /**
@@ -632,7 +609,7 @@ static DEFINE_RAW_SPINLOCK(c3_lock);
  * @cx: Target state context
  * @index: index of target state
  */
-static int __cpuidle acpi_idle_enter_bm(struct cpuidle_driver *drv,
+static int acpi_idle_enter_bm(struct cpuidle_driver *drv,
 			       struct acpi_processor *pr,
 			       struct acpi_processor_cx *cx,
 			       int index)
@@ -689,7 +666,7 @@ static int __cpuidle acpi_idle_enter_bm(struct cpuidle_driver *drv,
 	return index;
 }
 
-static int __cpuidle acpi_idle_enter(struct cpuidle_device *dev,
+static int acpi_idle_enter(struct cpuidle_device *dev,
 			   struct cpuidle_driver *drv, int index)
 {
 	struct acpi_processor_cx *cx = per_cpu(acpi_cstate[index], dev->cpu);
@@ -718,7 +695,7 @@ static int __cpuidle acpi_idle_enter(struct cpuidle_device *dev,
 	return index;
 }
 
-static int __cpuidle acpi_idle_enter_s2idle(struct cpuidle_device *dev,
+static int acpi_idle_enter_s2idle(struct cpuidle_device *dev,
 				  struct cpuidle_driver *drv, int index)
 {
 	struct acpi_processor_cx *cx = per_cpu(acpi_cstate[index], dev->cpu);
@@ -1103,11 +1080,6 @@ static int flatten_lpi_states(struct acpi_processor *pr,
 	return 0;
 }
 
-int __weak acpi_processor_ffh_lpi_probe(unsigned int cpu)
-{
-	return -EOPNOTSUPP;
-}
-
 static int acpi_processor_get_lpi_info(struct acpi_processor *pr)
 {
 	int ret, i;
@@ -1115,11 +1087,6 @@ static int acpi_processor_get_lpi_info(struct acpi_processor *pr)
 	acpi_handle handle = pr->handle, pr_ahandle;
 	struct acpi_device *d = NULL;
 	struct acpi_lpi_states_array info[2], *tmp, *prev, *curr;
-
-	/* make sure our architecture has support */
-	ret = acpi_processor_ffh_lpi_probe(pr->id);
-	if (ret == -EOPNOTSUPP)
-		return ret;
 
 	if (!osc_pc_lpi_support_confirmed)
 		return -EOPNOTSUPP;
@@ -1170,6 +1137,11 @@ static int acpi_processor_get_lpi_info(struct acpi_processor *pr)
 	pr->flags.power = 1;
 
 	return 0;
+}
+
+int __weak acpi_processor_ffh_lpi_probe(unsigned int cpu)
+{
+	return -ENODEV;
 }
 
 int __weak acpi_processor_ffh_lpi_enter(struct acpi_lpi_state *lpi)

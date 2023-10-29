@@ -43,7 +43,7 @@
 #include <acpi/cppc_acpi.h>
 
 struct cppc_pcc_data {
-	struct pcc_mbox_chan *pcc_channel;
+	struct mbox_chan *pcc_channel;
 	void __iomem *pcc_comm_addr;
 	bool pcc_channel_acquired;
 	unsigned int deadline_us;
@@ -295,7 +295,7 @@ static int send_pcc_cmd(int pcc_ss_id, u16 cmd)
 	pcc_ss_data->platform_owns_pcc = true;
 
 	/* Ring doorbell */
-	ret = mbox_send_message(pcc_ss_data->pcc_channel->mchan, &cmd);
+	ret = mbox_send_message(pcc_ss_data->pcc_channel, &cmd);
 	if (ret < 0) {
 		pr_err("Err sending PCC mbox message. ss: %d cmd:%d, ret:%d\n",
 		       pcc_ss_id, cmd, ret);
@@ -308,10 +308,10 @@ static int send_pcc_cmd(int pcc_ss_id, u16 cmd)
 	if (pcc_ss_data->pcc_mrtt)
 		pcc_ss_data->last_cmd_cmpl_time = ktime_get();
 
-	if (pcc_ss_data->pcc_channel->mchan->mbox->txdone_irq)
-		mbox_chan_txdone(pcc_ss_data->pcc_channel->mchan, ret);
+	if (pcc_ss_data->pcc_channel->mbox->txdone_irq)
+		mbox_chan_txdone(pcc_ss_data->pcc_channel, ret);
 	else
-		mbox_client_txdone(pcc_ss_data->pcc_channel->mchan, ret);
+		mbox_client_txdone(pcc_ss_data->pcc_channel, ret);
 
 end:
 	if (cmd == CMD_WRITE) {
@@ -411,7 +411,7 @@ end:
  *
  *	Return: 0 for success or negative value for err.
  */
-static int __acpi_get_psd_map(struct cppc_cpudata **all_cpu_data, struct cpc_desc **cpc_pptr)
+int acpi_get_psd_map(struct cppc_cpudata **all_cpu_data)
 {
 	int count_target;
 	int retval = 0;
@@ -434,7 +434,7 @@ static int __acpi_get_psd_map(struct cppc_cpudata **all_cpu_data, struct cpc_des
 			continue;
 
 		pr = all_cpu_data[i];
-		cpc_ptr = cpc_pptr[i];
+		cpc_ptr = per_cpu(cpc_desc_ptr, i);
 		if (!cpc_ptr) {
 			retval = -EFAULT;
 			goto err_ret;
@@ -459,7 +459,7 @@ static int __acpi_get_psd_map(struct cppc_cpudata **all_cpu_data, struct cpc_des
 			if (i == j)
 				continue;
 
-			match_cpc_ptr = cpc_pptr[j];
+			match_cpc_ptr = per_cpu(cpc_desc_ptr, j);
 			if (!match_cpc_ptr) {
 				retval = -EFAULT;
 				goto err_ret;
@@ -509,122 +509,50 @@ out:
 	free_cpumask_var(covered_cpus);
 	return retval;
 }
-
-static acpi_status acpi_parse_cpc(acpi_handle handle, u32 lvl, void *data,
-				  void **ret_p)
-{
-	struct acpi_device *adev = NULL;
-	struct cpc_desc *cpc_ptr, **cpc_pptr;
-	acpi_status status = AE_OK;
-	const int device_declaration = 1;
-	unsigned long long uid;
-	phys_cpuid_t phys_id;
-	int logical_id, ret;
-	int *parsed_core_num = (int *)ret_p;
-
-	if (acpi_bus_get_device(handle, &adev))
-		return AE_OK;
-
-	if (strcmp(acpi_device_hid(adev), ACPI_PROCESSOR_DEVICE_HID))
-		return AE_OK;
-
-	status = acpi_evaluate_integer(handle, METHOD_NAME__UID, NULL, &uid);
-	if (ACPI_FAILURE(status))
-		return AE_OK;
-	phys_id = acpi_get_phys_id(handle, device_declaration, uid);
-	if (invalid_phys_cpuid(phys_id))
-		return AE_OK;
-	logical_id = acpi_map_cpuid(phys_id, uid);
-	if (logical_id < 0)
-		return AE_OK;
-
-	cpc_pptr = (struct cpc_desc **)data;
-	cpc_ptr = cpc_pptr[logical_id];
-	cpc_ptr->cpu_id = logical_id;
-
-	ret = acpi_get_psd(cpc_ptr, handle);
-	if (ret)
-		return ret;
-
-	(*parsed_core_num)++;
-
-	return AE_OK;
-}
-
-int acpi_get_psd_map(struct cppc_cpudata **all_cpu_data)
-{
-	struct cpc_desc **cpc_pptr, *cpc_ptr;
-	int parsed_core_num = 0;
-	int i, ret;
-
-	cpc_pptr = kcalloc(num_possible_cpus(), sizeof(void *), GFP_KERNEL);
-	if (!cpc_pptr)
-		return -ENOMEM;
-	for_each_possible_cpu(i) {
-		cpc_pptr[i] = kzalloc(sizeof(struct cpc_desc), GFP_KERNEL);
-		if (!cpc_pptr[i]) {
-			ret = -ENOMEM;
-			goto out;
-		}
-	}
-
-	/*
-	 * We can not use acpi_get_devices() to walk the processor devices
-	 * because some processor device is not present.
-	 */
-	ret = acpi_walk_namespace(ACPI_TYPE_DEVICE, ACPI_ROOT_OBJECT,
-				  ACPI_UINT32_MAX, acpi_parse_cpc, NULL,
-				  cpc_pptr, (void **)&parsed_core_num);
-	if (ret)
-		goto out;
-	if (parsed_core_num != num_possible_cpus()) {
-		ret = -EINVAL;
-		goto out;
-	}
-
-	ret = __acpi_get_psd_map(all_cpu_data, cpc_pptr);
-
-out:
-	for_each_possible_cpu(i) {
-		cpc_ptr = cpc_pptr[i];
-		if (cpc_ptr)
-			kfree(cpc_ptr);
-	}
-	kfree(cpc_pptr);
-
-	return ret;
-}
 EXPORT_SYMBOL_GPL(acpi_get_psd_map);
 
 static int register_pcc_channel(int pcc_ss_idx)
 {
-	struct pcc_mbox_chan *pcc_chan;
+	struct acpi_pcct_hw_reduced *cppc_ss;
 	u64 usecs_lat;
 
 	if (pcc_ss_idx >= 0) {
-		pcc_chan = pcc_mbox_request_channel(&cppc_mbox_cl, pcc_ss_idx);
+		pcc_data[pcc_ss_idx]->pcc_channel =
+			pcc_mbox_request_channel(&cppc_mbox_cl,	pcc_ss_idx);
 
-		if (IS_ERR(pcc_chan)) {
+		if (IS_ERR(pcc_data[pcc_ss_idx]->pcc_channel)) {
 			pr_err("Failed to find PCC channel for subspace %d\n",
 			       pcc_ss_idx);
 			return -ENODEV;
 		}
 
-		pcc_data[pcc_ss_idx]->pcc_channel = pcc_chan;
+		/*
+		 * The PCC mailbox controller driver should
+		 * have parsed the PCCT (global table of all
+		 * PCC channels) and stored pointers to the
+		 * subspace communication region in con_priv.
+		 */
+		cppc_ss = (pcc_data[pcc_ss_idx]->pcc_channel)->con_priv;
+
+		if (!cppc_ss) {
+			pr_err("No PCC subspace found for %d CPPC\n",
+			       pcc_ss_idx);
+			return -ENODEV;
+		}
+
 		/*
 		 * cppc_ss->latency is just a Nominal value. In reality
 		 * the remote processor could be much slower to reply.
 		 * So add an arbitrary amount of wait on top of Nominal.
 		 */
-		usecs_lat = NUM_RETRIES * pcc_chan->latency;
+		usecs_lat = NUM_RETRIES * cppc_ss->latency;
 		pcc_data[pcc_ss_idx]->deadline_us = usecs_lat;
-		pcc_data[pcc_ss_idx]->pcc_mrtt = pcc_chan->min_turnaround_time;
-		pcc_data[pcc_ss_idx]->pcc_mpar = pcc_chan->max_access_rate;
-		pcc_data[pcc_ss_idx]->pcc_nominal = pcc_chan->latency;
+		pcc_data[pcc_ss_idx]->pcc_mrtt = cppc_ss->min_turnaround_time;
+		pcc_data[pcc_ss_idx]->pcc_mpar = cppc_ss->max_access_rate;
+		pcc_data[pcc_ss_idx]->pcc_nominal = cppc_ss->latency;
 
 		pcc_data[pcc_ss_idx]->pcc_comm_addr =
-			acpi_os_ioremap(pcc_chan->shmem_base_addr,
-					pcc_chan->shmem_size);
+			acpi_os_ioremap(cppc_ss->base_address, cppc_ss->length);
 		if (!pcc_data[pcc_ss_idx]->pcc_comm_addr) {
 			pr_err("Failed to ioremap PCC comm region mem for %d\n",
 			       pcc_ss_idx);
@@ -677,6 +605,33 @@ static int pcc_data_alloc(int pcc_ss_id)
 	}
 
 	return 0;
+}
+
+/* Check if CPPC revision + num_ent combination is supported */
+static bool is_cppc_supported(int revision, int num_ent)
+{
+	int expected_num_ent;
+
+	switch (revision) {
+	case CPPC_V2_REV:
+		expected_num_ent = CPPC_V2_NUM_ENT;
+		break;
+	case CPPC_V3_REV:
+		expected_num_ent = CPPC_V3_NUM_ENT;
+		break;
+	default:
+		pr_debug("Firmware exports unsupported CPPC revision: %d\n",
+			revision);
+		return false;
+	}
+
+	if (expected_num_ent != num_ent) {
+		pr_debug("Firmware exports %d entries. Expected: %d for CPPC rev:%d\n",
+			num_ent, expected_num_ent, revision);
+		return false;
+	}
+
+	return true;
 }
 
 /*
@@ -764,16 +719,12 @@ int acpi_cppc_processor_probe(struct acpi_processor *pr)
 	cpc_obj = &out_obj->package.elements[0];
 	if (cpc_obj->type == ACPI_TYPE_INTEGER)	{
 		num_ent = cpc_obj->integer.value;
-		if (num_ent <= 1) {
-			pr_debug("Unexpected _CPC NumEntries value (%d) for CPU:%d\n",
-				 num_ent, pr->id);
-			goto out_free;
-		}
 	} else {
 		pr_debug("Unexpected entry type(%d) for NumEntries\n",
 				cpc_obj->type);
 		goto out_free;
 	}
+	cpc_ptr->num_entries = num_ent;
 
 	/* Second entry should be revision. */
 	cpc_obj = &out_obj->package.elements[1];
@@ -784,32 +735,10 @@ int acpi_cppc_processor_probe(struct acpi_processor *pr)
 				cpc_obj->type);
 		goto out_free;
 	}
-
-	if (cpc_rev < CPPC_V2_REV) {
-		pr_debug("Unsupported _CPC Revision (%d) for CPU:%d\n", cpc_rev,
-			 pr->id);
-		goto out_free;
-	}
-
-	/*
-	 * Disregard _CPC if the number of entries in the return pachage is not
-	 * as expected, but support future revisions being proper supersets of
-	 * the v3 and only causing more entries to be returned by _CPC.
-	 */
-	if ((cpc_rev == CPPC_V2_REV && num_ent != CPPC_V2_NUM_ENT) ||
-	    (cpc_rev == CPPC_V3_REV && num_ent != CPPC_V3_NUM_ENT) ||
-	    (cpc_rev > CPPC_V3_REV && num_ent <= CPPC_V3_NUM_ENT)) {
-		pr_debug("Unexpected number of _CPC return package entries (%d) for CPU:%d\n",
-			 num_ent, pr->id);
-		goto out_free;
-	}
-	if (cpc_rev > CPPC_V3_REV) {
-		num_ent = CPPC_V3_NUM_ENT;
-		cpc_rev = CPPC_V3_REV;
-	}
-
-	cpc_ptr->num_entries = num_ent;
 	cpc_ptr->version = cpc_rev;
+
+	if (!is_cppc_supported(cpc_rev, num_ent))
+		goto out_free;
 
 	/* Iterate through remaining entries in _CPC */
 	for (i = 2; i < num_ent; i++) {

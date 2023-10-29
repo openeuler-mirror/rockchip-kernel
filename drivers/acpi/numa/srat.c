@@ -206,7 +206,7 @@ int __init srat_disabled(void)
 	return acpi_numa < 0;
 }
 
-#if defined(CONFIG_X86) || defined(CONFIG_ARM64) || defined(CONFIG_LOONGARCH)
+#if defined(CONFIG_X86) || defined(CONFIG_ARM64)
 /*
  * Callback for SLIT parsing.  pxm_to_node() returns NUMA_NO_NODE for
  * I/O localities since SRAT does not list them.  I/O localities are
@@ -278,11 +278,6 @@ acpi_numa_memory_affinity_init(struct acpi_srat_mem_affinity *ma)
 	}
 
 	node_set(node, numa_nodes_parsed);
-
-	if (ma->flags & ACPI_SRAT_MEM_NON_VOLATILE)
-		set_node_type(node, NODE_TYPE_PMEM);
-	else
-		set_node_type(node, NODE_TYPE_DRAM);
 
 	pr_info("SRAT: Node %u PXM %u [mem %#010Lx-%#010Lx]%s%s\n",
 		node, pxm,
