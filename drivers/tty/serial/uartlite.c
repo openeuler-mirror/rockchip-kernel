@@ -615,7 +615,7 @@ static struct uart_driver ulite_uart_driver = {
  *
  * Returns: 0 on success, <0 otherwise
  */
-static int ulite_assign(struct device *dev, int id, phys_addr_t base, int irq,
+static int ulite_assign(struct device *dev, int id, u32 base, int irq,
 			struct uartlite_data *pdata)
 {
 	struct uart_port *port;
@@ -784,7 +784,6 @@ static int ulite_probe(struct platform_device *pdev)
 		ret = uart_register_driver(&ulite_uart_driver);
 		if (ret < 0) {
 			dev_err(&pdev->dev, "Failed to register driver\n");
-			clk_disable_unprepare(pdata->clk);
 			return ret;
 		}
 	}

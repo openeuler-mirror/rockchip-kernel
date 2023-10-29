@@ -121,7 +121,8 @@ static int byt_serial_setup(struct lpss8250 *lpss, struct uart_port *port)
 {
 	struct dw_dma_slave *param = &lpss->dma_param;
 	struct pci_dev *pdev = to_pci_dev(port->dev);
-	struct pci_dev *dma_dev;
+	unsigned int dma_devfn = PCI_DEVFN(PCI_SLOT(pdev->devfn), 0);
+	struct pci_dev *dma_dev = pci_get_slot(pdev->bus, dma_devfn);
 
 	switch (pdev->device) {
 	case PCI_DEVICE_ID_INTEL_BYT_UART1:
@@ -140,8 +141,6 @@ static int byt_serial_setup(struct lpss8250 *lpss, struct uart_port *port)
 		return -EINVAL;
 	}
 
-	dma_dev = pci_get_slot(pdev->bus, PCI_DEVFN(PCI_SLOT(pdev->devfn), 0));
-
 	param->dma_dev = &dma_dev->dev;
 	param->m_master = 0;
 	param->p_master = 1;
@@ -157,24 +156,9 @@ static int byt_serial_setup(struct lpss8250 *lpss, struct uart_port *port)
 	return 0;
 }
 
-static void byt_serial_exit(struct lpss8250 *lpss)
-{
-	struct dw_dma_slave *param = &lpss->dma_param;
-
-	/* Paired with pci_get_slot() in the byt_serial_setup() above */
-	put_device(param->dma_dev);
-}
-
 static int ehl_serial_setup(struct lpss8250 *lpss, struct uart_port *port)
 {
 	return 0;
-}
-
-static void ehl_serial_exit(struct lpss8250 *lpss)
-{
-	struct uart_8250_port *up = serial8250_get_port(lpss->data.line);
-
-	up->dma = NULL;
 }
 
 #ifdef CONFIG_SERIAL_8250_DMA
@@ -268,13 +252,8 @@ static int lpss8250_dma_setup(struct lpss8250 *lpss, struct uart_8250_port *port
 	struct dw_dma_slave *rx_param, *tx_param;
 	struct device *dev = port->port.dev;
 
-	if (!lpss->dma_param.dma_dev) {
-		dma = port->dma;
-		if (dma)
-			goto out_configuration_only;
-
+	if (!lpss->dma_param.dma_dev)
 		return 0;
-	}
 
 	rx_param = devm_kzalloc(dev, sizeof(*rx_param), GFP_KERNEL);
 	if (!rx_param)
@@ -285,18 +264,16 @@ static int lpss8250_dma_setup(struct lpss8250 *lpss, struct uart_8250_port *port
 		return -ENOMEM;
 
 	*rx_param = lpss->dma_param;
+	dma->rxconf.src_maxburst = lpss->dma_maxburst;
+
 	*tx_param = lpss->dma_param;
+	dma->txconf.dst_maxburst = lpss->dma_maxburst;
 
 	dma->fn = lpss8250_dma_filter;
 	dma->rx_param = rx_param;
 	dma->tx_param = tx_param;
 
 	port->dma = dma;
-
-out_configuration_only:
-	dma->rxconf.src_maxburst = lpss->dma_maxburst;
-	dma->txconf.dst_maxburst = lpss->dma_maxburst;
-
 	return 0;
 }
 
@@ -358,7 +335,8 @@ static int lpss8250_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	return 0;
 
 err_exit:
-	lpss->board->exit(lpss);
+	if (lpss->board->exit)
+		lpss->board->exit(lpss);
 	pci_free_irq_vectors(pdev);
 	return ret;
 }
@@ -369,7 +347,8 @@ static void lpss8250_remove(struct pci_dev *pdev)
 
 	serial8250_unregister_port(lpss->data.line);
 
-	lpss->board->exit(lpss);
+	if (lpss->board->exit)
+		lpss->board->exit(lpss);
 	pci_free_irq_vectors(pdev);
 }
 
@@ -377,14 +356,12 @@ static const struct lpss8250_board byt_board = {
 	.freq = 100000000,
 	.base_baud = 2764800,
 	.setup = byt_serial_setup,
-	.exit = byt_serial_exit,
 };
 
 static const struct lpss8250_board ehl_board = {
 	.freq = 200000000,
 	.base_baud = 12500000,
 	.setup = ehl_serial_setup,
-	.exit = ehl_serial_exit,
 };
 
 static const struct lpss8250_board qrk_board = {
