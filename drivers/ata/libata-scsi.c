@@ -409,10 +409,6 @@ int ata_cmd_ioctl(struct scsi_device *scsidev, void __user *arg)
 	cmd_result = scsi_execute(scsidev, scsi_cmd, data_dir, argbuf, argsize,
 				  sensebuf, &sshdr, (10*HZ), 5, 0, 0, NULL);
 
-	if (cmd_result < 0) {
-		rc = cmd_result;
-		goto error;
-	}
 	if (driver_byte(cmd_result) == DRIVER_SENSE) {/* sense data available */
 		u8 *desc = sensebuf + 8;
 		cmd_result &= ~(0xFF<<24); /* DRIVER_SENSE is not an error */
@@ -494,10 +490,6 @@ int ata_task_ioctl(struct scsi_device *scsidev, void __user *arg)
 	cmd_result = scsi_execute(scsidev, scsi_cmd, DMA_NONE, NULL, 0,
 				sensebuf, &sshdr, (10*HZ), 5, 0, 0, NULL);
 
-	if (cmd_result < 0) {
-		rc = cmd_result;
-		goto error;
-	}
 	if (driver_byte(cmd_result) == DRIVER_SENSE) {/* sense data available */
 		u8 *desc = sensebuf + 8;
 		cmd_result &= ~(0xFF<<24); /* DRIVER_SENSE is not an error */
@@ -2878,19 +2870,8 @@ static unsigned int ata_scsi_pass_thru(struct ata_queued_cmd *qc)
 		goto invalid_fld;
 	}
 
-	if ((cdb[2 + cdb_offset] & 0x3) == 0) {
-		/*
-		 * When T_LENGTH is zero (No data is transferred), dir should
-		 * be DMA_NONE.
-		 */
-		if (scmd->sc_data_direction != DMA_NONE) {
-			fp = 2 + cdb_offset;
-			goto invalid_fld;
-		}
-
-		if (ata_is_ncq(tf->protocol))
-			tf->protocol = ATA_PROT_NCQ_NODATA;
-	}
+	if (ata_is_ncq(tf->protocol) && (cdb[2 + cdb_offset] & 0x3) == 0)
+		tf->protocol = ATA_PROT_NCQ_NODATA;
 
 	/* enable LBA */
 	tf->flags |= ATA_TFLAG_LBA;
@@ -3311,7 +3292,6 @@ static unsigned int ata_scsiop_maint_in(struct ata_scsi_args *args, u8 *rbuf)
 	case REPORT_LUNS:
 	case REQUEST_SENSE:
 	case SYNCHRONIZE_CACHE:
-	case SYNCHRONIZE_CACHE_16:
 	case REZERO_UNIT:
 	case SEEK_6:
 	case SEEK_10:
@@ -3978,7 +3958,6 @@ static inline ata_xlat_func_t ata_get_xlat_func(struct ata_device *dev, u8 cmd)
 		return ata_scsi_write_same_xlat;
 
 	case SYNCHRONIZE_CACHE:
-	case SYNCHRONIZE_CACHE_16:
 		if (ata_try_flush_cache(dev))
 			return ata_scsi_flush_xlat;
 		break;
@@ -4040,51 +4019,44 @@ void ata_scsi_dump_cdb(struct ata_port *ap, struct scsi_cmnd *cmd)
 
 int __ata_scsi_queuecmd(struct scsi_cmnd *scmd, struct ata_device *dev)
 {
-	struct ata_port *ap = dev->link->ap;
 	u8 scsi_op = scmd->cmnd[0];
 	ata_xlat_func_t xlat_func;
-
-	/*
-	 * scsi_queue_rq() will defer commands if scsi_host_in_recovery().
-	 * However, this check is done without holding the ap->lock (a libata
-	 * specific lock), so we can have received an error irq since then,
-	 * therefore we must check if EH is pending, while holding ap->lock.
-	 */
-	if (ap->pflags & (ATA_PFLAG_EH_PENDING | ATA_PFLAG_EH_IN_PROGRESS))
-		return SCSI_MLQUEUE_DEVICE_BUSY;
-
-	if (unlikely(!scmd->cmd_len))
-		goto bad_cdb_len;
+	int rc = 0;
 
 	if (dev->class == ATA_DEV_ATA || dev->class == ATA_DEV_ZAC) {
-		if (unlikely(scmd->cmd_len > dev->cdb_len))
+		if (unlikely(!scmd->cmd_len || scmd->cmd_len > dev->cdb_len))
 			goto bad_cdb_len;
 
 		xlat_func = ata_get_xlat_func(dev, scsi_op);
-	} else if (likely((scsi_op != ATA_16) || !atapi_passthru16)) {
-		/* relay SCSI command to ATAPI device */
-		int len = COMMAND_SIZE(scsi_op);
-
-		if (unlikely(len > scmd->cmd_len ||
-			     len > dev->cdb_len ||
-			     scmd->cmd_len > ATAPI_CDB_LEN))
-			goto bad_cdb_len;
-
-		xlat_func = atapi_xlat;
 	} else {
-		/* ATA_16 passthru, treat as an ATA command */
-		if (unlikely(scmd->cmd_len > 16))
+		if (unlikely(!scmd->cmd_len))
 			goto bad_cdb_len;
 
-		xlat_func = ata_get_xlat_func(dev, scsi_op);
+		xlat_func = NULL;
+		if (likely((scsi_op != ATA_16) || !atapi_passthru16)) {
+			/* relay SCSI command to ATAPI device */
+			int len = COMMAND_SIZE(scsi_op);
+			if (unlikely(len > scmd->cmd_len ||
+				     len > dev->cdb_len ||
+				     scmd->cmd_len > ATAPI_CDB_LEN))
+				goto bad_cdb_len;
+
+			xlat_func = atapi_xlat;
+		} else {
+			/* ATA_16 passthru, treat as an ATA command */
+			if (unlikely(scmd->cmd_len > 16))
+				goto bad_cdb_len;
+
+			xlat_func = ata_get_xlat_func(dev, scsi_op);
+		}
 	}
 
 	if (xlat_func)
-		return ata_scsi_translate(dev, scmd, xlat_func);
+		rc = ata_scsi_translate(dev, scmd, xlat_func);
+	else
+		ata_scsi_simulate(dev, scmd);
 
-	ata_scsi_simulate(dev, scmd);
-
-	return 0;
+	return rc;
 
  bad_cdb_len:
 	DPRINTK("bad CDB len=%u, scsi_op=0x%02x, max=%u\n",
@@ -4232,7 +4204,6 @@ void ata_scsi_simulate(struct ata_device *dev, struct scsi_cmnd *cmd)
 	 * turning this into a no-op.
 	 */
 	case SYNCHRONIZE_CACHE:
-	case SYNCHRONIZE_CACHE_16:
 		fallthrough;
 
 	/* no-op's, complete with success */
