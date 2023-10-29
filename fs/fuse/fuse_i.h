@@ -31,7 +31,6 @@
 #include <linux/pid_namespace.h>
 #include <linux/refcount.h>
 #include <linux/user_namespace.h>
-#include <linux/kabi.h>
 
 /** Default max number of pages that can be used in a single read request */
 #define FUSE_DEFAULT_MAX_PAGES_PER_REQ 32
@@ -163,8 +162,6 @@ struct fuse_inode {
 	 */
 	struct fuse_inode_dax *dax;
 #endif
-
-	KABI_RESERVE(1)
 };
 
 /** FUSE inode state bits */
@@ -182,6 +179,17 @@ enum {
 struct fuse_conn;
 struct fuse_mount;
 struct fuse_release_args;
+
+/**
+ * Reference to lower filesystem file for read/write operations handled in
+ * passthrough mode.
+ * This struct also tracks the credentials to be used for handling read/write
+ * operations.
+ */
+struct fuse_passthrough {
+	struct file *filp;
+	struct cred *cred;
+};
 
 /** FUSE specific file data */
 struct fuse_file {
@@ -228,6 +236,9 @@ struct fuse_file {
 
 	} readdir;
 
+	/** Container for data related to the passthrough functionality */
+	struct fuse_passthrough passthrough;
+
 	/** RB node to be linked on fuse_conn->polled_files */
 	struct rb_node polled_node;
 
@@ -270,12 +281,12 @@ struct fuse_args {
 	bool page_zeroing:1;
 	bool page_replace:1;
 	bool may_block:1;
-#ifndef __GENKSYMS__
-	bool user_pages:1;
-#endif
 	struct fuse_in_arg in_args[3];
 	struct fuse_arg out_args[2];
 	void (*end)(struct fuse_mount *fm, struct fuse_args *args, int error);
+
+	/* Path used for completing d_canonical_path */
+	struct path *canonical_path;
 };
 
 struct fuse_args_pages {
@@ -379,10 +390,8 @@ struct fuse_req {
 	/** Used to wake up the task waiting for completion of request*/
 	wait_queue_head_t waitq;
 
-#if IS_ENABLED(CONFIG_VIRTIO_FS)
 	/** virtio-fs's physically contiguous buffer for in and out args */
 	void *argbuf;
-#endif
 
 	/** fuse_mount this request belongs to */
 	struct fuse_mount *fm;
@@ -491,8 +500,6 @@ struct fuse_dev {
 
 	/** list entry on fc->devices */
 	struct list_head entry;
-
-	KABI_RESERVE(1)
 };
 
 struct fuse_fs_context {
@@ -646,14 +653,6 @@ struct fuse_conn {
 	unsigned int legacy_opts_show:1;
 
 	/*
-	 * fs kills suid/sgid/cap on write/chown/trunc. suid is killed on
-	 * write/trunc only if caller did not have CAP_FSETID.  sgid is killed
-	 * on write/truncate only if caller did not have CAP_FSETID as well as
-	 * file has group execute permission.
-	 */
-	unsigned handle_killpriv_v2:1;
-
-	/*
 	 * The following bitfields are only for optimization purposes
 	 * and hence races in setting them will not cause malfunction
 	 */
@@ -763,6 +762,9 @@ struct fuse_conn {
 	/* Auto-mount submounts announced by the server */
 	unsigned int auto_submounts:1;
 
+	/** Passthrough mode for read/write IO */
+	unsigned int passthrough:1;
+
 	/** The number of requests waiting for completion */
 	atomic_t num_waiting;
 
@@ -807,10 +809,11 @@ struct fuse_conn {
 	/** List of filesystems using this connection */
 	struct list_head mounts;
 
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
-	KABI_RESERVE(3)
-	KABI_RESERVE(4)
+	/** IDR for passthrough requests */
+	struct idr passthrough_req;
+
+	/** Protects passthrough_req */
+	spinlock_t passthrough_req_lock;
 };
 
 /*
@@ -1134,7 +1137,6 @@ int fuse_allow_current_process(struct fuse_conn *fc);
 
 u64 fuse_lock_owner_id(struct fuse_conn *fc, fl_owner_t id);
 
-void fuse_flush_time_update(struct inode *inode);
 void fuse_update_ctime(struct inode *inode);
 
 int fuse_update_attributes(struct inode *inode, struct file *file);
@@ -1252,5 +1254,14 @@ void fuse_dax_inode_init(struct inode *inode);
 void fuse_dax_inode_cleanup(struct inode *inode);
 bool fuse_dax_check_alignment(struct fuse_conn *fc, unsigned int map_alignment);
 void fuse_dax_cancel_work(struct fuse_conn *fc);
+
+/* passthrough.c */
+int fuse_passthrough_open(struct fuse_dev *fud, u32 lower_fd);
+int fuse_passthrough_setup(struct fuse_conn *fc, struct fuse_file *ff,
+			   struct fuse_open_out *openarg);
+void fuse_passthrough_release(struct fuse_passthrough *passthrough);
+ssize_t fuse_passthrough_read_iter(struct kiocb *iocb, struct iov_iter *to);
+ssize_t fuse_passthrough_write_iter(struct kiocb *iocb, struct iov_iter *from);
+ssize_t fuse_passthrough_mmap(struct file *file, struct vm_area_struct *vma);
 
 #endif /* _FS_FUSE_I_H */
