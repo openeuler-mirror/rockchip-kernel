@@ -258,8 +258,7 @@ static int dwc3_qcom_interconnect_init(struct dwc3_qcom *qcom)
 	if (IS_ERR(qcom->icc_path_apps)) {
 		dev_err(dev, "failed to get apps-usb path: %ld\n",
 				PTR_ERR(qcom->icc_path_apps));
-		ret = PTR_ERR(qcom->icc_path_apps);
-		goto put_path_ddr;
+		return PTR_ERR(qcom->icc_path_apps);
 	}
 
 	if (usb_get_maximum_speed(&qcom->dwc3->dev) >= USB_SPEED_SUPER ||
@@ -272,23 +271,17 @@ static int dwc3_qcom_interconnect_init(struct dwc3_qcom *qcom)
 
 	if (ret) {
 		dev_err(dev, "failed to set bandwidth for usb-ddr path: %d\n", ret);
-		goto put_path_apps;
+		return ret;
 	}
 
 	ret = icc_set_bw(qcom->icc_path_apps,
 		APPS_USB_AVG_BW, APPS_USB_PEAK_BW);
 	if (ret) {
 		dev_err(dev, "failed to set bandwidth for apps-usb path: %d\n", ret);
-		goto put_path_apps;
+		return ret;
 	}
 
 	return 0;
-
-put_path_apps:
-	icc_put(qcom->icc_path_apps);
-put_path_ddr:
-	icc_put(qcom->icc_path_ddr);
-	return ret;
 }
 
 /**
@@ -301,14 +294,6 @@ static void dwc3_qcom_interconnect_exit(struct dwc3_qcom *qcom)
 {
 	icc_put(qcom->icc_path_ddr);
 	icc_put(qcom->icc_path_apps);
-}
-
-/* Only usable in contexts where the role can not change. */
-static bool dwc3_qcom_is_host(struct dwc3_qcom *qcom)
-{
-	struct dwc3 *dwc = platform_get_drvdata(qcom->dwc3);
-
-	return dwc->xhci;
 }
 
 static void dwc3_qcom_disable_interrupts(struct dwc3_qcom *qcom)
@@ -426,11 +411,7 @@ static irqreturn_t qcom_dwc3_resume_irq(int irq, void *data)
 	if (qcom->pm_suspended)
 		return IRQ_HANDLED;
 
-	/*
-	 * This is safe as role switching is done from a freezable workqueue
-	 * and the wakeup interrupts are disabled as part of resume.
-	 */
-	if (dwc3_qcom_is_host(qcom))
+	if (dwc->xhci)
 		pm_runtime_resume(&dwc->xhci->dev);
 
 	return IRQ_HANDLED;
@@ -462,9 +443,9 @@ static int dwc3_qcom_get_irq(struct platform_device *pdev,
 	int ret;
 
 	if (np)
-		ret = platform_get_irq_byname_optional(pdev_irq, name);
+		ret = platform_get_irq_byname(pdev_irq, name);
 	else
-		ret = platform_get_irq_optional(pdev_irq, num);
+		ret = platform_get_irq(pdev_irq, num);
 
 	return ret;
 }
@@ -613,10 +594,8 @@ static int dwc3_qcom_acpi_register_core(struct platform_device *pdev)
 	qcom->dwc3->dev.coherent_dma_mask = dev->coherent_dma_mask;
 
 	child_res = kcalloc(2, sizeof(*child_res), GFP_KERNEL);
-	if (!child_res) {
-		platform_device_put(qcom->dwc3);
+	if (!child_res)
 		return -ENOMEM;
-	}
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	if (!res) {
@@ -652,15 +631,10 @@ static int dwc3_qcom_acpi_register_core(struct platform_device *pdev)
 	}
 
 	ret = platform_device_add(qcom->dwc3);
-	if (ret) {
+	if (ret)
 		dev_err(&pdev->dev, "failed to add device\n");
-		goto out;
-	}
-	kfree(child_res);
-	return 0;
 
 out:
-	platform_device_put(qcom->dwc3);
 	kfree(child_res);
 	return ret;
 }
@@ -670,12 +644,27 @@ static int dwc3_qcom_of_register_core(struct platform_device *pdev)
 	struct dwc3_qcom	*qcom = platform_get_drvdata(pdev);
 	struct device_node	*np = pdev->dev.of_node, *dwc3_np;
 	struct device		*dev = &pdev->dev;
+	struct property		*prop;
 	int			ret;
 
 	dwc3_np = of_get_child_by_name(np, "dwc3");
 	if (!dwc3_np) {
 		dev_err(dev, "failed to find dwc3 core child\n");
 		return -ENODEV;
+	}
+
+	prop = devm_kzalloc(dev, sizeof(*prop), GFP_KERNEL);
+	if (!prop) {
+		ret = -ENOMEM;
+		dev_err(dev, "unable to allocate memory for property\n");
+		goto node_put;
+	}
+
+	prop->name = "tx-fifo-resize";
+	ret = of_add_property(dwc3_np, prop);
+	if (ret) {
+		dev_err(dev, "unable to add property\n");
+		goto node_put;
 	}
 
 	ret = of_platform_populate(np, NULL, NULL, dev);
@@ -790,12 +779,9 @@ static int dwc3_qcom_probe(struct platform_device *pdev)
 
 		if (qcom->acpi_pdata->is_urs) {
 			qcom->urs_usb = dwc3_qcom_create_urs_usb_platdev(dev);
-			if (IS_ERR_OR_NULL(qcom->urs_usb)) {
+			if (!qcom->urs_usb) {
 				dev_err(dev, "failed to create URS USB platdev\n");
-				if (!qcom->urs_usb)
-					return -ENODEV;
-				else
-					return PTR_ERR(qcom->urs_usb);
+				return -ENODEV;
 			}
 		}
 	}
