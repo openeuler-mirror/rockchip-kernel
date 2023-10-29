@@ -206,12 +206,8 @@ static int of_get_regulation_constraints(struct device *dev,
 		}
 
 		suspend_np = of_get_child_by_name(np, regulator_states[i]);
-		if (!suspend_np)
+		if (!suspend_np || !suspend_state)
 			continue;
-		if (!suspend_state) {
-			of_node_put(suspend_np);
-			continue;
-		}
 
 		if (!of_property_read_u32(suspend_np, "regulator-mode",
 					  &pval)) {
@@ -417,8 +413,12 @@ device_node *regulator_of_get_init_node(struct device *dev,
 
 	for_each_available_child_of_node(search, child) {
 		name = of_get_property(child, "regulator-compatible", NULL);
-		if (!name)
-			name = child->name;
+		if (!name) {
+			if (!desc->of_match_full_name)
+				name = child->name;
+			else
+				name = child->full_name;
+		}
 
 		if (!strcmp(desc->of_match, name)) {
 			of_node_put(search);
