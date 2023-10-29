@@ -97,16 +97,13 @@ static void tls_device_queue_ctx_destruction(struct tls_context *ctx)
 	unsigned long flags;
 
 	spin_lock_irqsave(&tls_device_lock, flags);
-	if (unlikely(!refcount_dec_and_test(&ctx->refcount)))
-		goto unlock;
-
 	list_move_tail(&ctx->list, &tls_device_gc_list);
 
 	/* schedule_work inside the spinlock
 	 * to make sure tls_device_down waits for that work.
 	 */
 	schedule_work(&tls_device_gc_work);
-unlock:
+
 	spin_unlock_irqrestore(&tls_device_lock, flags);
 }
 
@@ -131,7 +128,7 @@ static void destroy_record(struct tls_record_info *record)
 	int i;
 
 	for (i = 0; i < record->num_frags; i++)
-		__skb_frag_unref(&record->frags[i], false);
+		__skb_frag_unref(&record->frags[i]);
 	kfree(record);
 }
 
@@ -197,7 +194,8 @@ void tls_device_sk_destruct(struct sock *sk)
 		clean_acked_data_disable(inet_csk(sk));
 	}
 
-	tls_device_queue_ctx_destruction(tls_ctx);
+	if (refcount_dec_and_test(&tls_ctx->refcount))
+		tls_device_queue_ctx_destruction(tls_ctx);
 }
 EXPORT_SYMBOL_GPL(tls_device_sk_destruct);
 
@@ -330,7 +328,7 @@ static int tls_device_record_close(struct sock *sk,
 	/* fill prepend */
 	tls_fill_prepend(ctx, skb_frag_address(&record->frags[0]),
 			 record->len - prot->overhead_size,
-			 record_type);
+			 record_type, prot->version);
 	return ret;
 }
 
@@ -485,13 +483,11 @@ handle_error:
 		copy = min_t(size_t, size, (pfrag->size - pfrag->offset));
 		copy = min_t(size_t, copy, (max_open_record_len - record->len));
 
-		if (copy) {
-			rc = tls_device_copy_data(page_address(pfrag->page) +
-						  pfrag->offset, copy, msg_iter);
-			if (rc)
-				goto handle_error;
-			tls_append_frag(record, pfrag, copy);
-		}
+		rc = tls_device_copy_data(page_address(pfrag->page) +
+					  pfrag->offset, copy, msg_iter);
+		if (rc)
+			goto handle_error;
+		tls_append_frag(record, pfrag, copy);
 
 		size -= copy;
 		if (!size) {
@@ -1014,7 +1010,7 @@ static void tls_device_attach(struct tls_context *ctx, struct sock *sk,
 
 int tls_set_device_offload(struct sock *sk, struct tls_context *ctx)
 {
-	u16 nonce_size, tag_size, iv_size, rec_seq_size, salt_size;
+	u16 nonce_size, tag_size, iv_size, rec_seq_size;
 	struct tls_context *tls_ctx = tls_get_ctx(sk);
 	struct tls_prot_info *prot = &tls_ctx->prot_info;
 	struct tls_record_info *start_marker_record;
@@ -1055,7 +1051,6 @@ int tls_set_device_offload(struct sock *sk, struct tls_context *ctx)
 		iv_size = TLS_CIPHER_AES_GCM_128_IV_SIZE;
 		iv = ((struct tls12_crypto_info_aes_gcm_128 *)crypto_info)->iv;
 		rec_seq_size = TLS_CIPHER_AES_GCM_128_REC_SEQ_SIZE;
-		salt_size = TLS_CIPHER_AES_GCM_128_SALT_SIZE;
 		rec_seq =
 		 ((struct tls12_crypto_info_aes_gcm_128 *)crypto_info)->rec_seq;
 		break;
@@ -1076,7 +1071,6 @@ int tls_set_device_offload(struct sock *sk, struct tls_context *ctx)
 	prot->tag_size = tag_size;
 	prot->overhead_size = prot->prepend_size + prot->tag_size;
 	prot->iv_size = iv_size;
-	prot->salt_size = salt_size;
 	ctx->tx.iv = kmalloc(iv_size + TLS_CIPHER_AES_GCM_128_SALT_SIZE,
 			     GFP_KERNEL);
 	if (!ctx->tx.iv) {
@@ -1349,15 +1343,7 @@ static int tls_device_down(struct net_device *netdev)
 
 		/* Device contexts for RX and TX will be freed in on sk_destruct
 		 * by tls_device_free_ctx. rx_conf and tx_conf stay in TLS_HW.
-		 * Now release the ref taken above.
 		 */
-		if (refcount_dec_and_test(&ctx->refcount)) {
-			/* sk_destruct ran after tls_device_down took a ref, and
-			 * it returned early. Complete the destruction here.
-			 */
-			list_del(&ctx->list);
-			tls_device_free_ctx(ctx);
-		}
 	}
 
 	up_write(&device_offload_lock);
@@ -1399,9 +1385,9 @@ static struct notifier_block tls_dev_notifier = {
 	.notifier_call	= tls_dev_event,
 };
 
-int __init tls_device_init(void)
+void __init tls_device_init(void)
 {
-	return register_netdevice_notifier(&tls_dev_notifier);
+	register_netdevice_notifier(&tls_dev_notifier);
 }
 
 void __exit tls_device_cleanup(void)

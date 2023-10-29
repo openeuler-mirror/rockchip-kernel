@@ -35,7 +35,6 @@
  * SOFTWARE.
  */
 
-#include <linux/bug.h>
 #include <linux/sched/signal.h>
 #include <linux/module.h>
 #include <linux/splice.h>
@@ -43,14 +42,6 @@
 
 #include <net/strparser.h>
 #include <net/tls.h>
-
-noinline void tls_err_abort(struct sock *sk, int err)
-{
-	WARN_ON_ONCE(err >= 0);
-	/* sk->sk_err should contain a positive error code. */
-	sk->sk_err = -err;
-	sk->sk_error_report(sk);
-}
 
 static int __skb_nsg(struct sk_buff *skb, int offset, int len,
                      unsigned int recursion_level)
@@ -428,7 +419,7 @@ int tls_tx_records(struct sock *sk, int flags)
 
 tx_err:
 	if (rc < 0 && rc != -EAGAIN)
-		tls_err_abort(sk, -EBADMSG);
+		tls_err_abort(sk, EBADMSG);
 
 	return rc;
 }
@@ -459,7 +450,7 @@ static void tls_encrypt_done(struct crypto_async_request *req, int err)
 
 		/* If err is already set on socket, return the same code */
 		if (sk->sk_err) {
-			ctx->async_wait.err = -sk->sk_err;
+			ctx->async_wait.err = sk->sk_err;
 		} else {
 			ctx->async_wait.err = err;
 			tls_err_abort(sk, err);
@@ -507,21 +498,15 @@ static int tls_do_encryption(struct sock *sk,
 	int rc, iv_offset = 0;
 
 	/* For CCM based ciphers, first byte of IV is a constant */
-	switch (prot->cipher_type) {
-	case TLS_CIPHER_AES_CCM_128:
+	if (prot->cipher_type == TLS_CIPHER_AES_CCM_128) {
 		rec->iv_data[0] = TLS_AES_CCM_IV_B0_BYTE;
 		iv_offset = 1;
-		break;
-	case TLS_CIPHER_SM4_CCM:
-		rec->iv_data[0] = TLS_SM4_CCM_IV_B0_BYTE;
-		iv_offset = 1;
-		break;
 	}
 
 	memcpy(&rec->iv_data[iv_offset], tls_ctx->tx.iv,
 	       prot->iv_size + prot->salt_size);
 
-	xor_iv_with_seq(prot, rec->iv_data + iv_offset, tls_ctx->tx.rec_seq);
+	xor_iv_with_seq(prot->version, rec->iv_data, tls_ctx->tx.rec_seq);
 
 	sge->offset += prot->prepend_size;
 	sge->length -= prot->prepend_size;
@@ -764,13 +749,14 @@ static int tls_push_record(struct sock *sk, int flags,
 	sg_chain(rec->sg_aead_out, 2, &msg_en->sg.data[i]);
 
 	tls_make_aad(rec->aad_space, msg_pl->sg.size + prot->tail_size,
-		     tls_ctx->tx.rec_seq, record_type, prot);
+		     tls_ctx->tx.rec_seq, prot->rec_seq_size,
+		     record_type, prot->version);
 
 	tls_fill_prepend(tls_ctx,
 			 page_address(sg_page(&msg_en->sg.data[i])) +
 			 msg_en->sg.data[i].offset,
 			 msg_pl->sg.size + prot->tail_size,
-			 record_type);
+			 record_type, prot->version);
 
 	tls_ctx->pending_open_record_frags = false;
 
@@ -778,7 +764,7 @@ static int tls_push_record(struct sock *sk, int flags,
 			       msg_pl->sg.size + prot->tail_size, i);
 	if (rc < 0) {
 		if (rc != -EINPROGRESS) {
-			tls_err_abort(sk, -EBADMSG);
+			tls_err_abort(sk, EBADMSG);
 			if (split) {
 				tls_ctx->pending_open_record_frags = true;
 				tls_merge_open_record(sk, rec, tmp, orig_end);
@@ -807,7 +793,7 @@ static int bpf_exec_tx_verdict(struct sk_msg *msg, struct sock *sk,
 	struct sk_psock *psock;
 	struct sock *sk_redir;
 	struct tls_rec *rec;
-	bool enospc, policy, redir_ingress;
+	bool enospc, policy;
 	int err = 0, send;
 	u32 delta = 0;
 
@@ -852,7 +838,6 @@ more_data:
 		}
 		break;
 	case __SK_REDIRECT:
-		redir_ingress = psock->redir_ingress;
 		sk_redir = psock->sk_redir;
 		memcpy(&msg_redir, msg, sizeof(*msg));
 		if (msg->apply_bytes < send)
@@ -862,8 +847,7 @@ more_data:
 		sk_msg_return_zero(sk, msg, send);
 		msg->sg.size -= send;
 		release_sock(sk);
-		err = tcp_bpf_sendmsg_redir(sk_redir, redir_ingress,
-					    &msg_redir, send, flags);
+		err = tcp_bpf_sendmsg_redir(sk_redir, &msg_redir, send, flags);
 		lock_sock(sk);
 		if (err < 0) {
 			*copied -= sk_msg_free_nocharge(sk, &msg_redir);
@@ -1474,16 +1458,10 @@ static int decrypt_internal(struct sock *sk, struct sk_buff *skb,
 	aad = (u8 *)(sgout + n_sgout);
 	iv = aad + prot->aad_size;
 
-	/* For CCM based ciphers, first byte of nonce+iv is a constant */
-	switch (prot->cipher_type) {
-	case TLS_CIPHER_AES_CCM_128:
-		iv[0] = TLS_AES_CCM_IV_B0_BYTE;
+	/* For CCM based ciphers, first byte of nonce+iv is always '2' */
+	if (prot->cipher_type == TLS_CIPHER_AES_CCM_128) {
+		iv[0] = 2;
 		iv_offset = 1;
-		break;
-	case TLS_CIPHER_SM4_CCM:
-		iv[0] = TLS_SM4_CCM_IV_B0_BYTE;
-		iv_offset = 1;
-		break;
 	}
 
 	/* Prepare IV */
@@ -1496,16 +1474,17 @@ static int decrypt_internal(struct sock *sk, struct sk_buff *skb,
 	}
 	if (prot->version == TLS_1_3_VERSION)
 		memcpy(iv + iv_offset, tls_ctx->rx.iv,
-		       prot->iv_size + prot->salt_size);
+		       crypto_aead_ivsize(ctx->aead_recv));
 	else
 		memcpy(iv + iv_offset, tls_ctx->rx.iv, prot->salt_size);
 
-	xor_iv_with_seq(prot, iv + iv_offset, tls_ctx->rx.rec_seq);
+	xor_iv_with_seq(prot->version, iv, tls_ctx->rx.rec_seq);
 
 	/* Prepare AAD */
 	tls_make_aad(aad, rxm->full_len - prot->overhead_size +
 		     prot->tail_size,
-		     tls_ctx->rx.rec_seq, ctx->control, prot);
+		     tls_ctx->rx.rec_seq, prot->rec_seq_size,
+		     ctx->control, prot->version);
 
 	/* Prepare sgin */
 	sg_init_table(sgin, n_sgin);
@@ -1849,7 +1828,7 @@ int tls_sw_recvmsg(struct sock *sk,
 		err = decrypt_skb_update(sk, skb, &msg->msg_iter,
 					 &chunk, &zc, async_capable);
 		if (err < 0 && err != -EINPROGRESS) {
-			tls_err_abort(sk, -EBADMSG);
+			tls_err_abort(sk, EBADMSG);
 			goto recv_end;
 		}
 
@@ -2006,7 +1985,6 @@ ssize_t tls_sw_splice_read(struct socket *sock,  loff_t *ppos,
 	struct sock *sk = sock->sk;
 	struct sk_buff *skb;
 	ssize_t copied = 0;
-	bool from_queue;
 	int err = 0;
 	long timeo;
 	int chunk;
@@ -2016,28 +1994,25 @@ ssize_t tls_sw_splice_read(struct socket *sock,  loff_t *ppos,
 
 	timeo = sock_rcvtimeo(sk, flags & SPLICE_F_NONBLOCK);
 
-	from_queue = !skb_queue_empty(&ctx->rx_list);
-	if (from_queue) {
-		skb = __skb_dequeue(&ctx->rx_list);
-	} else {
-		skb = tls_wait_data(sk, NULL, flags & SPLICE_F_NONBLOCK, timeo,
-				    &err);
-		if (!skb)
-			goto splice_read_end;
+	skb = tls_wait_data(sk, NULL, flags & SPLICE_F_NONBLOCK, timeo, &err);
+	if (!skb)
+		goto splice_read_end;
 
+	if (!ctx->decrypted) {
 		err = decrypt_skb_update(sk, skb, NULL, &chunk, &zc, false);
-		if (err < 0) {
-			tls_err_abort(sk, -EBADMSG);
+
+		/* splice does not support reading control messages */
+		if (ctx->control != TLS_RECORD_TYPE_DATA) {
+			err = -EINVAL;
 			goto splice_read_end;
 		}
-	}
 
-	/* splice does not support reading control messages */
-	if (ctx->control != TLS_RECORD_TYPE_DATA) {
-		err = -EINVAL;
-		goto splice_read_end;
+		if (err < 0) {
+			tls_err_abort(sk, EBADMSG);
+			goto splice_read_end;
+		}
+		ctx->decrypted = 1;
 	}
-
 	rxm = strp_msg(skb);
 
 	chunk = min_t(unsigned int, rxm->full_len, len);
@@ -2045,17 +2020,8 @@ ssize_t tls_sw_splice_read(struct socket *sock,  loff_t *ppos,
 	if (copied < 0)
 		goto splice_read_end;
 
-	if (!from_queue) {
-		ctx->recv_pkt = NULL;
-		__strp_unpause(&ctx->strp);
-	}
-	if (chunk < rxm->full_len) {
-		__skb_queue_head(&ctx->rx_list, skb);
-		rxm->offset += len;
-		rxm->full_len -= len;
-	} else {
-		consume_skb(skb);
-	}
+	if (likely(!(flags & MSG_PEEK)))
+		tls_sw_advance_skb(sk, skb, copied);
 
 splice_read_end:
 	release_sock(sk);
@@ -2441,40 +2407,6 @@ int tls_set_sw_offload(struct sock *sk, struct tls_context *ctx, int tx)
 		salt = ccm_128_info->salt;
 		salt_size = TLS_CIPHER_AES_CCM_128_SALT_SIZE;
 		cipher_name = "ccm(aes)";
-		break;
-	}
-	case TLS_CIPHER_SM4_GCM: {
-		struct tls12_crypto_info_sm4_gcm *sm4_gcm_info;
-
-		sm4_gcm_info = (void *)crypto_info;
-		nonce_size = TLS_CIPHER_SM4_GCM_IV_SIZE;
-		tag_size = TLS_CIPHER_SM4_GCM_TAG_SIZE;
-		iv_size = TLS_CIPHER_SM4_GCM_IV_SIZE;
-		iv = sm4_gcm_info->iv;
-		rec_seq_size = TLS_CIPHER_SM4_GCM_REC_SEQ_SIZE;
-		rec_seq = sm4_gcm_info->rec_seq;
-		keysize = TLS_CIPHER_SM4_GCM_KEY_SIZE;
-		key = sm4_gcm_info->key;
-		salt = sm4_gcm_info->salt;
-		salt_size = TLS_CIPHER_SM4_GCM_SALT_SIZE;
-		cipher_name = "gcm(sm4)";
-		break;
-	}
-	case TLS_CIPHER_SM4_CCM: {
-		struct tls12_crypto_info_sm4_ccm *sm4_ccm_info;
-
-		sm4_ccm_info = (void *)crypto_info;
-		nonce_size = TLS_CIPHER_SM4_CCM_IV_SIZE;
-		tag_size = TLS_CIPHER_SM4_CCM_TAG_SIZE;
-		iv_size = TLS_CIPHER_SM4_CCM_IV_SIZE;
-		iv = sm4_ccm_info->iv;
-		rec_seq_size = TLS_CIPHER_SM4_CCM_REC_SEQ_SIZE;
-		rec_seq = sm4_ccm_info->rec_seq;
-		keysize = TLS_CIPHER_SM4_CCM_KEY_SIZE;
-		key = sm4_ccm_info->key;
-		salt = sm4_ccm_info->salt;
-		salt_size = TLS_CIPHER_SM4_CCM_SALT_SIZE;
-		cipher_name = "ccm(sm4)";
 		break;
 	}
 	default:
