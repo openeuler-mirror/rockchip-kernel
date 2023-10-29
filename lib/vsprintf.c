@@ -756,16 +756,14 @@ static void enable_ptr_key_workfn(struct work_struct *work)
 
 static DECLARE_WORK(enable_ptr_key_work, enable_ptr_key_workfn);
 
-static int fill_random_ptr_key(struct notifier_block *nb,
-			       unsigned long action, void *data)
+static void fill_random_ptr_key(struct random_ready_callback *unused)
 {
 	/* This may be in an interrupt handler. */
 	queue_work(system_unbound_wq, &enable_ptr_key_work);
-	return 0;
 }
 
-static struct notifier_block random_ready = {
-	.notifier_call = fill_random_ptr_key
+static struct random_ready_callback random_ready = {
+	.func = fill_random_ptr_key
 };
 
 static int __init initialize_ptr_random(void)
@@ -779,7 +777,7 @@ static int __init initialize_ptr_random(void)
 		return 0;
 	}
 
-	ret = register_random_ready_notifier(&random_ready);
+	ret = add_random_ready_callback(&random_ready);
 	if (!ret) {
 		return 0;
 	} else if (ret == -EALREADY) {
@@ -1944,66 +1942,6 @@ char *format_flags(char *buf, char *end, unsigned long flags,
 	return buf;
 }
 
-struct page_flags_fields {
-	int width;
-	int shift;
-	int mask;
-	const struct printf_spec *spec;
-	const char *name;
-};
-
-static const struct page_flags_fields pff[] = {
-	{SECTIONS_WIDTH, SECTIONS_PGSHIFT, SECTIONS_MASK,
-	 &default_dec_spec, "section"},
-	{NODES_WIDTH, NODES_PGSHIFT, NODES_MASK,
-	 &default_dec_spec, "node"},
-	{ZONES_WIDTH, ZONES_PGSHIFT, ZONES_MASK,
-	 &default_dec_spec, "zone"},
-	{LAST_CPUPID_WIDTH, LAST_CPUPID_PGSHIFT, LAST_CPUPID_MASK,
-	 &default_flag_spec, "lastcpupid"},
-	{KASAN_TAG_WIDTH, KASAN_TAG_PGSHIFT, KASAN_TAG_MASK,
-	 &default_flag_spec, "kasantag"},
-};
-
-static
-char *format_page_flags(char *buf, char *end, unsigned long flags)
-{
-	unsigned long main_flags = flags & (BIT(NR_PAGEFLAGS) - 1);
-	bool append = false;
-	int i;
-
-	/* Page flags from the main area. */
-	if (main_flags) {
-		buf = format_flags(buf, end, main_flags, pageflag_names);
-		append = true;
-	}
-
-	/* Page flags from the fields area */
-	for (i = 0; i < ARRAY_SIZE(pff); i++) {
-		/* Skip undefined fields. */
-		if (!pff[i].width)
-			continue;
-
-		/* Format: Flag Name + '=' (equals sign) + Number + '|' (separator) */
-		if (append) {
-			if (buf < end)
-				*buf = '|';
-			buf++;
-		}
-
-		buf = string(buf, end, pff[i].name, default_str_spec);
-		if (buf < end)
-			*buf = '=';
-		buf++;
-		buf = number(buf, end, (flags >> pff[i].shift) & pff[i].mask,
-			     *pff[i].spec);
-
-		append = true;
-	}
-
-	return buf;
-}
-
 static noinline_for_stack
 char *flags_string(char *buf, char *end, void *flags_ptr,
 		   struct printf_spec spec, const char *fmt)
@@ -2016,7 +1954,11 @@ char *flags_string(char *buf, char *end, void *flags_ptr,
 
 	switch (fmt[1]) {
 	case 'p':
-		return format_page_flags(buf, end, *(unsigned long *)flags_ptr);
+		flags = *(unsigned long *)flags_ptr;
+		/* Remove zone id */
+		flags &= (1UL << NR_PAGEFLAGS) - 1;
+		names = pageflag_names;
+		break;
 	case 'v':
 		flags = *(unsigned long *)flags_ptr;
 		names = vmaflag_names;
@@ -2178,11 +2120,8 @@ char *fwnode_string(char *buf, char *end, struct fwnode_handle *fwnode,
 bool no_hash_pointers __ro_after_init;
 EXPORT_SYMBOL_GPL(no_hash_pointers);
 
-int __init no_hash_pointers_enable(char *str)
+static int __init no_hash_pointers_enable(char *str)
 {
-	if (no_hash_pointers)
-		return 0;
-
 	no_hash_pointers = true;
 
 	pr_warn("**********************************************************\n");
@@ -2273,9 +2212,7 @@ early_param("no_hash_pointers", no_hash_pointers_enable);
  *       Implements a "recursive vsnprintf".
  *       Do not use this feature without some mechanism to verify the
  *       correctness of the format string and va_list arguments.
- * - 'K' For a kernel pointer that should be hidden from unprivileged users.
- *       Use only for procfs, sysfs and similar files, not printk(); please
- *       read the documentation (path below) first.
+ * - 'K' For a kernel pointer that should be hidden from unprivileged users
  * - 'NF' For a netdev_features_t
  * - 'h[CDN]' For a variable-length buffer, it prints it as a hex string with
  *            a certain separator (' ' by default):
@@ -2314,8 +2251,7 @@ early_param("no_hash_pointers", no_hash_pointers_enable);
  *		Without an option prints the full name of the node
  *		f full name
  *		P node name, including a possible unit address
- * - 'x' For printing the address unmodified. Equivalent to "%lx".
- *       Please read the documentation (path below) before using!
+ * - 'x' For printing the address. Equivalent to "%lx".
  * - '[ku]s' For a BPF/tracing related format specifier, e.g. used out of
  *           bpf_trace_printk() where [ku] prefix specifies either kernel (k)
  *           or user (u) memory to probe, and:

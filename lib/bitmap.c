@@ -3,19 +3,17 @@
  * lib/bitmap.c
  * Helper functions for bitmap.h.
  */
-
+#include <linux/export.h>
+#include <linux/thread_info.h>
+#include <linux/ctype.h>
+#include <linux/errno.h>
 #include <linux/bitmap.h>
 #include <linux/bitops.h>
 #include <linux/bug.h>
-#include <linux/ctype.h>
-#include <linux/device.h>
-#include <linux/errno.h>
-#include <linux/export.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
 #include <linux/slab.h>
 #include <linux/string.h>
-#include <linux/thread_info.h>
 #include <linux/uaccess.h>
 
 #include <asm/page.h>
@@ -1258,56 +1256,11 @@ unsigned long *bitmap_zalloc(unsigned int nbits, gfp_t flags)
 }
 EXPORT_SYMBOL(bitmap_zalloc);
 
-unsigned long *bitmap_alloc_node(unsigned int nbits, gfp_t flags, int node)
-{
-	return kmalloc_array_node(BITS_TO_LONGS(nbits), sizeof(unsigned long),
-				  flags, node);
-}
-EXPORT_SYMBOL(bitmap_alloc_node);
-
-unsigned long *bitmap_zalloc_node(unsigned int nbits, gfp_t flags, int node)
-{
-	return bitmap_alloc_node(nbits, flags | __GFP_ZERO, node);
-}
-EXPORT_SYMBOL(bitmap_zalloc_node);
-
 void bitmap_free(const unsigned long *bitmap)
 {
 	kfree(bitmap);
 }
 EXPORT_SYMBOL(bitmap_free);
-
-static void devm_bitmap_free(void *data)
-{
-	unsigned long *bitmap = data;
-
-	bitmap_free(bitmap);
-}
-
-unsigned long *devm_bitmap_alloc(struct device *dev,
-				 unsigned int nbits, gfp_t flags)
-{
-	unsigned long *bitmap;
-	int ret;
-
-	bitmap = bitmap_alloc(nbits, flags);
-	if (!bitmap)
-		return NULL;
-
-	ret = devm_add_action_or_reset(dev, devm_bitmap_free, bitmap);
-	if (ret)
-		return NULL;
-
-	return bitmap;
-}
-EXPORT_SYMBOL_GPL(devm_bitmap_alloc);
-
-unsigned long *devm_bitmap_zalloc(struct device *dev,
-				  unsigned int nbits, gfp_t flags)
-{
-	return devm_bitmap_alloc(dev, nbits, flags | __GFP_ZERO);
-}
-EXPORT_SYMBOL_GPL(devm_bitmap_zalloc);
 
 #if BITS_PER_LONG == 64
 /**

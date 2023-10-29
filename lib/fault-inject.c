@@ -100,7 +100,7 @@ static inline bool fail_stacktrace(struct fault_attr *attr)
  * http://www.nongnu.org/failmalloc/
  */
 
-bool should_fail_ex(struct fault_attr *attr, ssize_t size, int flags)
+bool should_fail(struct fault_attr *attr, ssize_t size)
 {
 	if (in_task()) {
 		unsigned int fail_nth = READ_ONCE(current->fail_nth);
@@ -143,18 +143,12 @@ bool should_fail_ex(struct fault_attr *attr, ssize_t size, int flags)
 		return false;
 
 fail:
-	if (!(flags & FAULT_NOWARN))
-		fail_dump(attr);
+	fail_dump(attr);
 
 	if (atomic_read(&attr->times) != -1)
 		atomic_dec_not_zero(&attr->times);
 
 	return true;
-}
-
-bool should_fail(struct fault_attr *attr, ssize_t size)
-{
-	return should_fail_ex(attr, size, 0);
 }
 EXPORT_SYMBOL_GPL(should_fail);
 

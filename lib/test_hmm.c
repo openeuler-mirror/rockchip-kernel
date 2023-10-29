@@ -671,7 +671,7 @@ static int dmirror_migrate(struct dmirror *dmirror,
 	unsigned long src_pfns[64];
 	unsigned long dst_pfns[64];
 	struct dmirror_bounce bounce;
-	struct migrate_vma args = { 0 };
+	struct migrate_vma args;
 	unsigned long next;
 	int ret;
 
@@ -965,33 +965,9 @@ static long dmirror_fops_unlocked_ioctl(struct file *filp,
 	return 0;
 }
 
-static int dmirror_fops_mmap(struct file *file, struct vm_area_struct *vma)
-{
-	unsigned long addr;
-
-	for (addr = vma->vm_start; addr < vma->vm_end; addr += PAGE_SIZE) {
-		struct page *page;
-		int ret;
-
-		page = alloc_page(GFP_KERNEL | __GFP_ZERO);
-		if (!page)
-			return -ENOMEM;
-
-		ret = vm_insert_page(vma, addr, page);
-		if (ret) {
-			__free_page(page);
-			return ret;
-		}
-		put_page(page);
-	}
-
-	return 0;
-}
-
 static const struct file_operations dmirror_fops = {
 	.open		= dmirror_fops_open,
 	.release	= dmirror_fops_release,
-	.mmap		= dmirror_fops_mmap,
 	.unlocked_ioctl = dmirror_fops_unlocked_ioctl,
 	.llseek		= default_llseek,
 	.owner		= THIS_MODULE,
@@ -1048,7 +1024,7 @@ static vm_fault_t dmirror_devmem_fault_alloc_and_copy(struct migrate_vma *args,
 
 static vm_fault_t dmirror_devmem_fault(struct vm_fault *vmf)
 {
-	struct migrate_vma args = { 0 };
+	struct migrate_vma args;
 	unsigned long src_pfns;
 	unsigned long dst_pfns;
 	struct page *rpage;
@@ -1071,7 +1047,6 @@ static vm_fault_t dmirror_devmem_fault(struct vm_fault *vmf)
 	args.dst = &dst_pfns;
 	args.pgmap_owner = dmirror->mdevice;
 	args.flags = MIGRATE_VMA_SELECT_DEVICE_PRIVATE;
-	args.fault_page = vmf->page;
 
 	if (migrate_vma_setup(&args))
 		return VM_FAULT_SIGBUS;
