@@ -9,6 +9,7 @@ CRYPTO_CFLAGS = $(shell pkg-config --cflags libcrypto 2> /dev/null)
 hostprogs-always-$(CONFIG_BUILD_BIN2C)			+= bin2c
 hostprogs-always-$(CONFIG_KALLSYMS)			+= kallsyms
 hostprogs-always-$(BUILD_C_RECORDMCOUNT)		+= recordmcount
+hostprogs-always-$(CONFIG_ARCH_ROCKCHIP)		+= resource_tool
 hostprogs-always-$(CONFIG_BUILDTIME_TABLE_SORT)		+= sorttable
 hostprogs-always-$(CONFIG_ASN1)				+= asn1_compiler
 hostprogs-always-$(CONFIG_MODULE_SIG_FORMAT)		+= sign-file
@@ -24,18 +25,12 @@ HOSTCFLAGS_extract-cert.o = $(CRYPTO_CFLAGS)
 HOSTLDLIBS_extract-cert = $(CRYPTO_LIBS)
 
 ifdef CONFIG_UNWINDER_ORC
-ifneq ($(filter loongarch loongarch64, $(ARCH)),)
-HOSTCFLAGS_sorttable.o += -I$(srctree)/tools/arch/loongarch/include
-HOSTCFLAGS_sorttable.o += -DUNWINDER_ORC_ENABLED
-HOSTLDLIBS_sorttable = -lpthread
-else
 ifeq ($(ARCH),x86_64)
 ARCH := x86
 endif
 HOSTCFLAGS_sorttable.o += -I$(srctree)/tools/arch/x86/include
 HOSTCFLAGS_sorttable.o += -DUNWINDER_ORC_ENABLED
 HOSTLDLIBS_sorttable = -lpthread
-endif
 endif
 
 # The following programs are only built on demand
