@@ -890,9 +890,7 @@ static int set_pauseparam(struct net_device *dev,
 	return 0;
 }
 
-static void get_sge_param(struct net_device *dev, struct ethtool_ringparam *e,
-			  struct kernel_ethtool_ringparam *kernel_e,
-			  struct netlink_ext_ack *extack)
+static void get_sge_param(struct net_device *dev, struct ethtool_ringparam *e)
 {
 	const struct port_info *pi = netdev_priv(dev);
 	const struct sge *s = &pi->adapter->sge;
@@ -908,9 +906,7 @@ static void get_sge_param(struct net_device *dev, struct ethtool_ringparam *e,
 	e->tx_pending = s->ethtxq[pi->first_qset].q.size;
 }
 
-static int set_sge_param(struct net_device *dev, struct ethtool_ringparam *e,
-			 struct kernel_ethtool_ringparam *kernel_e,
-			 struct netlink_ext_ack *extack)
+static int set_sge_param(struct net_device *dev, struct ethtool_ringparam *e)
 {
 	int i;
 	const struct port_info *pi = netdev_priv(dev);
@@ -1151,9 +1147,7 @@ static int set_dbqtimer_tickval(struct net_device *dev,
 }
 
 static int set_coalesce(struct net_device *dev,
-			struct ethtool_coalesce *coalesce,
-			struct kernel_ethtool_coalesce *kernel_coal,
-			struct netlink_ext_ack *extack)
+			struct ethtool_coalesce *coalesce)
 {
 	int ret;
 
@@ -1169,9 +1163,7 @@ static int set_coalesce(struct net_device *dev,
 				    coalesce->tx_coalesce_usecs);
 }
 
-static int get_coalesce(struct net_device *dev, struct ethtool_coalesce *c,
-			struct kernel_ethtool_coalesce *kernel_coal,
-			struct netlink_ext_ack *extack)
+static int get_coalesce(struct net_device *dev, struct ethtool_coalesce *c)
 {
 	const struct port_info *pi = netdev_priv(dev);
 	const struct adapter *adap = pi->adapter;
@@ -2019,15 +2011,12 @@ static int cxgb4_get_module_info(struct net_device *dev,
 		if (ret)
 			return ret;
 
-		if (!sff8472_comp || (sff_diag_type & SFP_DIAG_ADDRMODE)) {
+		if (!sff8472_comp || (sff_diag_type & 4)) {
 			modinfo->type = ETH_MODULE_SFF_8079;
 			modinfo->eeprom_len = ETH_MODULE_SFF_8079_LEN;
 		} else {
 			modinfo->type = ETH_MODULE_SFF_8472;
-			if (sff_diag_type & SFP_DIAG_IMPLEMENTED)
-				modinfo->eeprom_len = ETH_MODULE_SFF_8472_LEN;
-			else
-				modinfo->eeprom_len = ETH_MODULE_SFF_8472_LEN / 2;
+			modinfo->eeprom_len = ETH_MODULE_SFF_8472_LEN;
 		}
 		break;
 

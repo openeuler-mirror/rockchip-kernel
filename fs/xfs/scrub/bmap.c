@@ -263,7 +263,7 @@ xchk_bmap_iextent_xref(
 	error = xchk_ag_init(info->sc, agno, &info->sc->sa);
 	if (!xchk_fblock_process_error(info->sc, info->whichfork,
 			irec->br_startoff, &error))
-		goto out_free;
+		return;
 
 	xchk_xref_is_used_space(info->sc, agbno, len);
 	xchk_xref_is_not_inode_chunk(info->sc, agbno, len);
@@ -272,7 +272,7 @@ xchk_bmap_iextent_xref(
 	case XFS_DATA_FORK:
 		if (xfs_is_reflink_inode(info->sc->ip))
 			break;
-		fallthrough;
+		/* fall through */
 	case XFS_ATTR_FORK:
 		xchk_xref_is_not_shared(info->sc, agbno,
 				irec->br_blockcount);
@@ -283,7 +283,6 @@ xchk_bmap_iextent_xref(
 		break;
 	}
 
-out_free:
 	xchk_ag_free(info->sc, &info->sc->sa);
 }
 
@@ -398,7 +397,7 @@ xchk_bmapbt_rec(
 	struct xfs_inode	*ip = bs->cur->bc_ino.ip;
 	struct xfs_buf		*bp = NULL;
 	struct xfs_btree_block	*block;
-	struct xfs_ifork	*ifp = xfs_ifork_ptr(ip, info->whichfork);
+	struct xfs_ifork	*ifp = XFS_IFORK_PTR(ip, info->whichfork);
 	uint64_t		owner;
 	int			i;
 
@@ -406,7 +405,7 @@ xchk_bmapbt_rec(
 	 * Check the owners of the btree blocks up to the level below
 	 * the root since the verifiers don't do that.
 	 */
-	if (xfs_has_crc(bs->cur->bc_mp) &&
+	if (xfs_sb_version_hascrc(&bs->cur->bc_mp->m_sb) &&
 	    bs->cur->bc_ptrs[0] == 1) {
 		for (i = 0; i < bs->cur->bc_nlevels - 1; i++) {
 			block = xfs_btree_get_block(bs->cur, i, &bp);
@@ -447,7 +446,7 @@ xchk_bmap_btree(
 	struct xchk_bmap_info	*info)
 {
 	struct xfs_owner_info	oinfo;
-	struct xfs_ifork	*ifp = xfs_ifork_ptr(sc->ip, whichfork);
+	struct xfs_ifork	*ifp = XFS_IFORK_PTR(sc->ip, whichfork);
 	struct xfs_mount	*mp = sc->mp;
 	struct xfs_inode	*ip = sc->ip;
 	struct xfs_btree_cur	*cur;
@@ -499,7 +498,7 @@ xchk_bmap_check_rmap(
 		return 0;
 
 	/* Now look up the bmbt record. */
-	ifp = xfs_ifork_ptr(sc->ip, sbcri->whichfork);
+	ifp = XFS_IFORK_PTR(sc->ip, sbcri->whichfork);
 	if (!ifp) {
 		xchk_fblock_set_corrupt(sc, sbcri->whichfork,
 				rec->rm_offset);
@@ -587,12 +586,12 @@ xchk_bmap_check_rmaps(
 	struct xfs_scrub	*sc,
 	int			whichfork)
 {
-	struct xfs_ifork	*ifp = xfs_ifork_ptr(sc->ip, whichfork);
+	struct xfs_ifork	*ifp = XFS_IFORK_PTR(sc->ip, whichfork);
 	xfs_agnumber_t		agno;
 	bool			zero_size;
 	int			error;
 
-	if (!xfs_has_rmapbt(sc->mp) ||
+	if (!xfs_sb_version_hasrmapbt(&sc->mp->m_sb) ||
 	    whichfork == XFS_COW_FORK ||
 	    (sc->sm->sm_flags & XFS_SCRUB_OFLAG_CORRUPT))
 		return 0;
@@ -601,7 +600,7 @@ xchk_bmap_check_rmaps(
 	if (XFS_IS_REALTIME_INODE(sc->ip) && whichfork == XFS_DATA_FORK)
 		return 0;
 
-	ASSERT(xfs_ifork_ptr(sc->ip, whichfork) != NULL);
+	ASSERT(XFS_IFORK_PTR(sc->ip, whichfork) != NULL);
 
 	/*
 	 * Only do this for complex maps that are in btree format, or for
@@ -646,7 +645,7 @@ xchk_bmap(
 	struct xchk_bmap_info	info = { NULL };
 	struct xfs_mount	*mp = sc->mp;
 	struct xfs_inode	*ip = sc->ip;
-	struct xfs_ifork	*ifp = xfs_ifork_ptr(ip, whichfork);
+	struct xfs_ifork	*ifp = XFS_IFORK_PTR(ip, whichfork);
 	xfs_fileoff_t		endoff;
 	struct xfs_iext_cursor	icur;
 	int			error = 0;
@@ -669,7 +668,8 @@ xchk_bmap(
 		}
 		break;
 	case XFS_ATTR_FORK:
-		if (!xfs_has_attr(mp) && !xfs_has_attr2(mp))
+		if (!xfs_sb_version_hasattr(&mp->m_sb) &&
+		    !xfs_sb_version_hasattr2(&mp->m_sb))
 			xchk_ino_set_corrupt(sc, sc->ip->i_ino);
 		break;
 	default:
@@ -715,7 +715,7 @@ xchk_bmap(
 
 	/* Scrub extent records. */
 	info.lastoff = 0;
-	ifp = xfs_ifork_ptr(ip, whichfork);
+	ifp = XFS_IFORK_PTR(ip, whichfork);
 	for_each_xfs_iext(ifp, &icur, &irec) {
 		if (xchk_should_terminate(sc, &error) ||
 		    (sc->sm->sm_flags & XFS_SCRUB_OFLAG_CORRUPT))

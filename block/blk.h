@@ -25,6 +25,7 @@ struct blk_flush_queue {
 	struct list_head	flush_data_in_flight;
 	struct request		*flush_rq;
 
+	struct lock_class_key	key;
 	spinlock_t		mq_flush_lock;
 };
 
@@ -186,13 +187,6 @@ bool blk_bio_list_merge(struct request_queue *q, struct list_head *list,
 
 void blk_account_io_start(struct request *req);
 void blk_account_io_done(struct request *req, u64 now);
-int disk_scan_partitions(struct gendisk *disk, fmode_t mode);
-
-/*
- * Plug flush limits
- */
-#define BLK_MAX_REQUEST_COUNT	32
-#define BLK_PLUG_FLUSH_SIZE	(128 * 1024)
 
 /*
  * Internal elevator interface
@@ -202,7 +196,8 @@ int disk_scan_partitions(struct gendisk *disk, fmode_t mode);
 void blk_insert_flush(struct request *rq);
 
 void elevator_init_mq(struct request_queue *q);
-int elevator_switch(struct request_queue *q, struct elevator_type *new_e);
+int elevator_switch_mq(struct request_queue *q,
+			      struct elevator_type *new_e);
 void __elevator_exit(struct request_queue *, struct elevator_queue *);
 int elv_register_queue(struct request_queue *q, bool uevent);
 void elv_unregister_queue(struct request_queue *q);
@@ -212,7 +207,7 @@ static inline void elevator_exit(struct request_queue *q,
 {
 	lockdep_assert_held(&q->sysfs_lock);
 
-	blk_mq_sched_free_rqs(q);
+	blk_mq_sched_free_requests(q);
 	__elevator_exit(q, e);
 }
 
@@ -235,7 +230,7 @@ ssize_t part_timeout_store(struct device *, struct device_attribute *,
 void __blk_queue_split(struct bio **bio, unsigned int *nr_segs);
 int ll_back_merge_fn(struct request *req, struct bio *bio,
 		unsigned int nr_segs);
-bool blk_attempt_req_merge(struct request_queue *q, struct request *rq,
+int blk_attempt_req_merge(struct request_queue *q, struct request *rq,
 				struct request *next);
 unsigned int blk_recalc_rq_segments(struct request *rq);
 void blk_rq_set_mixed_merge(struct request *rq);
@@ -254,8 +249,6 @@ static inline bool blk_do_io_stat(struct request *rq)
 {
 	return rq->rq_disk && (rq->rq_flags & RQF_IO_STAT);
 }
-
-void update_io_ticks(struct hd_struct *part, unsigned long now, bool end);
 
 static inline void req_set_nomerge(struct request_queue *q, struct request *req)
 {

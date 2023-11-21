@@ -8,7 +8,7 @@
  * EC for audio function.
  */
 
-#include <crypto/sha2.h>
+#include <crypto/sha.h>
 #include <linux/acpi.h>
 #include <linux/delay.h>
 #include <linux/device.h>
@@ -994,7 +994,6 @@ static int cros_ec_codec_platform_probe(struct platform_device *pdev)
 			dev_dbg(dev, "ap_shm_phys_addr=%#llx len=%#x\n",
 				priv->ap_shm_phys_addr, priv->ap_shm_len);
 		}
-		of_node_put(node);
 	}
 #endif
 

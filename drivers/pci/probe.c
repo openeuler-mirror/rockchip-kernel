@@ -896,7 +896,6 @@ static int pci_register_host_bridge(struct pci_host_bridge *bridge)
 	bus->sysdata = bridge->sysdata;
 	bus->msi = bridge->msi;
 	bus->ops = bridge->ops;
-	bus->backup_ops = bus->ops;
 	bus->number = bus->busn_res.start = bridge->busnr;
 #ifdef CONFIG_PCI_DOMAINS_GENERIC
 	bus->domain_nr = pci_bus_find_domain_nr(bus, parent);
@@ -1058,15 +1057,10 @@ static struct pci_bus *pci_alloc_child_bus(struct pci_bus *parent,
 	child->bus_flags = parent->bus_flags;
 
 	host = pci_find_host_bridge(parent);
-	if (host->child_ops) {
+	if (host->child_ops)
 		child->ops = host->child_ops;
-	} else {
-		if (parent->backup_ops)
-			child->ops = parent->backup_ops;
-		else
-			child->ops = parent->ops;
-	}
-	child->backup_ops = child->ops;
+	else
+		child->ops = parent->ops;
 
 	/*
 	 * Initialize some portions of the bus device, but don't register
@@ -2222,7 +2216,6 @@ static void pci_configure_device(struct pci_dev *dev)
 static void pci_release_capabilities(struct pci_dev *dev)
 {
 	pci_aer_exit(dev);
-	pci_rcec_exit(dev);
 	pci_vpd_release(dev);
 	pci_iov_release(dev);
 	pci_free_cap_save_buffers(dev);
@@ -2423,7 +2416,6 @@ static void pci_init_capabilities(struct pci_dev *dev)
 	pci_ptm_init(dev);		/* Precision Time Measurement */
 	pci_aer_init(dev);		/* Advanced Error Reporting */
 	pci_dpc_init(dev);		/* Downstream Port Containment */
-	pci_rcec_init(dev);		/* Root Complex Event Collector */
 
 	pcie_report_downtraining(dev);
 
@@ -2514,11 +2506,6 @@ void pci_device_add(struct pci_dev *dev, struct pci_bus *bus)
 
 	/* Set up MSI IRQ domain */
 	pci_set_msi_domain(dev);
-
-	if (pci_pcie_type(dev) == PCI_EXP_TYPE_ROOT_PORT)
-		dev->rpdev = dev;
-	else
-		dev->rpdev = pcie_find_root_port(dev);
 
 	/* Notifier could use PCI capabilities */
 	dev->match_driver = false;

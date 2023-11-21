@@ -1916,9 +1916,7 @@ static void i40e_get_drvinfo(struct net_device *netdev,
 }
 
 static void i40e_get_ringparam(struct net_device *netdev,
-			       struct ethtool_ringparam *ring,
-			       struct kernel_ethtool_ringparam *kernel_ring,
-			       struct netlink_ext_ack *extack)
+			       struct ethtool_ringparam *ring)
 {
 	struct i40e_netdev_priv *np = netdev_priv(netdev);
 	struct i40e_pf *pf = np->vsi->back;
@@ -1946,9 +1944,7 @@ static bool i40e_active_tx_ring_index(struct i40e_vsi *vsi, u16 index)
 }
 
 static int i40e_set_ringparam(struct net_device *netdev,
-			      struct ethtool_ringparam *ring,
-			      struct kernel_ethtool_ringparam *kernel_ring,
-			      struct netlink_ext_ack *extack)
+			      struct ethtool_ringparam *ring)
 {
 	struct i40e_ring *tx_rings = NULL, *rx_rings = NULL;
 	struct i40e_netdev_priv *np = netdev_priv(netdev);
@@ -2085,6 +2081,9 @@ static int i40e_set_ringparam(struct net_device *netdev,
 			 */
 			rx_rings[i].tail = hw->hw_addr + I40E_PRTGEN_STATUS;
 			err = i40e_setup_rx_descriptors(&rx_rings[i]);
+			if (err)
+				goto rx_unwind;
+			err = i40e_alloc_rx_bi(&rx_rings[i]);
 			if (err)
 				goto rx_unwind;
 
@@ -2583,16 +2582,15 @@ static void i40e_diag_test(struct net_device *netdev,
 
 		set_bit(__I40E_TESTING, pf->state);
 
-		if (test_bit(__I40E_RESET_RECOVERY_PENDING, pf->state) ||
-		    test_bit(__I40E_RESET_INTR_RECEIVED, pf->state)) {
-			dev_warn(&pf->pdev->dev,
-				 "Cannot start offline testing when PF is in reset state.\n");
-			goto skip_ol_tests;
-		}
-
 		if (i40e_active_vfs(pf) || i40e_active_vmdqs(pf)) {
 			dev_warn(&pf->pdev->dev,
 				 "Please take active VFs and Netqueues offline and restart the adapter before running NIC diagnostics\n");
+			data[I40E_ETH_TEST_REG]		= 1;
+			data[I40E_ETH_TEST_EEPROM]	= 1;
+			data[I40E_ETH_TEST_INTR]	= 1;
+			data[I40E_ETH_TEST_LINK]	= 1;
+			eth_test->flags |= ETH_TEST_FL_FAILED;
+			clear_bit(__I40E_TESTING, pf->state);
 			goto skip_ol_tests;
 		}
 
@@ -2639,17 +2637,9 @@ static void i40e_diag_test(struct net_device *netdev,
 		data[I40E_ETH_TEST_INTR] = 0;
 	}
 
-	netif_info(pf, drv, netdev, "testing finished\n");
-	return;
-
 skip_ol_tests:
-	data[I40E_ETH_TEST_REG]		= 1;
-	data[I40E_ETH_TEST_EEPROM]	= 1;
-	data[I40E_ETH_TEST_INTR]	= 1;
-	data[I40E_ETH_TEST_LINK]	= 1;
-	eth_test->flags |= ETH_TEST_FL_FAILED;
-	clear_bit(__I40E_TESTING, pf->state);
-	netif_info(pf, drv, netdev, "testing failed\n");
+
+	netif_info(pf, drv, netdev, "testing finished\n");
 }
 
 static void i40e_get_wol(struct net_device *netdev,
@@ -2828,17 +2818,13 @@ static int __i40e_get_coalesce(struct net_device *netdev,
  * i40e_get_coalesce - get a netdev's coalesce settings
  * @netdev: the netdev to check
  * @ec: ethtool coalesce data structure
- * @kernel_coal: ethtool CQE mode setting structure
- * @extack: extack for reporting error messages
  *
  * Gets the coalesce settings for a particular netdev. Note that if user has
  * modified per-queue settings, this only guarantees to represent queue 0. See
  * __i40e_get_coalesce for more details.
  **/
 static int i40e_get_coalesce(struct net_device *netdev,
-			     struct ethtool_coalesce *ec,
-			     struct kernel_ethtool_coalesce *kernel_coal,
-			     struct netlink_ext_ack *extack)
+			     struct ethtool_coalesce *ec)
 {
 	return __i40e_get_coalesce(netdev, ec, -1);
 }
@@ -3006,15 +2992,11 @@ static int __i40e_set_coalesce(struct net_device *netdev,
  * i40e_set_coalesce - set coalesce settings for every queue on the netdev
  * @netdev: the netdev to change
  * @ec: ethtool coalesce settings
- * @kernel_coal: ethtool CQE mode setting structure
- * @extack: extack for reporting error messages
  *
  * This will set each queue to the same coalesce settings.
  **/
 static int i40e_set_coalesce(struct net_device *netdev,
-			     struct ethtool_coalesce *ec,
-			     struct kernel_ethtool_coalesce *kernel_coal,
-			     struct netlink_ext_ack *extack)
+			     struct ethtool_coalesce *ec)
 {
 	return __i40e_set_coalesce(netdev, ec, -1);
 }
@@ -3095,17 +3077,10 @@ static int i40e_get_rss_hash_opts(struct i40e_pf *pf, struct ethtool_rxnfc *cmd)
 
 		if (cmd->flow_type == TCP_V4_FLOW ||
 		    cmd->flow_type == UDP_V4_FLOW) {
-			if (hw->mac.type == I40E_MAC_X722) {
-				if (i_set & I40E_X722_L3_SRC_MASK)
-					cmd->data |= RXH_IP_SRC;
-				if (i_set & I40E_X722_L3_DST_MASK)
-					cmd->data |= RXH_IP_DST;
-			} else {
-				if (i_set & I40E_L3_SRC_MASK)
-					cmd->data |= RXH_IP_SRC;
-				if (i_set & I40E_L3_DST_MASK)
-					cmd->data |= RXH_IP_DST;
-			}
+			if (i_set & I40E_L3_SRC_MASK)
+				cmd->data |= RXH_IP_SRC;
+			if (i_set & I40E_L3_DST_MASK)
+				cmd->data |= RXH_IP_DST;
 		} else if (cmd->flow_type == TCP_V6_FLOW ||
 			  cmd->flow_type == UDP_V6_FLOW) {
 			if (i_set & I40E_L3_V6_SRC_MASK)
@@ -3412,15 +3387,12 @@ static int i40e_get_rxnfc(struct net_device *netdev, struct ethtool_rxnfc *cmd,
 
 /**
  * i40e_get_rss_hash_bits - Read RSS Hash bits from register
- * @hw: hw structure
  * @nfc: pointer to user request
  * @i_setc: bits currently set
  *
  * Returns value of bits to be set per user request
  **/
-static u64 i40e_get_rss_hash_bits(struct i40e_hw *hw,
-				  struct ethtool_rxnfc *nfc,
-				  u64 i_setc)
+static u64 i40e_get_rss_hash_bits(struct ethtool_rxnfc *nfc, u64 i_setc)
 {
 	u64 i_set = i_setc;
 	u64 src_l3 = 0, dst_l3 = 0;
@@ -3439,13 +3411,8 @@ static u64 i40e_get_rss_hash_bits(struct i40e_hw *hw,
 		dst_l3 = I40E_L3_V6_DST_MASK;
 	} else if (nfc->flow_type == TCP_V4_FLOW ||
 		  nfc->flow_type == UDP_V4_FLOW) {
-		if (hw->mac.type == I40E_MAC_X722) {
-			src_l3 = I40E_X722_L3_SRC_MASK;
-			dst_l3 = I40E_X722_L3_DST_MASK;
-		} else {
-			src_l3 = I40E_L3_SRC_MASK;
-			dst_l3 = I40E_L3_DST_MASK;
-		}
+		src_l3 = I40E_L3_SRC_MASK;
+		dst_l3 = I40E_L3_DST_MASK;
 	} else {
 		/* Any other flow type are not supported here */
 		return i_set;
@@ -3463,7 +3430,6 @@ static u64 i40e_get_rss_hash_bits(struct i40e_hw *hw,
 	return i_set;
 }
 
-#define FLOW_PCTYPES_SIZE 64
 /**
  * i40e_set_rss_hash_opt - Enable/Disable flow types for RSS hash
  * @pf: pointer to the physical function struct
@@ -3476,10 +3442,8 @@ static int i40e_set_rss_hash_opt(struct i40e_pf *pf, struct ethtool_rxnfc *nfc)
 	struct i40e_hw *hw = &pf->hw;
 	u64 hena = (u64)i40e_read_rx_ctl(hw, I40E_PFQF_HENA(0)) |
 		   ((u64)i40e_read_rx_ctl(hw, I40E_PFQF_HENA(1)) << 32);
-	DECLARE_BITMAP(flow_pctypes, FLOW_PCTYPES_SIZE);
+	u8 flow_pctype = 0;
 	u64 i_set, i_setc;
-
-	bitmap_zero(flow_pctypes, FLOW_PCTYPES_SIZE);
 
 	if (pf->flags & I40E_FLAG_MFP_ENABLED) {
 		dev_err(&pf->pdev->dev,
@@ -3496,35 +3460,36 @@ static int i40e_set_rss_hash_opt(struct i40e_pf *pf, struct ethtool_rxnfc *nfc)
 
 	switch (nfc->flow_type) {
 	case TCP_V4_FLOW:
-		set_bit(I40E_FILTER_PCTYPE_NONF_IPV4_TCP, flow_pctypes);
+		flow_pctype = I40E_FILTER_PCTYPE_NONF_IPV4_TCP;
 		if (pf->hw_features & I40E_HW_MULTIPLE_TCP_UDP_RSS_PCTYPE)
-			set_bit(I40E_FILTER_PCTYPE_NONF_IPV4_TCP_SYN_NO_ACK,
-				flow_pctypes);
+			hena |=
+			  BIT_ULL(I40E_FILTER_PCTYPE_NONF_IPV4_TCP_SYN_NO_ACK);
 		break;
 	case TCP_V6_FLOW:
-		set_bit(I40E_FILTER_PCTYPE_NONF_IPV6_TCP, flow_pctypes);
+		flow_pctype = I40E_FILTER_PCTYPE_NONF_IPV6_TCP;
 		if (pf->hw_features & I40E_HW_MULTIPLE_TCP_UDP_RSS_PCTYPE)
-			set_bit(I40E_FILTER_PCTYPE_NONF_IPV6_TCP_SYN_NO_ACK,
-				flow_pctypes);
+			hena |=
+			  BIT_ULL(I40E_FILTER_PCTYPE_NONF_IPV4_TCP_SYN_NO_ACK);
+		if (pf->hw_features & I40E_HW_MULTIPLE_TCP_UDP_RSS_PCTYPE)
+			hena |=
+			  BIT_ULL(I40E_FILTER_PCTYPE_NONF_IPV6_TCP_SYN_NO_ACK);
 		break;
 	case UDP_V4_FLOW:
-		set_bit(I40E_FILTER_PCTYPE_NONF_IPV4_UDP, flow_pctypes);
-		if (pf->hw_features & I40E_HW_MULTIPLE_TCP_UDP_RSS_PCTYPE) {
-			set_bit(I40E_FILTER_PCTYPE_NONF_UNICAST_IPV4_UDP,
-				flow_pctypes);
-			set_bit(I40E_FILTER_PCTYPE_NONF_MULTICAST_IPV4_UDP,
-				flow_pctypes);
-		}
+		flow_pctype = I40E_FILTER_PCTYPE_NONF_IPV4_UDP;
+		if (pf->hw_features & I40E_HW_MULTIPLE_TCP_UDP_RSS_PCTYPE)
+			hena |=
+			  BIT_ULL(I40E_FILTER_PCTYPE_NONF_UNICAST_IPV4_UDP) |
+			  BIT_ULL(I40E_FILTER_PCTYPE_NONF_MULTICAST_IPV4_UDP);
+
 		hena |= BIT_ULL(I40E_FILTER_PCTYPE_FRAG_IPV4);
 		break;
 	case UDP_V6_FLOW:
-		set_bit(I40E_FILTER_PCTYPE_NONF_IPV6_UDP, flow_pctypes);
-		if (pf->hw_features & I40E_HW_MULTIPLE_TCP_UDP_RSS_PCTYPE) {
-			set_bit(I40E_FILTER_PCTYPE_NONF_UNICAST_IPV6_UDP,
-				flow_pctypes);
-			set_bit(I40E_FILTER_PCTYPE_NONF_MULTICAST_IPV6_UDP,
-				flow_pctypes);
-		}
+		flow_pctype = I40E_FILTER_PCTYPE_NONF_IPV6_UDP;
+		if (pf->hw_features & I40E_HW_MULTIPLE_TCP_UDP_RSS_PCTYPE)
+			hena |=
+			  BIT_ULL(I40E_FILTER_PCTYPE_NONF_UNICAST_IPV6_UDP) |
+			  BIT_ULL(I40E_FILTER_PCTYPE_NONF_MULTICAST_IPV6_UDP);
+
 		hena |= BIT_ULL(I40E_FILTER_PCTYPE_FRAG_IPV6);
 		break;
 	case AH_ESP_V4_FLOW:
@@ -3557,20 +3522,17 @@ static int i40e_set_rss_hash_opt(struct i40e_pf *pf, struct ethtool_rxnfc *nfc)
 		return -EINVAL;
 	}
 
-	if (bitmap_weight(flow_pctypes, FLOW_PCTYPES_SIZE)) {
-		u8 flow_id;
-
-		for_each_set_bit(flow_id, flow_pctypes, FLOW_PCTYPES_SIZE) {
-			i_setc = (u64)i40e_read_rx_ctl(hw, I40E_GLQF_HASH_INSET(0, flow_id)) |
-				 ((u64)i40e_read_rx_ctl(hw, I40E_GLQF_HASH_INSET(1, flow_id)) << 32);
-			i_set = i40e_get_rss_hash_bits(&pf->hw, nfc, i_setc);
-
-			i40e_write_rx_ctl(hw, I40E_GLQF_HASH_INSET(0, flow_id),
-					  (u32)i_set);
-			i40e_write_rx_ctl(hw, I40E_GLQF_HASH_INSET(1, flow_id),
-					  (u32)(i_set >> 32));
-			hena |= BIT_ULL(flow_id);
-		}
+	if (flow_pctype) {
+		i_setc = (u64)i40e_read_rx_ctl(hw, I40E_GLQF_HASH_INSET(0,
+					       flow_pctype)) |
+			((u64)i40e_read_rx_ctl(hw, I40E_GLQF_HASH_INSET(1,
+					       flow_pctype)) << 32);
+		i_set = i40e_get_rss_hash_bits(nfc, i_setc);
+		i40e_write_rx_ctl(hw, I40E_GLQF_HASH_INSET(0, flow_pctype),
+				  (u32)i_set);
+		i40e_write_rx_ctl(hw, I40E_GLQF_HASH_INSET(1, flow_pctype),
+				  (u32)(i_set >> 32));
+		hena |= BIT_ULL(flow_pctype);
 	}
 
 	i40e_write_rx_ctl(hw, I40E_PFQF_HENA(0), (u32)hena);
@@ -4246,7 +4208,11 @@ static int i40e_check_fdir_input_set(struct i40e_vsi *vsi,
 			return -EOPNOTSUPP;
 
 		/* First 4 bytes of L4 header */
-		if (usr_ip4_spec->l4_4_bytes)
+		if (usr_ip4_spec->l4_4_bytes == htonl(0xFFFFFFFF))
+			new_mask |= I40E_L4_SRC_MASK | I40E_L4_DST_MASK;
+		else if (!usr_ip4_spec->l4_4_bytes)
+			new_mask &= ~(I40E_L4_SRC_MASK | I40E_L4_DST_MASK);
+		else
 			return -EOPNOTSUPP;
 
 		/* Filtering on Type of Service is not supported. */

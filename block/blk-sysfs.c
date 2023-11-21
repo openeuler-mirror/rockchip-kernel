@@ -461,9 +461,6 @@ static ssize_t queue_wb_lat_show(struct request_queue *q, char *page)
 	if (!wbt_rq_qos(q))
 		return -EINVAL;
 
-	if (wbt_disabled(q))
-		return sprintf(page, "0\n");
-
 	return sprintf(page, "%llu\n", div_u64(wbt_get_min_lat(q), 1000));
 }
 
@@ -729,8 +726,6 @@ static void blk_free_queue_rcu(struct rcu_head *rcu_head)
 {
 	struct request_queue *q = container_of(rcu_head, struct request_queue,
 					       rcu_head);
-
-	percpu_ref_exit(&q->q_usage_counter);
 	kmem_cache_free(blk_requestq_cachep, q);
 }
 
@@ -789,13 +784,21 @@ static void blk_release_queue(struct kobject *kobj)
 
 	might_sleep();
 
-	rq_qos_exit(q);
-
 	if (test_bit(QUEUE_FLAG_POLL_STATS, &q->queue_flags))
 		blk_stat_remove_callback(q, q->poll_cb);
 	blk_stat_free_callback(q->poll_cb);
 
 	blk_free_queue_stats(q->stats);
+
+	if (queue_is_mq(q)) {
+		struct blk_mq_hw_ctx *hctx;
+		int i;
+
+		cancel_delayed_work_sync(&q->requeue_work);
+
+		queue_for_each_hw_ctx(q, hctx, i)
+			cancel_delayed_work_sync(&hctx->run_work);
+	}
 
 	blk_exit_queue(q);
 
@@ -907,9 +910,6 @@ int blk_register_queue(struct gendisk *disk)
 	blk_queue_flag_set(QUEUE_FLAG_REGISTERED, q);
 	wbt_enable_default(q);
 	blk_throtl_register_queue(q);
-	spin_lock_irq(&q->queue_lock);
-	blk_queue_flag_set(QUEUE_FLAG_THROTL_INIT_DONE, q);
-	spin_unlock_irq(&q->queue_lock);
 
 	/* Now everything is ready and send out KOBJ_ADD uevent */
 	kobject_uevent(&q->kobj, KOBJ_ADD);
@@ -920,7 +920,6 @@ int blk_register_queue(struct gendisk *disk)
 	ret = 0;
 unlock:
 	mutex_unlock(&q->sysfs_dir_lock);
-
 	return ret;
 }
 EXPORT_SYMBOL_GPL(blk_register_queue);
@@ -943,10 +942,6 @@ void blk_unregister_queue(struct gendisk *disk)
 	if (!blk_queue_registered(q))
 		return;
 
-	spin_lock_irq(&q->queue_lock);
-	blk_queue_flag_clear(QUEUE_FLAG_THROTL_INIT_DONE, q);
-	spin_unlock_irq(&q->queue_lock);
-
 	/*
 	 * Since sysfs_remove_dir() prevents adding new directory entries
 	 * before removal of existing entries starts, protect against
@@ -963,17 +958,15 @@ void blk_unregister_queue(struct gendisk *disk)
 	 */
 	if (queue_is_mq(q))
 		blk_mq_unregister_dev(disk_to_dev(disk), q);
+
+	kobject_uevent(&q->kobj, KOBJ_REMOVE);
+	kobject_del(&q->kobj);
 	blk_trace_remove_sysfs(disk_to_dev(disk));
 
 	mutex_lock(&q->sysfs_lock);
 	if (q->elevator)
 		elv_unregister_queue(q);
 	mutex_unlock(&q->sysfs_lock);
-
-	/* Now that we've deleted all child objects, we can delete the queue. */
-	kobject_uevent(&q->kobj, KOBJ_REMOVE);
-	kobject_del(&q->kobj);
-
 	mutex_unlock(&q->sysfs_dir_lock);
 
 	kobject_put(&disk_to_dev(disk)->kobj);

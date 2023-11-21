@@ -249,9 +249,12 @@ xprt_rdma_connect_worker(struct work_struct *work)
 					   xprt->stat.connect_start;
 		xprt_set_connected(xprt);
 		rc = -EAGAIN;
-	} else
-		rpcrdma_xprt_disconnect(r_xprt);
-	xprt_unlock_connect(xprt, r_xprt);
+	} else {
+		/* Force a call to xprt_rdma_close to clean up */
+		spin_lock(&xprt->transport_lock);
+		set_bit(XPRT_CLOSE_WAIT, &xprt->state);
+		spin_unlock(&xprt->transport_lock);
+	}
 	xprt_wake_pending_tasks(xprt, rc);
 }
 
@@ -484,8 +487,6 @@ xprt_rdma_connect(struct rpc_xprt *xprt, struct rpc_task *task)
 	struct rpcrdma_ep *ep = r_xprt->rx_ep;
 	unsigned long delay;
 
-	WARN_ON_ONCE(!xprt_lock_connect(xprt, task, r_xprt));
-
 	delay = 0;
 	if (ep && ep->re_connect_status != 0) {
 		delay = xprt_reconnect_delay(xprt);
@@ -519,7 +520,7 @@ xprt_rdma_alloc_slot(struct rpc_xprt *xprt, struct rpc_task *task)
 	return;
 
 out_sleep:
-	task->tk_status = -ENOMEM;
+	task->tk_status = -EAGAIN;
 	xprt_add_backlog(xprt, task);
 }
 
@@ -572,10 +573,8 @@ xprt_rdma_allocate(struct rpc_task *task)
 	gfp_t flags;
 
 	flags = RPCRDMA_DEF_GFP;
-	if (RPC_IS_ASYNC(task))
-		flags = GFP_NOWAIT | __GFP_NOWARN;
 	if (RPC_IS_SWAPPER(task))
-		flags |= __GFP_MEMALLOC;
+		flags = __GFP_MEMALLOC | GFP_NOWAIT | __GFP_NOWARN;
 
 	if (!rpcrdma_check_regbuf(r_xprt, req->rl_sendbuf, rqst->rq_callsize,
 				  flags))

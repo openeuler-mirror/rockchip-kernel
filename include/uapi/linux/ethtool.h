@@ -221,7 +221,6 @@ enum tunable_id {
 	ETHTOOL_RX_COPYBREAK,
 	ETHTOOL_TX_COPYBREAK,
 	ETHTOOL_PFC_PREVENTION_TOUT, /* timeout in msecs */
-	ETHTOOL_TX_COPYBREAK_BUF_SIZE,
 	/*
 	 * Add your fresh new tunable attribute above and remember to update
 	 * tunable_strings[] in net/ethtool/common.c
@@ -639,8 +638,6 @@ enum ethtool_link_ext_substate_link_logical_mismatch {
 enum ethtool_link_ext_substate_bad_signal_integrity {
 	ETHTOOL_LINK_EXT_SUBSTATE_BSI_LARGE_NUMBER_OF_PHYSICAL_ERRORS = 1,
 	ETHTOOL_LINK_EXT_SUBSTATE_BSI_UNSUPPORTED_RATE,
-	ETHTOOL_LINK_EXT_SUBSTATE_BSI_SERDES_REFERENCE_CLOCK_LOST,
-	ETHTOOL_LINK_EXT_SUBSTATE_BSI_SERDES_ALOS,
 };
 
 /**
@@ -890,28 +887,6 @@ struct ethtool_usrip4_spec {
 };
 
 /**
- * struct ethtool_vxlan4_spec - general flow specification for VxLAN IPv4
- * @vni: VxLAN network identifier
- * @dst: Inner destination eth addr
- * @src: Inner source eth addr
- * @eth_type: Inner ethernet type
- * @tos: Inner type-of-service
- * @l4_proto: Inner transport protocol number
- * @ip4src: Inner source host
- * @ip4dst: Inner destination host
- */
-struct ethtool_vxlan4_spec {
-	__be32	vni;
-	__u8	dst[ETH_ALEN];
-	__u8	src[ETH_ALEN];
-	__be16	eth_type;
-	__u8	tos;
-	__u8	l4_proto;
-	__be32	ip4src;
-	__be32	ip4dst;
-};
-
-/**
  * struct ethtool_tcpip6_spec - flow specification for TCP/IPv6 etc.
  * @ip6src: Source host
  * @ip6dst: Destination host
@@ -961,28 +936,6 @@ struct ethtool_usrip6_spec {
 	__u8    l4_proto;
 };
 
-/**
- * struct ethtool_vxlan6_spec - general flow specification for VxLAN IPv6
- * @vni: VxLAN network identifier
- * @dst: Inner destination eth addr
- * @src: Inner source eth addr
- * @eth_type: Inner ethernet type
- * @tclass: Inner traffic Class
- * @l4_proto: Inner transport protocol number
- * @ip6src: Inner source host
- * @ip6dst: Inner destination host
- */
-struct ethtool_vxlan6_spec {
-	__be32	vni;
-	__u8	dst[ETH_ALEN];
-	__u8	src[ETH_ALEN];
-	__be16	eth_type;
-	__u8	tclass;
-	__u8	l4_proto;
-	__be32	ip6src[4];
-	__be32	ip6dst[4];
-};
-
 union ethtool_flow_union {
 	struct ethtool_tcpip4_spec		tcp_ip4_spec;
 	struct ethtool_tcpip4_spec		udp_ip4_spec;
@@ -998,10 +951,6 @@ union ethtool_flow_union {
 	struct ethtool_usrip6_spec		usr_ip6_spec;
 	struct ethhdr				ether_spec;
 	__u8					hdata[52];
-#ifndef __GENKSYMS__
-	struct ethtool_vxlan4_spec  vxlan_ip4_spec;
-	struct ethtool_vxlan6_spec  vxlan_ip6_spec;
-#endif
 };
 
 /**
@@ -1878,8 +1827,6 @@ static inline int ethtool_validate_duplex(__u8 duplex)
 #define	IPV4_FLOW	0x10	/* hash only */
 #define	IPV6_FLOW	0x11	/* hash only */
 #define	ETHER_FLOW	0x12	/* spec only (ether_spec) */
-#define	VXLAN_V4_FLOW	0x43	/* spec only (vxlan_ip4_spec) */
-#define	VXLAN_V6_FLOW	0x44	/* spec only (vxlan_ip6_spec) */
 /* Flag to enable additional fields in struct ethtool_rx_flow_spec */
 #define	FLOW_EXT	0x80000000
 #define	FLOW_MAC_EXT	0x40000000

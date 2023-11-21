@@ -68,11 +68,6 @@ config CC_HAS_ASM_GOTO_OUTPUT
 	depends on CC_HAS_ASM_GOTO
 	def_bool $(success,echo 'int foo(int x) { asm goto ("": "=r"(x) ::: bar); return x; bar: return 0; }' | $(CC) -x c - -c -o /dev/null)
 
-config CC_HAS_ASM_GOTO_TIED_OUTPUT
-	depends on CC_HAS_ASM_GOTO_OUTPUT
-	# Detect buggy gcc and clang, fixed in gcc-11 clang-14.
-	def_bool $(success,echo 'int foo(int *x) { asm goto (".long (%l[bar]) - .": "+m"(*x) ::: bar); return *x; bar: return 0; }' | $CC -x c - -c -o /dev/null)
-
 config TOOLS_SUPPORT_RELR
 	def_bool $(success,env "CC=$(CC)" "LD=$(LD)" "NM=$(NM)" "OBJCOPY=$(OBJCOPY)" $(srctree)/scripts/tools-support-relr.sh)
 
@@ -918,16 +913,6 @@ config MEMCG_KMEM
 	depends on MEMCG && !SLOB
 	default y
 
-config MEMCG_MEMFS_INFO
-	bool "Show memfs files that have pages charged in given memory cgroup"
-	depends on MEMCG
-	default n
-	help
-	  Support to print rootfs files and tmpfs files that having pages
-	  charged in given memory cgroup. The files infomations can be printed
-	  through interface "memory.memfs_files_info" or printed when OOM is
-	  triggered.
-
 config BLK_CGROUP
 	bool "IO controller"
 	depends on BLOCK
@@ -955,11 +940,6 @@ config CGROUP_WRITEBACK
 	depends on MEMCG && BLK_CGROUP
 	default y
 
-config CGROUP_V1_WRITEBACK
-	bool "Support Cgroup Writeback On Cgroupv1"
-	depends on CGROUP_WRITEBACK
-	default n
-
 menuconfig CGROUP_SCHED
 	bool "CPU controller"
 	default n
@@ -977,15 +957,6 @@ config QOS_SCHED
 
     default n
 
-config QOS_SCHED_MULTILEVEL
-	bool "Multiple qos level task scheduling"
-	depends on QOS_SCHED
-	default n
-	help
-	  This feature enable multiple qos level on task scheduling.
-	  Expand the qos_level to [-2,2] to distinguish the tasks expected
-	  to be with extremely high or low priority level.
-
 config QOS_SCHED_SMT_EXPELLER
 	bool "Qos smt expeller"
 	depends on SCHED_SMT
@@ -994,15 +965,6 @@ config QOS_SCHED_SMT_EXPELLER
 	help
 	  This feature enable online tasks to expel offline tasks
 	  on the smt sibling cpus, and exclusively occupy CPU resources.
-
-config QOS_SCHED_PRIO_LB
-	bool "Priority load balance for Qos scheduler"
-	depends on QOS_SCHED
-	default n
-	help
-	  This feature enable priority load balance
-	  for Qos scheduler, which prefer migrating online tasks
-	  and migrating offline tasks secondly between CPUs.
 
 config FAIR_GROUP_SCHED
 	bool "Group scheduling for SCHED_OTHER"
@@ -1032,16 +994,6 @@ config RT_GROUP_SCHED
 	  See Documentation/scheduler/sched-rt-group.rst for more information.
 
 endif #CGROUP_SCHED
-
-config QOS_SCHED_DYNAMIC_AFFINITY
-	bool "qos dynamic affinity"
-	depends on CPUSETS
-	default n
-	help
-	 This feature lets you allocate preferred cpus to taskgroup. If enabled,
-	 it will make taskgroup only to use preferred cpus when cpu utilization
-	 of taskgroup is below threshold setted, otherwise make taskgroup to use
-	 cpus allowed.
 
 config UCLAMP_TASK_GROUP
 	bool "Utilization clamping per group of tasks"
@@ -1186,16 +1138,6 @@ config SOCK_CGROUP_DATA
 	bool
 	default n
 
-config CGROUP_FILES
-	bool "Files Resource Controller for Control Groups"
-	select PAGE_COUNTER
-	default n
-	help
-	  Provides a cgroup resource controller that limits number of open
-	  file handles within a cgroup.
-	  This supports catching misbehaving processes and
-	  return EMFILE instead of ENOMEM for kernel memory limits.
-
 endif # CGROUPS
 
 menuconfig NAMESPACES
@@ -1265,21 +1207,6 @@ config NET_NS
 
 endif # NAMESPACES
 
-config SCHED_STEAL
-	bool "Steal tasks to improve CPU utilization"
-	depends on SMP
-	default n
-	help
-	  When a CPU has no more CFS tasks to run, and idle_balance() fails
-	  to find a task, then attempt to steal a task from an overloaded
-	  CPU in the same LLC. Maintain and use a bitmap of overloaded CPUs
-	  to efficiently identify candidates.  To minimize search time, steal
-	  the first migratable task that is found when the bitmap is traversed.
-	  For fairness, search for migratable tasks on an overloaded CPU in
-	  order of next to run.
-
-	  If unsure, say N here.
-
 config CHECKPOINT_RESTORE
 	bool "Checkpoint/restore support"
 	select PROC_CHILDREN
@@ -1304,6 +1231,17 @@ config SCHED_AUTOGROUP
 	  of workloads isolates aggressive CPU burners (like build jobs) from
 	  desktop applications.  Task group autogeneration is currently based
 	  upon task session.
+
+config RT_SOFTINT_OPTIMIZATION
+       bool "Improve RT scheduling during long softint execution"
+       depends on ARM64
+       depends on SMP
+       default n
+       help
+         Enable an optimization which tries to avoid placing RT tasks on CPUs
+	 occupied by nonpreemptible tasks, such as a long softint, or CPUs
+	 which may soon block preemptions, such as a CPU running a ksoftirq
+	 thread which handles slow softints.
 
 config SYSFS_DEPRECATED
 	bool "Enable deprecated sysfs features to support old userspace tools"
@@ -1374,7 +1312,22 @@ if BLK_DEV_INITRD
 
 source "usr/Kconfig"
 
+config INITRD_ASYNC
+	bool "Initrd async"
+	depends on NO_GKI
+	help
+	  Init ramdisk async, can reduce kernel init time.
+
 endif
+
+config INITCALL_ASYNC
+	bool "Call initcall async"
+	depends on ROCKCHIP_THUNDER_BOOT
+	help
+	  Call same level initcall async in kthread.
+	  Kernel parameter "initcall_nr_threads" control how many threads.
+	  initcall_nr_threads default is 0, which disable intcall async.
+	  initcall_nr_threads=-1, auto selected the number of threads.
 
 config BOOT_CONFIG
 	bool "Boot config support"
@@ -1712,6 +1665,11 @@ config HAVE_ARCH_USERFAULTFD_WP
 	help
 	  Arch has userfaultfd write protection support
 
+config HAVE_ARCH_USERFAULTFD_MINOR
+	bool
+	help
+	  Arch has userfaultfd minor fault support
+
 config MEMBARRIER
 	bool "Enable membarrier() system call" if EXPERT
 	default y
@@ -1788,16 +1746,6 @@ config BPF_LSM
 
 	  If you are unsure how to answer this question, answer N.
 
-config BPF_SCHED
-	bool "SCHED Instrumentation with BPF"
-	depends on BPF_EVENTS
-	depends on BPF_SYSCALL
-	help
-	  Enables instrumentation of the sched hooks with eBPF programs for
-	  implementing dynamic scheduling policies.
-
-	  If you are unsure how to answer this question, answer N.
-
 config BPF_SYSCALL
 	bool "Enable bpf() system call"
 	select BPF
@@ -1821,16 +1769,6 @@ config BPF_JIT_ALWAYS_ON
 config BPF_JIT_DEFAULT_ON
 	def_bool ARCH_WANT_DEFAULT_BPF_JIT || BPF_JIT_ALWAYS_ON
 	depends on HAVE_EBPF_JIT && BPF_JIT
-
-config BPF_UNPRIV_DEFAULT_OFF
-	bool "Disable unprivileged BPF by default"
-	depends on BPF_SYSCALL
-	help
-	  Disables unprivileged BPF by default by setting the corresponding
-	  /proc/sys/kernel/unprivileged_bpf_disabled knob to 2. An admin can
-	  still reenable it by setting it to 0 later on, or permanently
-	  disable it by setting it to 1 (from which no other transition to
-	  0 is possible anymore).
 
 source "kernel/bpf/preload/Kconfig"
 
@@ -1960,6 +1898,11 @@ config VM_EVENT_COUNTERS
 	  This option allows the disabling of the VM event counters
 	  on EXPERT systems.  /proc/vmstat will only show page counts
 	  if VM event counters are disabled.
+
+config SLUB_SYSFS
+	bool "Enable SLUB sysfs interface"
+	depends on SLUB && SYSFS
+	default y
 
 config SLUB_DEBUG
 	default y
@@ -2153,22 +2096,6 @@ config PROFILING
 config TRACEPOINTS
 	bool
 
-config KABI_RESERVE
-	bool "Enable KABI PADDING RESERVE"
-	default y
-	help
-	  This option enables KABI padding reserve.
-	  For some embedded system, KABI padding reserve may be not necessary.
-	  Disable it on demand.
-
-config KABI_SIZE_ALIGN_CHECKS
-	bool "Enables more stringent kabi checks in the macros"
-	default y
-	depends on KABI_RESERVE
-	help
-	  This option enables more stringent kabi checks. Those must be disable
-	  in case of a debug-build because they allow to change struct sizes.
-
 endmenu		# General setup
 
 source "arch/Kconfig"
@@ -2267,6 +2194,20 @@ config MODULE_SRCVERSION_ALL
 	  the version).  With this option, such a "srcversion" field
 	  will be created for all modules.  If unsure, say N.
 
+config MODULE_SCMVERSION
+	bool "SCM version for modules"
+	depends on LOCALVERSION_AUTO
+	help
+	  This enables the module attribute "scmversion" which can be used
+	  by developers to identify the SCM version of a given module, e.g.
+	  git sha1 or hg sha1. The SCM version can be queried by modinfo or
+	  via the sysfs node: /sys/modules/MODULENAME/scmversion. This is
+	  useful when the kernel or kernel modules are updated separately
+	  since that causes the vermagic of the kernel and the module to
+	  differ.
+
+	  If unsure, say N.
+
 config MODULE_SIG
 	bool "Module signature verification"
 	select MODULE_SIG_FORMAT
@@ -2337,9 +2278,6 @@ config MODULE_SIG_SHA512
 	bool "Sign modules with SHA-512"
 	select CRYPTO_SHA512
 
-config MODULE_SIG_SM3
-	bool "Sign modules with SM3"
-	select CRYPTO_SM3
 endchoice
 
 config MODULE_SIG_HASH
@@ -2350,7 +2288,6 @@ config MODULE_SIG_HASH
 	default "sha256" if MODULE_SIG_SHA256
 	default "sha384" if MODULE_SIG_SHA384
 	default "sha512" if MODULE_SIG_SHA512
-	default "sm3" if MODULE_SIG_SM3
 
 config MODULE_COMPRESS
 	bool "Compress modules on installation"
@@ -2451,7 +2388,7 @@ endif # MODULES
 
 config MODULES_TREE_LOOKUP
 	def_bool y
-	depends on PERF_EVENTS || TRACING
+	depends on PERF_EVENTS || TRACING || CFI_CLANG
 
 config INIT_ALL_POSSIBLE
 	bool

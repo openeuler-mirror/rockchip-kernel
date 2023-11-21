@@ -35,7 +35,6 @@ STATIC void
 xfs_cui_item_free(
 	struct xfs_cui_log_item	*cuip)
 {
-	kmem_free(cuip->cui_item.li_lv_shadow);
 	if (cuip->cui_format.cui_nextents > XFS_CUI_MAX_FAST_EXTENTS)
 		kmem_free(cuip);
 	else
@@ -205,7 +204,6 @@ xfs_cud_item_release(
 	struct xfs_cud_log_item	*cudp = CUD_ITEM(lip);
 
 	xfs_cui_release(cudp->cud_cuip);
-	kmem_free(cudp->cud_item.li_lv_shadow);
 	kmem_cache_free(xfs_cud_zone, cudp);
 }
 
@@ -271,8 +269,8 @@ xfs_trans_log_finish_refcount_update(
 static int
 xfs_refcount_update_diff_items(
 	void				*priv,
-	const struct list_head		*a,
-	const struct list_head		*b)
+	struct list_head		*a,
+	struct list_head		*b)
 {
 	struct xfs_mount		*mp = priv;
 	struct xfs_refcount_intent	*ra;
@@ -434,7 +432,7 @@ xfs_cui_item_recover(
 	struct xfs_cud_log_item		*cudp;
 	struct xfs_trans		*tp;
 	struct xfs_btree_cur		*rcur = NULL;
-	struct xfs_mount		*mp = lip->li_log->l_mp;
+	struct xfs_mount		*mp = lip->li_mountp;
 	xfs_fsblock_t			startblock_fsb;
 	xfs_fsblock_t			new_fsb;
 	xfs_extlen_t			new_len;
@@ -598,18 +596,28 @@ static const struct xfs_item_ops xfs_cui_item_ops = {
 	.iop_relog	= xfs_cui_item_relog,
 };
 
-static inline void
+/*
+ * Copy an CUI format buffer from the given buf, and into the destination
+ * CUI format structure.  The CUI/CUD items were designed not to need any
+ * special alignment handling.
+ */
+static int
 xfs_cui_copy_format(
-	struct xfs_cui_log_format	*dst,
-	const struct xfs_cui_log_format	*src)
+	struct xfs_log_iovec		*buf,
+	struct xfs_cui_log_format	*dst_cui_fmt)
 {
-	unsigned int			i;
+	struct xfs_cui_log_format	*src_cui_fmt;
+	uint				len;
 
-	memcpy(dst, src, offsetof(struct xfs_cui_log_format, cui_extents));
+	src_cui_fmt = buf->i_addr;
+	len = xfs_cui_log_format_sizeof(src_cui_fmt->cui_nextents);
 
-	for (i = 0; i < src->cui_nextents; i++)
-		memcpy(&dst->cui_extents[i], &src->cui_extents[i],
-				sizeof(struct xfs_phys_extent));
+	if (buf->i_len == len) {
+		memcpy(dst_cui_fmt, src_cui_fmt, len);
+		return 0;
+	}
+	XFS_ERROR_REPORT(__func__, XFS_ERRLEVEL_LOW, NULL);
+	return -EFSCORRUPTED;
 }
 
 /*
@@ -626,26 +634,19 @@ xlog_recover_cui_commit_pass2(
 	struct xlog_recover_item	*item,
 	xfs_lsn_t			lsn)
 {
+	int				error;
 	struct xfs_mount		*mp = log->l_mp;
 	struct xfs_cui_log_item		*cuip;
 	struct xfs_cui_log_format	*cui_formatp;
-	size_t				len;
 
 	cui_formatp = item->ri_buf[0].i_addr;
 
-	if (item->ri_buf[0].i_len < xfs_cui_log_format_sizeof(0)) {
-		XFS_ERROR_REPORT(__func__, XFS_ERRLEVEL_LOW, log->l_mp);
-		return -EFSCORRUPTED;
-	}
-
-	len = xfs_cui_log_format_sizeof(cui_formatp->cui_nextents);
-	if (item->ri_buf[0].i_len != len) {
-		XFS_ERROR_REPORT(__func__, XFS_ERRLEVEL_LOW, log->l_mp);
-		return -EFSCORRUPTED;
-	}
-
 	cuip = xfs_cui_init(mp, cui_formatp->cui_nextents);
-	xfs_cui_copy_format(&cuip->cui_format, cui_formatp);
+	error = xfs_cui_copy_format(&item->ri_buf[0], &cuip->cui_format);
+	if (error) {
+		xfs_cui_item_free(cuip);
+		return error;
+	}
 	atomic_set(&cuip->cui_next_extent, cui_formatp->cui_nextents);
 	/*
 	 * Insert the intent into the AIL directly and drop one reference so

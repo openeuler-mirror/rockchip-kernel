@@ -55,6 +55,8 @@
 #include <asm/ptrace.h>
 #include <asm/irq_regs.h>
 
+#include <trace/hooks/sysrqcrash.h>
+
 /* Whether we react on sysrq keys or just ignore them */
 static int __read_mostly sysrq_enabled = CONFIG_MAGIC_SYSRQ_DEFAULT_ENABLE;
 static bool __read_mostly sysrq_always_enabled;
@@ -151,6 +153,8 @@ static void sysrq_handle_crash(int key)
 	/* release the RCU read lock before crashing */
 	rcu_read_unlock();
 
+	trace_android_vh_sysrq_crash(current);
+
 	panic("sysrq triggered crash\n");
 }
 static const struct sysrq_key_op sysrq_crash_op = {
@@ -231,10 +235,8 @@ static void showacpu(void *dummy)
 	unsigned long flags;
 
 	/* Idle CPUs have no interesting backtrace. */
-	if (idle_cpu(smp_processor_id())) {
-		pr_info("CPU%d: backtrace skipped as idling\n", smp_processor_id());
+	if (idle_cpu(smp_processor_id()))
 		return;
-	}
 
 	raw_spin_lock_irqsave(&show_lock, flags);
 	pr_info("CPU%d:\n", smp_processor_id());
@@ -261,13 +263,10 @@ static void sysrq_handle_showallcpus(int key)
 
 		if (in_irq())
 			regs = get_irq_regs();
-
-		pr_info("CPU%d:\n", smp_processor_id());
-		if (regs)
+		if (regs) {
+			pr_info("CPU%d:\n", smp_processor_id());
 			show_regs(regs);
-		else
-			show_stack(NULL, NULL, KERN_INFO);
-
+		}
 		schedule_work(&sysrq_showallcpus);
 	}
 }
@@ -1148,9 +1147,6 @@ int unregister_sysrq_key(int key, const struct sysrq_key_op *op_p)
 EXPORT_SYMBOL(unregister_sysrq_key);
 
 #ifdef CONFIG_PROC_FS
-
-static DEFINE_MUTEX(sysrq_mutex);
-
 /*
  * writing 'C' to /proc/sysrq-trigger is like sysrq-C
  */
@@ -1162,10 +1158,7 @@ static ssize_t write_sysrq_trigger(struct file *file, const char __user *buf,
 
 		if (get_user(c, buf))
 			return -EFAULT;
-
-		mutex_lock(&sysrq_mutex);
 		__handle_sysrq(c, false);
-		mutex_unlock(&sysrq_mutex);
 	}
 
 	return count;

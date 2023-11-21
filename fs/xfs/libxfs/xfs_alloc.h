@@ -73,7 +73,6 @@ typedef struct xfs_alloc_arg {
 	int		datatype;	/* mask defining data type treatment */
 	char		wasdel;		/* set if allocation was prev delayed */
 	char		wasfromfl;	/* set if allocation is from freelist */
-	bool		postallocs;	/* number of post-allocations */
 	struct xfs_owner_info	oinfo;	/* owner of blocks being allocated */
 	enum xfs_ag_resv_type	resv;	/* block reservation to use */
 } xfs_alloc_arg_t;
@@ -241,7 +240,7 @@ static inline __be32 *
 xfs_buf_to_agfl_bno(
 	struct xfs_buf		*bp)
 {
-	if (xfs_has_crc(bp->b_mount))
+	if (xfs_sb_version_hascrc(&bp->b_mount->m_sb))
 		return bp->b_addr + sizeof(struct xfs_agfl);
 	return bp->b_addr;
 }

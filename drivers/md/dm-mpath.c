@@ -1962,7 +1962,7 @@ static int multipath_message(struct dm_target *ti, unsigned argc, char **argv,
 		goto out;
 	}
 
-	r = __dm_get_device(ti, argv[1], dm_table_get_mode(ti->table), &dev, false);
+	r = dm_get_device(ti, argv[1], dm_table_get_mode(ti->table), &dev);
 	if (r) {
 		DMWARN("message: error getting device %s",
 		       argv[1]);

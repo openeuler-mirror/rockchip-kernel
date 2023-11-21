@@ -108,7 +108,7 @@ static inline void of_node_init(struct device_node *node)
 #if defined(CONFIG_OF_KOBJ)
 	kobject_init(&node->kobj, &of_node_ktype);
 #endif
-	node->fwnode.ops = &of_fwnode_ops;
+	fwnode_init(&node->fwnode, &of_fwnode_ops);
 }
 
 #if defined(CONFIG_OF_KOBJ)
@@ -560,13 +560,6 @@ int of_map_id(struct device_node *np, u32 id,
 
 phys_addr_t of_dma_get_max_cpu_address(struct device_node *np);
 
-struct kimage;
-void *of_kexec_alloc_and_setup_fdt(const struct kimage *image,
-				   unsigned long initrd_load_addr,
-				   unsigned long initrd_len,
-				   const char *cmdline, size_t extra_fdt_size);
-int ima_get_kexec_buffer(void **addr, size_t *size);
-int ima_free_kexec_buffer(void);
 #else /* CONFIG_OF */
 
 static inline void of_core_init(void)
@@ -934,6 +927,11 @@ static inline int of_alias_get_alias_list(const struct of_device_id *matches,
 }
 
 static inline int of_machine_is_compatible(const char *compat)
+{
+	return 0;
+}
+
+static inline int of_add_property(struct device_node *np, struct property *prop)
 {
 	return 0;
 }

@@ -628,6 +628,22 @@ static int push_rx(struct eg20t_port *priv, const unsigned char *buf,
 	return 0;
 }
 
+static int pop_tx_x(struct eg20t_port *priv, unsigned char *buf)
+{
+	int ret = 0;
+	struct uart_port *port = &priv->port;
+
+	if (port->x_char) {
+		dev_dbg(priv->port.dev, "%s:X character send %02x (%lu)\n",
+			__func__, port->x_char, jiffies);
+		buf[0] = port->x_char;
+		port->x_char = 0;
+		ret = 1;
+	}
+
+	return ret;
+}
+
 static int dma_push_rx(struct eg20t_port *priv, int size)
 {
 	int room;
@@ -711,7 +727,6 @@ static void pch_request_dma(struct uart_port *port)
 	if (!chan) {
 		dev_err(priv->port.dev, "%s:dma_request_channel FAILS(Tx)\n",
 			__func__);
-		pci_dev_put(dma_dev);
 		return;
 	}
 	priv->chan_tx = chan;
@@ -728,7 +743,6 @@ static void pch_request_dma(struct uart_port *port)
 			__func__);
 		dma_release_channel(priv->chan_tx);
 		priv->chan_tx = NULL;
-		pci_dev_put(dma_dev);
 		return;
 	}
 
@@ -736,8 +750,6 @@ static void pch_request_dma(struct uart_port *port)
 	priv->rx_buf_virt = dma_alloc_coherent(port->dev, port->fifosize,
 				    &priv->rx_buf_dma, GFP_KERNEL);
 	priv->chan_rx = chan;
-
-	pci_dev_put(dma_dev);
 }
 
 static void pch_dma_rx_complete(void *arg)
@@ -881,10 +893,9 @@ static unsigned int handle_tx(struct eg20t_port *priv)
 
 	fifo_size = max(priv->fifo_size, 1);
 	tx_empty = 1;
-	if (port->x_char) {
-		pch_uart_hal_write(priv, &port->x_char, 1);
+	if (pop_tx_x(priv, xmit->buf)) {
+		pch_uart_hal_write(priv, xmit->buf, 1);
 		port->icount.tx++;
-		port->x_char = 0;
 		tx_empty = 0;
 		fifo_size--;
 	}
@@ -939,11 +950,9 @@ static unsigned int dma_handle_tx(struct eg20t_port *priv)
 	}
 
 	fifo_size = max(priv->fifo_size, 1);
-
-	if (port->x_char) {
-		pch_uart_hal_write(priv, &port->x_char, 1);
+	if (pop_tx_x(priv, xmit->buf)) {
+		pch_uart_hal_write(priv, xmit->buf, 1);
 		port->icount.tx++;
-		port->x_char = 0;
 		fifo_size--;
 	}
 

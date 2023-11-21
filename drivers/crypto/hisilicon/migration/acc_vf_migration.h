@@ -8,7 +8,7 @@
 #include <linux/pci.h>
 #include <linux/vfio.h>
 
-#include <linux/hisi_acc_qm.h>
+#include "../qm.h"
 
 #define VFIO_PCI_OFFSET_SHIFT   40
 #define VFIO_PCI_OFFSET_TO_INDEX(off)   ((off) >> VFIO_PCI_OFFSET_SHIFT)
@@ -58,11 +58,9 @@
 #define QM_MB_CMD_SEND_BASE		0x300
 #define QM_MB_BUSY_SHIFT		13
 #define QM_MB_OP_SHIFT			14
-#define QM_MB_WAIT_READY_CNT		10
-#define QM_MB_MAX_WAIT_CNT		3000
-#define WAIT_PERIOD_US_MIN		100
-#define WAIT_PERIOD_US_MAX		200
-#define QM_MB_STATUS_MASK		GENMASK(12, 9)
+#define QM_MB_CMD_DATA_ADDR_L		0x304
+#define QM_MB_CMD_DATA_ADDR_H		0x308
+#define QM_MB_MAX_WAIT_CNT		6000
 
 /* doorbell */
 #define QM_DOORBELL_CMD_SQ		0
@@ -79,8 +77,6 @@
 #define QM_REG_ADDR_OFFSET		0x0004
 
 #define QM_XQC_ADDR_OFFSET		32U
-#define QM_XQC_ADDR_LOW		0x1
-#define QM_XQC_ADDR_HIGH	0x2
 #define QM_VF_AEQ_INT_MASK		0x0004
 #define QM_VF_EQ_INT_MASK		0x000c
 #define QM_IFC_INT_SOURCE_V		0x0020
@@ -217,32 +213,6 @@ struct acc_vf_region_ops {
 	int	(*add_cap)(struct acc_vf_migration *acc_vf_dev,
 			   struct acc_vf_region *region,
 			   struct vfio_info_cap *caps);
-};
-
-/* Single Root I/O Virtualization */
-struct pci_sriov {
-	int		pos;		/* Capability position */
-	int		nres;		/* Number of resources */
-	u32		cap;		/* SR-IOV Capabilities */
-	u16		ctrl;		/* SR-IOV Control */
-	u16		total_VFs;	/* Total VFs associated with the PF */
-	u16		initial_VFs;	/* Initial VFs associated with the PF */
-	u16		num_VFs;	/* Number of VFs available */
-	u16		offset;		/* First VF Routing ID offset */
-	u16		stride;		/* Following VF stride */
-	u16		vf_device;	/* VF device ID */
-	u32		pgsz;		/* Page size for BAR alignment */
-	u8		link;		/* Function Dependency Link */
-	u8		max_VF_buses;	/* Max buses consumed by VFs */
-	u16		driver_max_VFs;	/* Max num VFs driver supports */
-	struct pci_dev	*dev;		/* Lowest numbered PF */
-	struct pci_dev	*self;		/* This PF */
-	u32		class;		/* VF device */
-	u8		hdr_type;	/* VF header type */
-	u16		subsystem_vendor; /* VF subsystem vendor */
-	u16		subsystem_device; /* VF subsystem device */
-	resource_size_t	barsz[PCI_SRIOV_NUM_BARS];	/* VF BAR size */
-	bool		drivers_autoprobe; /* Auto probing of VFs by driver */
 };
 
 struct acc_vf_region {

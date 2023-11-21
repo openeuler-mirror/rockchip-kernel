@@ -193,18 +193,6 @@ retry:
 	} else {
 		ubi_assert(len == read);
 
-		if (ubi_dbg_is_read_failure(ubi, MASK_READ_FAILURE)) {
-			ubi_warn(ubi, "cannot read %d bytes from PEB %d:%d (emulated)",
-				 len, pnum, offset);
-			return -EIO;
-		}
-
-		if (ubi_dbg_is_eccerr(ubi)) {
-			ubi_warn(ubi, "ECC error (emulated) while reading %d bytes from PEB %d:%d, read %zd bytes",
-				 len, pnum, offset, read);
-			return -EBADMSG;
-		}
-
 		if (ubi_dbg_is_bitflip(ubi)) {
 			dbg_gen("bit-flip (emulated)");
 			err = UBI_IO_BITFLIPS;
@@ -787,36 +775,7 @@ int ubi_io_read_ec_hdr(struct ubi_device *ubi, int pnum,
 	 * If there was %-EBADMSG, but the header CRC is still OK, report about
 	 * a bit-flip to force scrubbing on this PEB.
 	 */
-	if (read_err)
-		return UBI_IO_BITFLIPS;
-
-	if (ubi_dbg_is_read_failure(ubi, MASK_READ_FAILURE_EC)) {
-		ubi_warn(ubi, "cannot read EC header from PEB %d(emulated)",
-			 pnum);
-		return -EIO;
-	}
-
-	if (ubi_dbg_is_ff(ubi, MASK_IO_FF_EC)) {
-		ubi_warn(ubi, "bit-all-ff (emulated)");
-		return UBI_IO_FF;
-	}
-
-	if (ubi_dbg_is_ff_bitflips(ubi, MASK_IO_FF_BITFLIPS_EC)) {
-		ubi_warn(ubi, "bit-all-ff with error reported by MTD driver (emulated)");
-		return UBI_IO_FF_BITFLIPS;
-	}
-
-	if (ubi_dbg_is_bad_hdr(ubi, MASK_BAD_HDR_EC)) {
-		ubi_warn(ubi, "bad_hdr (emulated)");
-		return UBI_IO_BAD_HDR;
-	}
-
-	if (ubi_dbg_is_bad_hdr_ebadmsg(ubi, MASK_BAD_HDR_EBADMSG_EC)) {
-		ubi_warn(ubi, "bad_hdr with ECC error (emulated)");
-		return UBI_IO_BAD_HDR_EBADMSG;
-	}
-
-	return 0;
+	return read_err ? UBI_IO_BITFLIPS : 0;
 }
 
 /**
@@ -855,11 +814,8 @@ int ubi_io_write_ec_hdr(struct ubi_device *ubi, int pnum,
 	if (err)
 		return err;
 
-	if (ubi_dbg_power_cut(ubi, MASK_POWER_CUT_EC)) {
-		ubi_warn(ubi, "XXXXX emulating a power cut when writing EC header XXXXX");
-		ubi_ro_mode(ubi);
+	if (ubi_dbg_power_cut(ubi, POWER_CUT_EC_WRITE))
 		return -EROFS;
-	}
 
 	err = ubi_io_write(ubi, ec_hdr, pnum, 0, ubi->ec_hdr_alsize);
 	return err;
@@ -1071,36 +1027,7 @@ int ubi_io_read_vid_hdr(struct ubi_device *ubi, int pnum,
 		return -EINVAL;
 	}
 
-	if (read_err)
-		return UBI_IO_BITFLIPS;
-
-	if (ubi_dbg_is_read_failure(ubi, MASK_READ_FAILURE_VID)) {
-		ubi_warn(ubi, "cannot read VID header from PEB %d(emulated)",
-			 pnum);
-		return -EIO;
-	}
-
-	if (ubi_dbg_is_ff(ubi, MASK_IO_FF_VID)) {
-		ubi_warn(ubi, "bit-all-ff (emulated)\n");
-		return UBI_IO_FF;
-	}
-
-	if (ubi_dbg_is_ff_bitflips(ubi, MASK_IO_FF_BITFLIPS_VID)) {
-		ubi_warn(ubi, "bit-all-ff with error reported by MTD driver (emulated)\n");
-		return UBI_IO_FF_BITFLIPS;
-	}
-
-	if (ubi_dbg_is_bad_hdr(ubi, MASK_BAD_HDR_VID)) {
-		ubi_warn(ubi, "bad_hdr (emulated)\n");
-		return UBI_IO_BAD_HDR;
-	}
-
-	if (ubi_dbg_is_bad_hdr_ebadmsg(ubi, MASK_BAD_HDR_EBADMSG_VID)) {
-		ubi_warn(ubi, "bad_hdr with ECC error (emulated)\n");
-		return UBI_IO_BAD_HDR_EBADMSG;
-	}
-
-	return 0;
+	return read_err ? UBI_IO_BITFLIPS : 0;
 }
 
 /**
@@ -1142,11 +1069,8 @@ int ubi_io_write_vid_hdr(struct ubi_device *ubi, int pnum,
 	if (err)
 		return err;
 
-	if (ubi_dbg_power_cut(ubi, MASK_POWER_CUT_VID)) {
-		ubi_warn(ubi, "XXXXX emulating a power cut when writing VID header XXXXX");
-		ubi_ro_mode(ubi);
+	if (ubi_dbg_power_cut(ubi, POWER_CUT_VID_WRITE))
 		return -EROFS;
-	}
 
 	err = ubi_io_write(ubi, p, pnum, ubi->vid_hdr_aloffset,
 			   ubi->vid_hdr_alsize);
@@ -1370,7 +1294,7 @@ static int self_check_write(struct ubi_device *ubi, const void *buf, int pnum,
 	void *buf1;
 	loff_t addr = (loff_t)pnum * ubi->peb_size + offset;
 
-	if (!ubi_dbg_chk_io(ubi))
+	if (false)
 		return 0;
 
 	buf1 = __vmalloc(len, GFP_NOFS);

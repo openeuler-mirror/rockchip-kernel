@@ -40,22 +40,12 @@
 
 #ifdef CONFIG_ARM64
 # define EFI_RT_VIRTUAL_LIMIT	DEFAULT_MAP_WINDOW_64
-#elif defined(CONFIG_LOONGARCH)
- # define EFI_RT_VIRTUAL_LIMIT	TASK_SIZE_MIN
 #else
 # define EFI_RT_VIRTUAL_LIMIT	TASK_SIZE
 #endif
 
-/*
- * Some architectures map the EFI regions into the kernel's linear map using a
- * fixed offset.
- */
-#ifndef EFI_RT_VIRTUAL_OFFSET
-#define EFI_RT_VIRTUAL_OFFSET	0
-#endif
-
 static u64 virtmap_base = EFI_RT_VIRTUAL_BASE;
-static bool flat_va_mapping = (EFI_RT_VIRTUAL_OFFSET != 0);
+static bool flat_va_mapping;
 
 const efi_system_table_t *efi_system_table;
 
@@ -204,8 +194,6 @@ efi_status_t __efiapi efi_pe_entry(efi_handle_t handle,
 
 	si = setup_graphics();
 
-	mem_avoid_memmap();
-
 	status = handle_kernel_image(&image_addr, &image_size,
 				     &reserve_addr,
 				     &reserve_size,
@@ -270,8 +258,8 @@ efi_status_t __efiapi efi_pe_entry(efi_handle_t handle,
 	 * The easiest way to achieve that is to simply use a 1:1 mapping.
 	 */
 	prop_tbl = get_efi_config_table(EFI_PROPERTIES_TABLE_GUID);
-	flat_va_mapping |= prop_tbl &&
-			   (prop_tbl->memory_protection_attribute &
+	flat_va_mapping = prop_tbl &&
+			  (prop_tbl->memory_protection_attribute &
 			   EFI_PROPERTIES_RUNTIME_MEMORY_PROTECTION_NON_EXECUTABLE_PE_DATA);
 
 	/* force efi_novamap if SetVirtualAddressMap() is unsupported */
@@ -323,7 +311,6 @@ fail_free_image:
 	efi_free(image_size, image_addr);
 	efi_free(reserve_size, reserve_addr);
 fail_free_screeninfo:
-	free_avoid_memmap();
 	free_screen_info(si);
 fail_free_cmdline:
 	efi_bs_call(free_pool, cmdline_ptr);
@@ -356,7 +343,7 @@ void efi_get_virtmap(efi_memory_desc_t *memory_map, unsigned long map_size,
 		paddr = in->phys_addr;
 		size = in->num_pages * EFI_PAGE_SIZE;
 
-		in->virt_addr = in->phys_addr + EFI_RT_VIRTUAL_OFFSET;
+		in->virt_addr = in->phys_addr;
 		if (efi_novamap) {
 			continue;
 		}

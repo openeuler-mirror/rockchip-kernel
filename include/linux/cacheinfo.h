@@ -79,8 +79,25 @@ struct cpu_cacheinfo {
 	bool cpu_map_populated;
 };
 
+/*
+ * Helpers to make sure "func" is executed on the cpu whose cache
+ * attributes are being detected
+ */
+#define DEFINE_SMP_CALL_CACHE_FUNCTION(func)			\
+static inline void _##func(void *ret)				\
+{								\
+	int cpu = smp_processor_id();				\
+	*(int *)ret = __##func(cpu);				\
+}								\
+								\
+int func(unsigned int cpu)					\
+{								\
+	int ret;						\
+	smp_call_function_single(cpu, _##func, &ret, true);	\
+	return ret;						\
+}
+
 struct cpu_cacheinfo *get_cpu_cacheinfo(unsigned int cpu);
-struct cacheinfo *cacheinfo_shared_cpu_map_search(void *fw_desc);
 int init_cache_level(unsigned int cpu);
 int populate_cache_leaves(unsigned int cpu);
 int cache_setup_acpi(unsigned int cpu);
@@ -113,8 +130,6 @@ static inline int get_cpu_cacheinfo_id(int cpu, int level)
 	int i;
 
 	for (i = 0; i < ci->num_leaves; i++) {
-		if (!ci->info_list)
-			continue;
 		if (ci->info_list[i].level == level) {
 			if (ci->info_list[i].attributes & CACHE_ID)
 				return ci->info_list[i].id;

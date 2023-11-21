@@ -69,7 +69,6 @@
 #include <net/xfrm.h>
 #include <net/mpls.h>
 #include <net/mptcp.h>
-#include <net/page_pool.h>
 
 #include <linux/uaccess.h>
 #include <trace/events/skb.h>
@@ -77,6 +76,7 @@
 #include <linux/capability.h>
 #include <linux/user_namespace.h>
 #include <linux/indirect_call_wrapper.h>
+#include <trace/hooks/net.h>
 
 #include "datagram.h"
 
@@ -231,7 +231,7 @@ struct sk_buff *__alloc_skb(unsigned int size, gfp_t gfp_mask,
 	skb->head = data;
 	skb->data = data;
 	skb_reset_tail_pointer(skb);
-	skb_set_end_offset(skb, size);
+	skb->end = skb->tail + size;
 	skb->mac_header = (typeof(skb->mac_header))~0U;
 	skb->transport_header = (typeof(skb->transport_header))~0U;
 
@@ -599,13 +599,10 @@ static void skb_free_head(struct sk_buff *skb)
 {
 	unsigned char *head = skb->head;
 
-	if (skb->head_frag) {
-		if (skb_pp_recycle(skb, head))
-			return;
+	if (skb->head_frag)
 		skb_free_frag(head);
-	} else {
+	else
 		kfree(head);
-	}
 }
 
 static void skb_release_data(struct sk_buff *skb)
@@ -616,28 +613,16 @@ static void skb_release_data(struct sk_buff *skb)
 	if (skb->cloned &&
 	    atomic_sub_return(skb->nohdr ? (1 << SKB_DATAREF_SHIFT) + 1 : 1,
 			      &shinfo->dataref))
-		goto exit;
-
-	skb_zcopy_clear(skb, true);
+		return;
 
 	for (i = 0; i < shinfo->nr_frags; i++)
-		__skb_frag_unref(&shinfo->frags[i], skb->pp_recycle);
+		__skb_frag_unref(&shinfo->frags[i]);
 
 	if (shinfo->frag_list)
 		kfree_skb_list(shinfo->frag_list);
 
+	skb_zcopy_clear(skb, true);
 	skb_free_head(skb);
-exit:
-	/* When we clone an SKB we copy the reycling bit. The pp_recycle
-	 * bit is only set on the head though, so in order to avoid races
-	 * while trying to recycle fragments on __skb_frag_unref() we need
-	 * to make one SKB responsible for triggering the recycle path.
-	 * So disable the recycling bit if an SKB is cloned and we have
-	 * additional references to to the fragmented part of the SKB.
-	 * Eventually the last SKB will have the recycling bit set and it's
-	 * dataref set to 0, which will trigger the recycling
-	 */
-	skb->pp_recycle = 0;
 }
 
 /*
@@ -723,6 +708,7 @@ void kfree_skb(struct sk_buff *skb)
 	if (!skb_unref(skb))
 		return;
 
+	trace_android_vh_kfree_skb(skb);
 	trace_kfree_skb(skb, __builtin_return_address(0));
 	__kfree_skb(skb);
 }
@@ -785,7 +771,7 @@ void skb_dump(const char *level, const struct sk_buff *skb, bool full_pkt)
 	       ntohs(skb->protocol), skb->pkt_type, skb->skb_iif);
 
 	if (dev)
-		printk("%sdev name=%s feat=%pNF\n",
+		printk("%sdev name=%s feat=0x%pNF\n",
 		       level, dev->name, &dev->features);
 	if (sk)
 		printk("%ssk family=%hu type=%u proto=%u\n",
@@ -1019,7 +1005,6 @@ static struct sk_buff *__skb_clone(struct sk_buff *n, struct sk_buff *skb)
 	n->nohdr = 0;
 	n->peeked = 0;
 	C(pfmemalloc);
-	C(pp_recycle);
 	n->destructor = NULL;
 	C(tail);
 	C(end);
@@ -1691,10 +1676,11 @@ int pskb_expand_head(struct sk_buff *skb, int nhead, int ntail,
 	skb->head     = data;
 	skb->head_frag = 0;
 	skb->data    += off;
-
-	skb_set_end_offset(skb, size);
 #ifdef NET_SKBUFF_DATA_USES_OFFSET
+	skb->end      = size;
 	off           = nhead;
+#else
+	skb->end      = skb->head + size;
 #endif
 	skb->tail	      += off;
 	skb_headers_offset_update(skb, nhead);
@@ -1741,38 +1727,6 @@ struct sk_buff *skb_realloc_headroom(struct sk_buff *skb, unsigned int headroom)
 	return skb2;
 }
 EXPORT_SYMBOL(skb_realloc_headroom);
-
-int __skb_unclone_keeptruesize(struct sk_buff *skb, gfp_t pri)
-{
-	unsigned int saved_end_offset, saved_truesize;
-	struct skb_shared_info *shinfo;
-	int res;
-
-	saved_end_offset = skb_end_offset(skb);
-	saved_truesize = skb->truesize;
-
-	res = pskb_expand_head(skb, 0, 0, pri);
-	if (res)
-		return res;
-
-	skb->truesize = saved_truesize;
-
-	if (likely(skb_end_offset(skb) == saved_end_offset))
-		return 0;
-
-	shinfo = skb_shinfo(skb);
-
-	/* We are about to change back skb->end,
-	 * we need to move skb_shinfo() to its new location.
-	 */
-	memmove(skb->head + saved_end_offset,
-		shinfo,
-		offsetof(struct skb_shared_info, frags[shinfo->nr_frags]));
-
-	skb_set_end_offset(skb, saved_end_offset);
-
-	return 0;
-}
 
 /**
  *	skb_copy_expand	-	copy and expand sk_buff
@@ -2163,9 +2117,6 @@ void *__pskb_pull_tail(struct sk_buff *skb, int delta)
 				insp = list;
 			} else {
 				/* Eaten partially. */
-				if (skb_is_gso(skb) && !list->head_frag &&
-				    skb_headlen(list))
-					skb_shinfo(skb)->gso_type |= SKB_GSO_DODGY;
 
 				if (skb_shared(list)) {
 					/* Sucks! We need to fork list. :-( */
@@ -2190,7 +2141,7 @@ void *__pskb_pull_tail(struct sk_buff *skb, int delta)
 		/* Free pulled out fragments. */
 		while ((list = skb_shinfo(skb)->frag_list) != insp) {
 			skb_shinfo(skb)->frag_list = list->next;
-			consume_skb(list);
+			kfree_skb(list);
 		}
 		/* And insert new clone at head. */
 		if (clone) {
@@ -2512,32 +2463,9 @@ int skb_splice_bits(struct sk_buff *skb, struct sock *sk, unsigned int offset,
 }
 EXPORT_SYMBOL_GPL(skb_splice_bits);
 
-static int sendmsg_unlocked(struct sock *sk, struct msghdr *msg,
-			    struct kvec *vec, size_t num, size_t size)
-{
-	struct socket *sock = sk->sk_socket;
-
-	if (!sock)
-		return -EINVAL;
-	return kernel_sendmsg(sock, msg, vec, num, size);
-}
-
-static int sendpage_unlocked(struct sock *sk, struct page *page, int offset,
-			     size_t size, int flags)
-{
-	struct socket *sock = sk->sk_socket;
-
-	if (!sock)
-		return -EINVAL;
-	return kernel_sendpage(sock, page, offset, size, flags);
-}
-
-typedef int (*sendmsg_func)(struct sock *sk, struct msghdr *msg,
-			    struct kvec *vec, size_t num, size_t size);
-typedef int (*sendpage_func)(struct sock *sk, struct page *page, int offset,
-			     size_t size, int flags);
-static int __skb_send_sock(struct sock *sk, struct sk_buff *skb, int offset,
-			   int len, sendmsg_func sendmsg, sendpage_func sendpage)
+/* Send skb data on a socket. Socket must be locked. */
+int skb_send_sock_locked(struct sock *sk, struct sk_buff *skb, int offset,
+			 int len)
 {
 	unsigned int orig_len = len;
 	struct sk_buff *head = skb;
@@ -2557,8 +2485,7 @@ do_frag_list:
 		memset(&msg, 0, sizeof(msg));
 		msg.msg_flags = MSG_DONTWAIT;
 
-		ret = INDIRECT_CALL_2(sendmsg, kernel_sendmsg_locked,
-				      sendmsg_unlocked, sk, &msg, &kv, 1, slen);
+		ret = kernel_sendmsg_locked(sk, &msg, &kv, 1, slen);
 		if (ret <= 0)
 			goto error;
 
@@ -2589,11 +2516,9 @@ do_frag_list:
 		slen = min_t(size_t, len, skb_frag_size(frag) - offset);
 
 		while (slen) {
-			ret = INDIRECT_CALL_2(sendpage, kernel_sendpage_locked,
-					      sendpage_unlocked, sk,
-					      skb_frag_page(frag),
-					      skb_frag_off(frag) + offset,
-					      slen, MSG_DONTWAIT);
+			ret = kernel_sendpage_locked(sk, skb_frag_page(frag),
+						     skb_frag_off(frag) + offset,
+						     slen, MSG_DONTWAIT);
 			if (ret <= 0)
 				goto error;
 
@@ -2625,22 +2550,7 @@ out:
 error:
 	return orig_len == len ? ret : orig_len - len;
 }
-
-/* Send skb data on a socket. Socket must be locked. */
-int skb_send_sock_locked(struct sock *sk, struct sk_buff *skb, int offset,
-			 int len)
-{
-	return __skb_send_sock(sk, skb, offset, len, kernel_sendmsg_locked,
-			       kernel_sendpage_locked);
-}
 EXPORT_SYMBOL_GPL(skb_send_sock_locked);
-
-/* Send skb data on a socket. Socket must be unlocked. */
-int skb_send_sock(struct sock *sk, struct sk_buff *skb, int offset, int len)
-{
-	return __skb_send_sock(sk, skb, offset, len, sendmsg_unlocked,
-			       sendpage_unlocked);
-}
 
 /**
  *	skb_store_bits - store bits from kernel buffer to skb
@@ -3386,7 +3296,19 @@ EXPORT_SYMBOL(skb_split);
  */
 static int skb_prepare_for_shift(struct sk_buff *skb)
 {
-	return skb_unclone_keeptruesize(skb, GFP_ATOMIC);
+	int ret = 0;
+
+	if (skb_cloned(skb)) {
+		/* Save and restore truesize: pskb_expand_head() may reallocate
+		 * memory where ksize(kmalloc(S)) != ksize(kmalloc(S)), but we
+		 * cannot change truesize at this point.
+		 */
+		unsigned int save_truesize = skb->truesize;
+
+		ret = pskb_expand_head(skb, 0, 0, GFP_ATOMIC);
+		skb->truesize = save_truesize;
+	}
+	return ret;
 }
 
 /**
@@ -3498,7 +3420,7 @@ int skb_shift(struct sk_buff *tgt, struct sk_buff *skb, int shiftlen)
 		fragto = &skb_shinfo(tgt)->frags[merge];
 
 		skb_frag_size_add(fragto, skb_frag_size(fragfrom));
-		__skb_frag_unref(fragfrom, skb->pp_recycle);
+		__skb_frag_unref(fragfrom);
 	}
 
 	/* Reposition in the original skb */
@@ -3770,7 +3692,6 @@ struct sk_buff *skb_segment_list(struct sk_buff *skb,
 		list_skb = list_skb->next;
 
 		err = 0;
-		delta_truesize += nskb->truesize;
 		if (skb_shared(nskb)) {
 			tmp = skb_clone(nskb, GFP_ATOMIC);
 			if (tmp) {
@@ -3795,6 +3716,7 @@ struct sk_buff *skb_segment_list(struct sk_buff *skb,
 		tail = nskb;
 
 		delta_len += nskb->len;
+		delta_truesize += nskb->truesize;
 
 		skb_push(nskb, -skb_network_offset(nskb) + offset);
 
@@ -3889,25 +3811,23 @@ struct sk_buff *skb_segment(struct sk_buff *head_skb,
 	int i = 0;
 	int pos;
 
-	if ((skb_shinfo(head_skb)->gso_type & SKB_GSO_DODGY) &&
-	    mss != GSO_BY_FRAGS && mss != skb_headlen(head_skb)) {
-		struct sk_buff *check_skb;
-
-		for (check_skb = list_skb; check_skb; check_skb = check_skb->next) {
-			if (skb_headlen(check_skb) && !check_skb->head_frag) {
-				/* gso_size is untrusted, and we have a frag_list with
-				 * a linear non head_frag item.
-				 *
-				 * If head_skb's headlen does not fit requested gso_size,
-				 * it means that the frag_list members do NOT terminate
-				 * on exact gso_size boundaries. Hence we cannot perform
-				 * skb_frag_t page sharing. Therefore we must fallback to
-				 * copying the frag_list skbs; we do so by disabling SG.
-				 */
-				features &= ~NETIF_F_SG;
-				break;
-			}
-		}
+	if (list_skb && !list_skb->head_frag && skb_headlen(list_skb) &&
+	    (skb_shinfo(head_skb)->gso_type & SKB_GSO_DODGY)) {
+		/* gso_size is untrusted, and we have a frag_list with a linear
+		 * non head_frag head.
+		 *
+		 * (we assume checking the first list_skb member suffices;
+		 * i.e if either of the list_skb members have non head_frag
+		 * head, then the first one has too).
+		 *
+		 * If head_skb's headlen does not fit requested gso_size, it
+		 * means that the frag_list members do NOT terminate on exact
+		 * gso_size boundaries. Hence we cannot perform skb_frag_t page
+		 * sharing. Therefore we must fallback to copying the frag_list
+		 * skbs; we do so by disabling SG.
+		 */
+		if (mss != GSO_BY_FRAGS && mss != skb_headlen(head_skb))
+			features &= ~NETIF_F_SG;
 	}
 
 	__skb_push(head_skb, doffset);
@@ -4068,8 +3988,9 @@ normal:
 				SKB_GSO_CB(nskb)->csum_start =
 					skb_headroom(nskb) + doffset;
 			} else {
-				if (skb_copy_bits(head_skb, offset, skb_put(nskb, len), len))
-					goto err;
+				skb_copy_bits(head_skb, offset,
+					      skb_put(nskb, len),
+					      len);
 			}
 			continue;
 		}
@@ -4338,6 +4259,9 @@ static const u8 skb_ext_type_len[] = {
 #if IS_ENABLED(CONFIG_MPTCP)
 	[SKB_EXT_MPTCP] = SKB_EXT_CHUNKSIZEOF(struct mptcp_ext),
 #endif
+#if IS_ENABLED(CONFIG_KCOV)
+	[SKB_EXT_KCOV_HANDLE] = SKB_EXT_CHUNKSIZEOF(u64),
+#endif
 };
 
 static __always_inline unsigned int skb_ext_total_length(void)
@@ -4354,6 +4278,9 @@ static __always_inline unsigned int skb_ext_total_length(void)
 #endif
 #if IS_ENABLED(CONFIG_MPTCP)
 		skb_ext_type_len[SKB_EXT_MPTCP] +
+#endif
+#if IS_ENABLED(CONFIG_KCOV)
+		skb_ext_type_len[SKB_EXT_KCOV_HANDLE] +
 #endif
 		0;
 }
@@ -4766,7 +4693,7 @@ static bool skb_may_tx_timestamp(struct sock *sk, bool tsonly)
 {
 	bool ret;
 
-	if (likely(READ_ONCE(sysctl_tstamp_allow_data) || tsonly))
+	if (likely(sysctl_tstamp_allow_data || tsonly))
 		return true;
 
 	read_lock_bh(&sk->sk_callback_lock);
@@ -5264,20 +5191,6 @@ bool skb_try_coalesce(struct sk_buff *to, struct sk_buff *from,
 	*fragstolen = false;
 
 	if (skb_cloned(to))
-		return false;
-
-	/* In general, avoid mixing page_pool and non-page_pool allocated
-	 * pages within the same SKB. Additionally avoid dealing with clones
-	 * with page_pool pages, in case the SKB is using page_pool fragment
-	 * references (PP_FLAG_PAGE_FRAG). Since we only take full page
-	 * references for cloned SKBs at the moment that would result in
-	 * inconsistent reference counts.
-	 * In theory we could take full references if @from is cloned and
-	 * !@to->pp_recycle but its tricky (due to potential race with
-	 * the clone disappearing) and rare, so not worth dealing with.
-	 */
-	if (to->pp_recycle != from->pp_recycle ||
-	    (from->pp_recycle && skb_cloned(from)))
 		return false;
 
 	if (len <= skb_tailroom(to)) {
@@ -6072,7 +5985,11 @@ static int pskb_carve_inside_header(struct sk_buff *skb, const u32 off,
 	skb->head = data;
 	skb->data = data;
 	skb->head_frag = 0;
-	skb_set_end_offset(skb, size);
+#ifdef NET_SKBUFF_DATA_USES_OFFSET
+	skb->end = size;
+#else
+	skb->end = skb->head + size;
+#endif
 	skb_set_tail_pointer(skb, skb_headlen(skb));
 	skb_headers_offset_update(skb, 0);
 	skb->cloned = 0;
@@ -6129,7 +6046,7 @@ static int pskb_carve_frag_list(struct sk_buff *skb,
 	/* Free pulled out fragments. */
 	while ((list = shinfo->frag_list) != insp) {
 		shinfo->frag_list = list->next;
-		consume_skb(list);
+		kfree_skb(list);
 	}
 	/* And insert new clone at head. */
 	if (clone) {
@@ -6210,7 +6127,11 @@ static int pskb_carve_inside_nonlinear(struct sk_buff *skb, const u32 off,
 	skb->head = data;
 	skb->head_frag = 0;
 	skb->data = data;
-	skb_set_end_offset(skb, size);
+#ifdef NET_SKBUFF_DATA_USES_OFFSET
+	skb->end = size;
+#else
+	skb->end = skb->head + size;
+#endif
 	skb_reset_tail_pointer(skb);
 	skb_headers_offset_update(skb, 0);
 	skb->cloned   = 0;

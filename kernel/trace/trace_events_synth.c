@@ -791,9 +791,10 @@ static int register_synth_event(struct synth_event *event)
 	}
 
 	ret = set_synth_event_print_fmt(call);
-	/* unregister_trace_event() will be called inside */
-	if (ret < 0)
+	if (ret < 0) {
 		trace_remove_event_call(call);
+		goto err;
+	}
  out:
 	return ret;
  err:
@@ -2085,8 +2086,8 @@ static __init int trace_events_synth_init(void)
 	if (err)
 		goto err;
 
-	entry = tracefs_create_file("synthetic_events", TRACE_MODE_WRITE,
-				    NULL, NULL, &synth_events_fops);
+	entry = tracefs_create_file("synthetic_events", 0644, NULL,
+				    NULL, &synth_events_fops);
 	if (!entry) {
 		err = -ENODEV;
 		goto err;

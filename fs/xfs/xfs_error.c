@@ -215,18 +215,13 @@ int
 xfs_errortag_init(
 	struct xfs_mount	*mp)
 {
-	int ret;
-
 	mp->m_errortag = kmem_zalloc(sizeof(unsigned int) * XFS_ERRTAG_MAX,
 			KM_MAYFAIL);
 	if (!mp->m_errortag)
 		return -ENOMEM;
 
-	ret = xfs_sysfs_init(&mp->m_errortag_kobj, &xfs_errortag_ktype,
-				&mp->m_kobj, "errortag");
-	if (ret)
-		kmem_free(mp->m_errortag);
-	return ret;
+	return xfs_sysfs_init(&mp->m_errortag_kobj, &xfs_errortag_ktype,
+			       &mp->m_kobj, "errortag");
 }
 
 void
@@ -298,8 +293,6 @@ xfs_errortag_add(
 	struct xfs_mount	*mp,
 	unsigned int		error_tag)
 {
-	BUILD_BUG_ON(ARRAY_SIZE(xfs_errortag_random_default) != XFS_ERRTAG_MAX);
-
 	if (error_tag >= XFS_ERRTAG_MAX)
 		return -EINVAL;
 

@@ -67,9 +67,13 @@ static void snd_usb_audio_stream_free(struct snd_usb_stream *stream)
 static void snd_usb_audio_pcm_free(struct snd_pcm *pcm)
 {
 	struct snd_usb_stream *stream = pcm->private_data;
+	struct snd_usb_audio *chip;
 	if (stream) {
+		mutex_lock(&stream->chip->dev_lock);
+		chip = stream->chip;
 		stream->pcm = NULL;
 		snd_usb_audio_stream_free(stream);
+		mutex_unlock(&chip->dev_lock);
 	}
 }
 
@@ -496,10 +500,6 @@ static int __snd_usb_add_audio_stream(struct snd_usb_audio *chip,
 			return 0;
 		}
 	}
-
-	if (chip->card->registered)
-		chip->need_delayed_register = true;
-
 	/* look for an empty stream */
 	list_for_each_entry(as, &chip->pcm_list, list) {
 		if (as->fmt_type != fp->fmt_type)
@@ -507,6 +507,9 @@ static int __snd_usb_add_audio_stream(struct snd_usb_audio *chip,
 		subs = &as->substream[stream];
 		if (subs->ep_num)
 			continue;
+		if (snd_device_get_state(chip->card, as->pcm) !=
+		    SNDRV_DEV_BUILD)
+			chip->need_delayed_register = true;
 		err = snd_pcm_new_stream(as->pcm, stream, 1);
 		if (err < 0)
 			return err;
@@ -1107,7 +1110,7 @@ static int __snd_usb_parse_audio_interface(struct snd_usb_audio *chip,
 	 * Dallas DS4201 workaround: It presents 5 altsettings, but the last
 	 * one misses syncpipe, and does not produce any sound.
 	 */
-	if (chip->usb_id == USB_ID(0x04fa, 0x4201) && num >= 4)
+	if (chip->usb_id == USB_ID(0x04fa, 0x4201))
 		num = 4;
 
 	for (i = 0; i < num; i++) {

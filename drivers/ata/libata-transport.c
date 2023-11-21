@@ -196,7 +196,7 @@ static struct {
 	{ XFER_PIO_0,			"XFER_PIO_0" },
 	{ XFER_PIO_SLOW,		"XFER_PIO_SLOW" }
 };
-ata_bitfield_name_search(xfer, ata_xfer_names)
+ata_bitfield_name_match(xfer,ata_xfer_names)
 
 /*
  * ATA Port attributes
@@ -301,9 +301,7 @@ int ata_tport_add(struct device *parent,
 	pm_runtime_enable(dev);
 	pm_runtime_forbid(dev);
 
-	error = transport_add_device(dev);
-	if (error)
-		goto tport_transport_add_err;
+	transport_add_device(dev);
 	transport_configure_device(dev);
 
 	error = ata_tlink_add(&ap->link);
@@ -314,12 +312,12 @@ int ata_tport_add(struct device *parent,
 
  tport_link_err:
 	transport_remove_device(dev);
- tport_transport_add_err:
 	device_del(dev);
 
  tport_err:
 	transport_destroy_device(dev);
 	put_device(dev);
+	ata_host_put(ap->host);
 	return error;
 }
 
@@ -428,9 +426,7 @@ int ata_tlink_add(struct ata_link *link)
 		goto tlink_err;
 	}
 
-	error = transport_add_device(dev);
-	if (error)
-		goto tlink_transport_err;
+	transport_add_device(dev);
 	transport_configure_device(dev);
 
 	ata_for_each_dev(ata_dev, link, ALL) {
@@ -445,7 +441,6 @@ int ata_tlink_add(struct ata_link *link)
 		ata_tdev_delete(ata_dev);
 	}
 	transport_remove_device(dev);
-  tlink_transport_err:
 	device_del(dev);
   tlink_err:
 	transport_destroy_device(dev);
@@ -683,13 +678,7 @@ static int ata_tdev_add(struct ata_device *ata_dev)
 		return error;
 	}
 
-	error = transport_add_device(dev);
-	if (error) {
-		device_del(dev);
-		ata_tdev_free(ata_dev);
-		return error;
-	}
-
+	transport_add_device(dev);
 	transport_configure_device(dev);
 	return 0;
 }

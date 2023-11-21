@@ -310,15 +310,11 @@ parse_cache(char *buf, struct resctrl_resource *r,
 		return -EINVAL;
 	}
 
-	if (kstrtoul(buf, rr->ctrl_features[type].base, &data)) {
-		rdt_last_cmd_printf("Non-hex character in the mask %s\n", buf);
+	if (kstrtoul(buf, rr->ctrl_features[type].base, &data))
 		return -EINVAL;
-	}
 
-	if (data >= rr->ctrl_features[type].max_wd) {
-		rdt_last_cmd_puts("Mask out of range\n");
+	if (data >= rr->ctrl_features[type].max_wd)
 		return -EINVAL;
-	}
 
 	cfg->new_ctrl[type] = data;
 	cfg->have_new_ctrl = true;
@@ -342,31 +338,25 @@ parse_bw(char *buf, struct resctrl_resource *r,
 	switch (rr->ctrl_features[type].evt) {
 	case QOS_MBA_MAX_EVENT_ID:
 	case QOS_MBA_PBM_EVENT_ID:
+		if (kstrtoul(buf, rr->ctrl_features[type].base, &data))
+			return -EINVAL;
+		data = (data < r->mbw.min_bw) ? r->mbw.min_bw : data;
+		data = roundup(data, r->mbw.bw_gran);
+		break;
 	case QOS_MBA_MIN_EVENT_ID:
-		if (kstrtoul(buf, rr->ctrl_features[type].base, &data)) {
-			rdt_last_cmd_printf("Non-decimal digit in MB value %s\n", buf);
+		if (kstrtoul(buf, rr->ctrl_features[type].base, &data))
 			return -EINVAL;
-		}
-		if (data < r->mbw.min_bw) {
-			rdt_last_cmd_printf("MB value %ld out of range [%d,%d]\n", data,
-					r->mbw.min_bw, rr->ctrl_features[type].max_wd - 1);
-			return -EINVAL;
-		}
+		/* for mbw min feature, 0 of setting is allowed */
 		data = roundup(data, r->mbw.bw_gran);
 		break;
 	default:
-		if (kstrtoul(buf, rr->ctrl_features[type].base, &data)) {
-			rdt_last_cmd_printf("Non-decimal digit in MB value %s\n", buf);
+		if (kstrtoul(buf, rr->ctrl_features[type].base, &data))
 			return -EINVAL;
-		}
 		break;
 	}
 
-	if (data >= rr->ctrl_features[type].max_wd) {
-		rdt_last_cmd_printf("MB value %ld out of range [%d,%d]\n", data,
-				r->mbw.min_bw, rr->ctrl_features[type].max_wd - 1);
+	if (data >= rr->ctrl_features[type].max_wd)
 		return -EINVAL;
-	}
 
 	cfg->new_ctrl[type] = data;
 	cfg->have_new_ctrl = true;
@@ -1345,7 +1335,7 @@ static void move_myself(struct callback_head *head)
 	    (rdtgrp->flags & RDT_DELETED)) {
 		current->closid = 0;
 		current->rmid = 0;
-		rdtgroup_remove(rdtgrp);
+		kfree(rdtgrp);
 	}
 
 	preempt_disable();
@@ -2290,8 +2280,6 @@ mpam_update_from_resctrl_cfg(struct mpam_resctrl_res *res,
 	case QOS_MBA_MAX_EVENT_ID:
 		range = MBW_MAX_BWA_FRACT(res->class->bwa_wd);
 		mpam_cfg->mbw_max = (resctrl_cfg * range) / (MAX_MBA_BW - 1);
-		/* correct mbw_max if remainder is too large */
-		mpam_cfg->mbw_max += ((resctrl_cfg * range) % (MAX_MBA_BW - 1)) / range;
 		mpam_cfg->mbw_max =
 			(mpam_cfg->mbw_max > range) ? range : mpam_cfg->mbw_max;
 		mpam_set_feature(mpam_feat_mbw_max, &mpam_cfg->valid);
@@ -2299,8 +2287,6 @@ mpam_update_from_resctrl_cfg(struct mpam_resctrl_res *res,
 	case QOS_MBA_MIN_EVENT_ID:
 		range = MBW_MAX_BWA_FRACT(res->class->bwa_wd);
 		mpam_cfg->mbw_min = (resctrl_cfg * range) / (MAX_MBA_BW - 1);
-		/* correct mbw_min if remainder is too large */
-		mpam_cfg->mbw_min += ((resctrl_cfg * range) % (MAX_MBA_BW - 1)) / range;
 		mpam_cfg->mbw_min =
 			(mpam_cfg->mbw_min > range) ? range : mpam_cfg->mbw_min;
 		mpam_set_feature(mpam_feat_mbw_min, &mpam_cfg->valid);

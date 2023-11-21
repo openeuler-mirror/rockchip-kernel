@@ -132,7 +132,7 @@ static void __etb_enable_hw(struct etb_drvdata *drvdata)
 
 static int etb_enable_hw(struct etb_drvdata *drvdata)
 {
-	int rc = coresight_claim_device(drvdata->csdev);
+	int rc = coresight_claim_device(drvdata->base);
 
 	if (rc)
 		return rc;
@@ -252,7 +252,6 @@ static void __etb_disable_hw(struct etb_drvdata *drvdata)
 {
 	u32 ffcr;
 	struct device *dev = &drvdata->csdev->dev;
-	struct csdev_access *csa = &drvdata->csdev->access;
 
 	CS_UNLOCK(drvdata->base);
 
@@ -264,7 +263,7 @@ static void __etb_disable_hw(struct etb_drvdata *drvdata)
 	ffcr |= ETB_FFCR_FON_MAN;
 	writel_relaxed(ffcr, drvdata->base + ETB_FFCR);
 
-	if (coresight_timeout(csa, ETB_FFCR, ETB_FFCR_BIT, 0)) {
+	if (coresight_timeout(drvdata->base, ETB_FFCR, ETB_FFCR_BIT, 0)) {
 		dev_err(dev,
 		"timeout while waiting for completion of Manual Flush\n");
 	}
@@ -272,7 +271,7 @@ static void __etb_disable_hw(struct etb_drvdata *drvdata)
 	/* disable trace capture */
 	writel_relaxed(0x0, drvdata->base + ETB_CTL_REG);
 
-	if (coresight_timeout(csa, ETB_FFSR, ETB_FFSR_BIT, 1)) {
+	if (coresight_timeout(drvdata->base, ETB_FFSR, ETB_FFSR_BIT, 1)) {
 		dev_err(dev,
 			"timeout while waiting for Formatter to Stop\n");
 	}
@@ -345,7 +344,7 @@ static void etb_disable_hw(struct etb_drvdata *drvdata)
 {
 	__etb_disable_hw(drvdata);
 	etb_dump_hw(drvdata);
-	coresight_disclaim_device(drvdata->csdev);
+	coresight_disclaim_device(drvdata->base);
 }
 
 static int etb_disable(struct coresight_device *csdev)
@@ -656,15 +655,27 @@ static const struct file_operations etb_fops = {
 	.llseek		= no_llseek,
 };
 
+#define coresight_etb10_reg(name, offset)		\
+	coresight_simple_reg32(struct etb_drvdata, name, offset)
+
+coresight_etb10_reg(rdp, ETB_RAM_DEPTH_REG);
+coresight_etb10_reg(sts, ETB_STATUS_REG);
+coresight_etb10_reg(rrp, ETB_RAM_READ_POINTER);
+coresight_etb10_reg(rwp, ETB_RAM_WRITE_POINTER);
+coresight_etb10_reg(trg, ETB_TRG);
+coresight_etb10_reg(ctl, ETB_CTL_REG);
+coresight_etb10_reg(ffsr, ETB_FFSR);
+coresight_etb10_reg(ffcr, ETB_FFCR);
+
 static struct attribute *coresight_etb_mgmt_attrs[] = {
-	coresight_simple_reg32(rdp, ETB_RAM_DEPTH_REG),
-	coresight_simple_reg32(sts, ETB_STATUS_REG),
-	coresight_simple_reg32(rrp, ETB_RAM_READ_POINTER),
-	coresight_simple_reg32(rwp, ETB_RAM_WRITE_POINTER),
-	coresight_simple_reg32(trg, ETB_TRG),
-	coresight_simple_reg32(ctl, ETB_CTL_REG),
-	coresight_simple_reg32(ffsr, ETB_FFSR),
-	coresight_simple_reg32(ffcr, ETB_FFCR),
+	&dev_attr_rdp.attr,
+	&dev_attr_sts.attr,
+	&dev_attr_rrp.attr,
+	&dev_attr_rwp.attr,
+	&dev_attr_trg.attr,
+	&dev_attr_ctl.attr,
+	&dev_attr_ffsr.attr,
+	&dev_attr_ffcr.attr,
 	NULL,
 };
 
@@ -746,7 +757,6 @@ static int etb_probe(struct amba_device *adev, const struct amba_id *id)
 		return PTR_ERR(base);
 
 	drvdata->base = base;
-	desc.access = CSDEV_ACCESS_IOMEM(base);
 
 	spin_lock_init(&drvdata->spinlock);
 

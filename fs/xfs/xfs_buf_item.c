@@ -21,7 +21,6 @@
 #include "xfs_dquot.h"
 #include "xfs_trace.h"
 #include "xfs_log.h"
-#include "xfs_log_priv.h"
 
 
 kmem_zone_t	*xfs_buf_item_zone;
@@ -57,12 +56,14 @@ xfs_buf_log_format_size(
 }
 
 /*
- * Return the number of log iovecs and space needed to log the given buf log
- * item segment.
+ * This returns the number of log iovecs needed to log the
+ * given buf log item.
  *
- * It calculates this as 1 iovec for the buf log format structure and 1 for each
- * stretch of non-contiguous chunks to be logged.  Contiguous chunks are logged
- * in a single iovec.
+ * It calculates this as 1 iovec for the buf log format structure
+ * and 1 for each stretch of non-contiguous chunks to be logged.
+ * Contiguous chunks are logged in a single iovec.
+ *
+ * If the XFS_BLI_STALE flag has been set, then log nothing.
  */
 STATIC void
 xfs_buf_item_size_segment(
@@ -118,8 +119,11 @@ xfs_buf_item_size_segment(
 }
 
 /*
- * Return the number of log iovecs and space needed to log the given buf log
- * item.
+ * This returns the number of log iovecs needed to log the given buf log item.
+ *
+ * It calculates this as 1 iovec for the buf log format structure and 1 for each
+ * stretch of non-contiguous chunks to be logged.  Contiguous chunks are logged
+ * in a single iovec.
  *
  * Discontiguous buffers need a format structure per region that is being
  * logged. This makes the changes in the buffer appear to log recovery as though
@@ -129,11 +133,7 @@ xfs_buf_item_size_segment(
  * what ends up on disk.
  *
  * If the XFS_BLI_STALE flag has been set, then log nothing but the buf log
- * format structures. If the item has previously been logged and has dirty
- * regions, we do not relog them in stale buffers. This has the effect of
- * reducing the size of the relogged item by the amount of dirty data tracked
- * by the log item. This can result in the committing transaction reducing the
- * amount of space being consumed by the CIL.
+ * format structures.
  */
 STATIC void
 xfs_buf_item_size(
@@ -147,9 +147,9 @@ xfs_buf_item_size(
 	ASSERT(atomic_read(&bip->bli_refcount) > 0);
 	if (bip->bli_flags & XFS_BLI_STALE) {
 		/*
-		 * The buffer is stale, so all we need to log is the buf log
-		 * format structure with the cancel flag in it as we are never
-		 * going to replay the changes tracked in the log item.
+		 * The buffer is stale, so all we need to log
+		 * is the buf log format structure with the
+		 * cancel flag in it.
 		 */
 		trace_xfs_buf_item_size_stale(bip);
 		ASSERT(bip->__bli_format.blf_flags & XFS_BLF_CANCEL);
@@ -164,9 +164,9 @@ xfs_buf_item_size(
 
 	if (bip->bli_flags & XFS_BLI_ORDERED) {
 		/*
-		 * The buffer has been logged just to order it. It is not being
-		 * included in the transaction commit, so no vectors are used at
-		 * all.
+		 * The buffer has been logged just to order it.
+		 * It is not being included in the transaction
+		 * commit, so no vectors are used at all.
 		 */
 		trace_xfs_buf_item_size_ordered(bip);
 		*nvecs = XFS_LOG_VEC_ORDERED;
@@ -348,7 +348,7 @@ xfs_buf_item_format(
 	 * occurs during recovery.
 	 */
 	if (bip->bli_flags & XFS_BLI_INODE_BUF) {
-		if (xfs_has_v3inodes(lip->li_log->l_mp) ||
+		if (xfs_sb_version_has_v3inode(&lip->li_mountp->m_sb) ||
 		    !((bip->bli_flags & XFS_BLI_INODE_ALLOC_BUF) &&
 		      xfs_log_item_in_current_chkpt(lip)))
 			bip->__bli_format.blf_flags |= XFS_BLF_INODE_BUF;
@@ -371,18 +371,10 @@ xfs_buf_item_format(
  * This is called to pin the buffer associated with the buf log item in memory
  * so it cannot be written out.
  *
- * We take a reference to the buffer log item here so that the BLI life cycle
- * extends at least until the buffer is unpinned via xfs_buf_item_unpin() and
- * inserted into the AIL.
- *
- * We also need to take a reference to the buffer itself as the BLI unpin
- * processing requires accessing the buffer after the BLI has dropped the final
- * BLI reference. See xfs_buf_item_unpin() for an explanation.
- * If unpins race to drop the final BLI reference and only the
- * BLI owns a reference to the buffer, then the loser of the race can have the
- * buffer fgreed from under it (e.g. on shutdown). Taking a buffer reference per
- * pin count ensures the life cycle of the buffer extends for as
- * long as we hold the buffer pin reference in xfs_buf_item_unpin().
+ * We also always take a reference to the buffer log item here so that the bli
+ * is held while the item is pinned in memory. This means that we can
+ * unconditionally drop the reference count a transaction holds when the
+ * transaction is completed.
  */
 STATIC void
 xfs_buf_item_pin(
@@ -397,30 +389,22 @@ xfs_buf_item_pin(
 
 	trace_xfs_buf_item_pin(bip);
 
-	xfs_buf_hold(bip->bli_buf);
 	atomic_inc(&bip->bli_refcount);
 	atomic_inc(&bip->bli_buf->b_pin_count);
 }
 
 /*
- * This is called to unpin the buffer associated with the buf log item which was
- * previously pinned with a call to xfs_buf_item_pin().  We enter this function
- * with a buffer pin count, a buffer reference and a BLI reference.
+ * This is called to unpin the buffer associated with the buf log
+ * item which was previously pinned with a call to xfs_buf_item_pin().
  *
- * We must drop the BLI reference before we unpin the buffer because the AIL
- * doesn't acquire a BLI reference whenever it accesses it. Therefore if the
- * refcount drops to zero, the bli could still be AIL resident and the buffer
- * submitted for I/O at any point before we return. This can result in IO
- * completion freeing the buffer while we are still trying to access it here.
- * This race condition can also occur in shutdown situations where we abort and
- * unpin buffers from contexts other that journal IO completion.
+ * Also drop the reference to the buf item for the current transaction.
+ * If the XFS_BLI_STALE flag is set and we are the last reference,
+ * then free up the buf log item and unlock the buffer.
  *
- * Hence we have to hold a buffer reference per pin count to ensure that the
- * buffer cannot be freed until we have finished processing the unpin operation.
- * The reference is taken in xfs_buf_item_pin(), and we must hold it until we
- * are done processing the buffer state. In the case of an abort (remove =
- * true) then we re-use the current pin reference as the IO reference we hand
- * off to IO failure handling.
+ * If the remove flag is set we are called from uncommit in the
+ * forced-shutdown path.  If that is true and the reference count on
+ * the log item is going to drop to zero we need to free the item's
+ * descriptor in the transaction.
  */
 STATIC void
 xfs_buf_item_unpin(
@@ -438,36 +422,36 @@ xfs_buf_item_unpin(
 	trace_xfs_buf_item_unpin(bip);
 
 	freed = atomic_dec_and_test(&bip->bli_refcount);
+
 	if (atomic_dec_and_test(&bp->b_pin_count))
 		wake_up_all(&bp->b_waiters);
 
-	 /*
-	  * Nothing to do but drop the buffer pin reference if the BLI is
-	  * still active
-	  */
-	if (!freed) {
-		xfs_buf_rele(bp);
-		return;
-	}
-
-	if (stale) {
+	if (freed && stale) {
 		ASSERT(bip->bli_flags & XFS_BLI_STALE);
 		ASSERT(xfs_buf_islocked(bp));
 		ASSERT(bp->b_flags & XBF_STALE);
 		ASSERT(bip->__bli_format.blf_flags & XFS_BLF_CANCEL);
-		ASSERT(list_empty(&lip->li_trans));
-		ASSERT(!bp->b_transp);
 
 		trace_xfs_buf_item_unpin_stale(bip);
 
-		/*
-		 * The buffer has been locked and referenced since it was marked
-		 * stale so we own both lock and reference exclusively here. We
-		 * do not need the pin reference any more, so drop it now so
-		 * that we only have one reference to drop once item completion
-		 * processing is complete.
-		 */
-		xfs_buf_rele(bp);
+		if (remove) {
+			/*
+			 * If we are in a transaction context, we have to
+			 * remove the log item from the transaction as we are
+			 * about to release our reference to the buffer.  If we
+			 * don't, the unlock that occurs later in
+			 * xfs_trans_uncommit() will try to reference the
+			 * buffer which we no longer have a hold on.
+			 */
+			if (!list_empty(&lip->li_trans))
+				xfs_trans_del_item(lip);
+
+			/*
+			 * Since the transaction no longer refers to the buffer,
+			 * the buffer should no longer refer to the transaction.
+			 */
+			bp->b_transp = NULL;
+		}
 
 		/*
 		 * If we get called here because of an IO error, we may or may
@@ -485,30 +469,16 @@ xfs_buf_item_unpin(
 			ASSERT(bp->b_log_item == NULL);
 		}
 		xfs_buf_relse(bp);
-		return;
-	}
-
-	if (remove) {
+	} else if (freed && remove) {
 		/*
-		 * We need to simulate an async IO failures here to ensure that
-		 * the correct error completion is run on this buffer. This
-		 * requires a reference to the buffer and for the buffer to be
-		 * locked. We can safely pass ownership of the pin reference to
-		 * the IO to ensure that nothing can free the buffer while we
-		 * wait for the lock and then run the IO failure completion.
+		 * The buffer must be locked and held by the caller to simulate
+		 * an async I/O failure.
 		 */
 		xfs_buf_lock(bp);
+		xfs_buf_hold(bp);
 		bp->b_flags |= XBF_ASYNC;
 		xfs_buf_ioend_fail(bp);
-		return;
 	}
-
-	/*
-	 * BLI has no more active references - it will be moved to the AIL to
-	 * manage the remaining BLI/buffer life cycle. There is nothing left for
-	 * us to do here so drop the pin reference to the buffer.
-	 */
-	xfs_buf_rele(bp);
 }
 
 STATIC uint
@@ -564,12 +534,8 @@ xfs_buf_item_put(
 	struct xfs_buf_log_item	*bip)
 {
 	struct xfs_log_item	*lip = &bip->bli_item;
-	struct xfs_buf		*bp = bip->bli_buf;
-	struct xfs_log_item	*lp, *n;
-	struct xfs_inode_log_item *iip;
 	bool			aborted;
 	bool			dirty;
-	bool			stale = bip->bli_flags & XFS_BLI_STALE_INODE;
 
 	/* drop the bli ref and return if it wasn't the last one */
 	if (!atomic_dec_and_test(&bip->bli_refcount))
@@ -582,7 +548,7 @@ xfs_buf_item_put(
 	 * that case, the bli is freed on buffer writeback completion.
 	 */
 	aborted = test_bit(XFS_LI_ABORTED, &lip->li_flags) ||
-		  xlog_is_shutdown(lip->li_log);
+		  XFS_FORCED_SHUTDOWN(lip->li_mountp);
 	dirty = bip->bli_flags & XFS_BLI_DIRTY;
 	if (dirty && !aborted)
 		return false;
@@ -596,22 +562,6 @@ xfs_buf_item_put(
 	if (aborted)
 		xfs_trans_ail_delete(lip, 0);
 	xfs_buf_item_relse(bip->bli_buf);
-
-	/*
-	 * If it is an inode buffer and item marked as stale, abort flushing
-	 * inodes associated with the buf, prevent inode item left in AIL.
-	 */
-	if (aborted && stale) {
-		list_for_each_entry_safe(lp, n, &bp->b_li_list, li_bio_list) {
-			iip = container_of(lp, struct xfs_inode_log_item,
-					ili_item);
-			if (xfs_iflags_test(iip->ili_inode, XFS_ISTALE)) {
-				set_bit(XFS_LI_ABORTED, &lp->li_flags);
-				xfs_iflags_clear(iip->ili_inode, XFS_IFLUSHING);
-			}
-		}
-	}
-
 	return true;
 }
 
@@ -683,7 +633,7 @@ xfs_buf_item_release(
 STATIC void
 xfs_buf_item_committing(
 	struct xfs_log_item	*lip,
-	xfs_csn_t		seq)
+	xfs_lsn_t		commit_lsn)
 {
 	return xfs_buf_item_release(lip);
 }
@@ -999,8 +949,6 @@ xfs_buf_item_relse(
 	trace_xfs_buf_item_relse(bp, _RET_IP_);
 	ASSERT(!test_bit(XFS_LI_IN_AIL, &bip->bli_item.li_flags));
 
-	if (atomic_read(&bip->bli_refcount))
-		return;
 	bp->b_log_item = NULL;
 	xfs_buf_rele(bp);
 	xfs_buf_item_free(bip);

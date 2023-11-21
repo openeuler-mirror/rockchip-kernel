@@ -43,6 +43,7 @@
 #include <linux/mutex.h>
 #include <linux/netdevice.h>
 #include <linux/rcupdate.h>
+#include <linux/android_kabi.h>
 
 #include <net/net_namespace.h>
 #include <net/tcp.h>
@@ -50,7 +51,6 @@
 #include <crypto/aead.h>
 #include <uapi/linux/tls.h>
 
-#include <linux/kabi.h>
 
 /* Maximum data size carried in a TLS record */
 #define TLS_MAX_PAYLOAD_SIZE		((size_t)1 << 14)
@@ -67,7 +67,7 @@
 #define MAX_IV_SIZE			16
 #define TLS_MAX_REC_SEQ_SIZE		8
 
-/* For CCM mode, the full 16-bytes of IV is made of '4' fields of given sizes.
+/* For AES-CCM, the full 16-bytes of IV is made of '4' fields of given sizes.
  *
  * IV[16] = b0[1] || implicit nonce[4] || explicit nonce[8] || length[3]
  *
@@ -75,7 +75,6 @@
  * Hence b0 contains (3 - 1) = 2.
  */
 #define TLS_AES_CCM_IV_B0_BYTE		2
-#define TLS_SM4_CCM_IV_B0_BYTE		2
 
 #define __TLS_INC_STATS(net, field)				\
 	__SNMP_INC_STATS((net)->mib.tls_statistics, field)
@@ -117,6 +116,9 @@ struct tls_rec {
 	char aad_space[TLS_AAD_SPACE_SIZE];
 	u8 iv_data[MAX_IV_SIZE];
 	struct aead_request aead_req;
+
+	ANDROID_KABI_RESERVE(1);
+
 	u8 aead_req_ctx[];
 };
 
@@ -145,6 +147,8 @@ struct tls_sw_context_tx {
 #define BIT_TX_SCHEDULED	0
 #define BIT_TX_CLOSING		1
 	unsigned long tx_bitmask;
+
+	ANDROID_KABI_RESERVE(1);
 };
 
 struct tls_sw_context_rx {
@@ -162,6 +166,8 @@ struct tls_sw_context_rx {
 	/* protect crypto_wait with decrypt_pending*/
 	spinlock_t decrypt_compl_lock;
 	bool async_notify;
+
+	ANDROID_KABI_RESERVE(1);
 };
 
 struct tls_record_info {
@@ -169,10 +175,6 @@ struct tls_record_info {
 	u32 end_seq;
 	int len;
 	int num_frags;
-
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
-
 	skb_frag_t frags[MAX_SKB_FRAGS];
 };
 
@@ -220,11 +222,6 @@ enum tls_context_flags {
 struct cipher_context {
 	char *iv;
 	char *rec_seq;
-
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
-	KABI_RESERVE(3)
-	KABI_RESERVE(4)
 };
 
 union tls_crypto_context {
@@ -290,11 +287,6 @@ struct tls_context {
 	struct list_head list;
 	refcount_t refcount;
 	struct rcu_head rcu;
-
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
-	KABI_RESERVE(3)
-	KABI_RESERVE(4)
 };
 
 enum tls_offload_ctx_dir {
@@ -313,6 +305,12 @@ struct tlsdev_ops {
 	int (*tls_dev_resync)(struct net_device *netdev,
 			      struct sock *sk, u32 seq, u8 *rcd_sn,
 			      enum tls_offload_ctx_dir direction);
+
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
+	ANDROID_KABI_RESERVE(3);
+	ANDROID_KABI_RESERVE(4);
+
 };
 
 enum tls_offload_sync_type {
@@ -375,7 +373,6 @@ int tls_sk_query(struct sock *sk, int optname, char __user *optval,
 		int __user *optlen);
 int tls_sk_attach(struct sock *sk, int optname, char __user *optval,
 		  unsigned int optlen);
-void tls_err_abort(struct sock *sk, int err);
 
 int tls_set_sw_offload(struct sock *sk, struct tls_context *ctx, int tx);
 void tls_sw_strparser_arm(struct sock *sk, struct tls_context *ctx);
@@ -442,7 +439,7 @@ static inline bool is_tx_ready(struct tls_sw_context_tx *ctx)
 {
 	struct tls_rec *rec;
 
-	rec = list_first_entry_or_null(&ctx->tx_list, struct tls_rec, list);
+	rec = list_first_entry(&ctx->tx_list, struct tls_rec, list);
 	if (!rec)
 		return false;
 
@@ -482,6 +479,12 @@ static inline bool tls_is_sk_tx_device_offloaded(struct sock *sk)
 #else
 	return false;
 #endif
+}
+
+static inline void tls_err_abort(struct sock *sk, int err)
+{
+	sk->sk_err = err;
+	sk->sk_error_report(sk);
 }
 
 static inline bool tls_bigint_increment(unsigned char *seq, int len)
@@ -524,33 +527,34 @@ static inline void tls_advance_record_sn(struct sock *sk,
 					 struct cipher_context *ctx)
 {
 	if (tls_bigint_increment(ctx->rec_seq, prot->rec_seq_size))
-		tls_err_abort(sk, -EBADMSG);
+		tls_err_abort(sk, EBADMSG);
 
 	if (prot->version != TLS_1_3_VERSION)
-		tls_bigint_increment(ctx->iv + prot->salt_size,
+		tls_bigint_increment(ctx->iv + TLS_CIPHER_AES_GCM_128_SALT_SIZE,
 				     prot->iv_size);
 }
 
 static inline void tls_fill_prepend(struct tls_context *ctx,
 			     char *buf,
 			     size_t plaintext_len,
-			     unsigned char record_type)
+			     unsigned char record_type,
+			     int version)
 {
 	struct tls_prot_info *prot = &ctx->prot_info;
 	size_t pkt_len, iv_size = prot->iv_size;
 
 	pkt_len = plaintext_len + prot->tag_size;
-	if (prot->version != TLS_1_3_VERSION) {
+	if (version != TLS_1_3_VERSION) {
 		pkt_len += iv_size;
 
 		memcpy(buf + TLS_NONCE_OFFSET,
-		       ctx->tx.iv + prot->salt_size, iv_size);
+		       ctx->tx.iv + TLS_CIPHER_AES_GCM_128_SALT_SIZE, iv_size);
 	}
 
 	/* we cover nonce explicit here as well, so buf should be of
 	 * size KTLS_DTLS_HEADER_SIZE + KTLS_DTLS_NONCE_EXPLICIT_SIZE
 	 */
-	buf[0] = prot->version == TLS_1_3_VERSION ?
+	buf[0] = version == TLS_1_3_VERSION ?
 		   TLS_RECORD_TYPE_DATA : record_type;
 	/* Note that VERSION must be TLS_1_2 for both TLS1.2 and TLS1.3 */
 	buf[1] = TLS_1_2_VERSION_MINOR;
@@ -563,17 +567,18 @@ static inline void tls_fill_prepend(struct tls_context *ctx,
 static inline void tls_make_aad(char *buf,
 				size_t size,
 				char *record_sequence,
+				int record_sequence_size,
 				unsigned char record_type,
-				struct tls_prot_info *prot)
+				int version)
 {
-	if (prot->version != TLS_1_3_VERSION) {
-		memcpy(buf, record_sequence, prot->rec_seq_size);
+	if (version != TLS_1_3_VERSION) {
+		memcpy(buf, record_sequence, record_sequence_size);
 		buf += 8;
 	} else {
-		size += prot->tag_size;
+		size += TLS_CIPHER_AES_GCM_128_TAG_SIZE;
 	}
 
-	buf[0] = prot->version == TLS_1_3_VERSION ?
+	buf[0] = version == TLS_1_3_VERSION ?
 		  TLS_RECORD_TYPE_DATA : record_type;
 	buf[1] = TLS_1_2_VERSION_MAJOR;
 	buf[2] = TLS_1_2_VERSION_MINOR;
@@ -581,11 +586,11 @@ static inline void tls_make_aad(char *buf,
 	buf[4] = size & 0xFF;
 }
 
-static inline void xor_iv_with_seq(struct tls_prot_info *prot, char *iv, char *seq)
+static inline void xor_iv_with_seq(int version, char *iv, char *seq)
 {
 	int i;
 
-	if (prot->version == TLS_1_3_VERSION) {
+	if (version == TLS_1_3_VERSION) {
 		for (i = 0; i < 8; i++)
 			iv[i + 4] ^= seq[i];
 	}
@@ -721,7 +726,7 @@ int tls_sw_fallback_init(struct sock *sk,
 			 struct tls_crypto_info *crypto_info);
 
 #ifdef CONFIG_TLS_DEVICE
-int tls_device_init(void);
+void tls_device_init(void);
 void tls_device_cleanup(void);
 void tls_device_sk_destruct(struct sock *sk);
 int tls_set_device_offload(struct sock *sk, struct tls_context *ctx);
@@ -741,7 +746,7 @@ static inline bool tls_is_sk_rx_device_offloaded(struct sock *sk)
 	return tls_get_ctx(sk)->rx_conf == TLS_HW;
 }
 #else
-static inline int tls_device_init(void) { return 0; }
+static inline void tls_device_init(void) {}
 static inline void tls_device_cleanup(void) {}
 
 static inline int

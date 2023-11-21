@@ -46,6 +46,7 @@ struct kmem_cache {
 #include <linux/kmemleak.h>
 #include <linux/random.h>
 #include <linux/sched/mm.h>
+#include <linux/android_vendor.h>
 
 /*
  * State of the slab allocator.
@@ -90,6 +91,27 @@ struct kmem_cache *kmalloc_slab(size_t, gfp_t);
 #endif
 
 gfp_t kmalloc_fix_flags(gfp_t flags);
+
+#ifdef CONFIG_SLUB
+/*
+ * Tracking user of a slab.
+ */
+#define TRACK_ADDRS_COUNT 16
+struct track {
+	unsigned long addr;	/* Called from address */
+#ifdef CONFIG_STACKTRACE
+	unsigned long addrs[TRACK_ADDRS_COUNT];	/* Called from address */
+#endif
+	int cpu;		/* Was running on cpu */
+	int pid;		/* Pid context */
+	unsigned long when;	/* When did the operation occur */
+#ifdef CONFIG_STACKTRACE
+	ANDROID_OEM_DATA(1);
+#endif
+};
+
+enum track_item { TRACK_ALLOC, TRACK_FREE };
+#endif
 
 /* Functions provided by the slab allocators */
 int __kmem_cache_create(struct kmem_cache *, slab_flags_t flags);
@@ -147,7 +169,7 @@ static inline slab_flags_t kmem_cache_flags(unsigned int object_size,
 #define SLAB_CACHE_FLAGS (SLAB_NOLEAKTRACE | SLAB_RECLAIM_ACCOUNT | \
 			  SLAB_TEMPORARY | SLAB_ACCOUNT)
 #else
-#define SLAB_CACHE_FLAGS (SLAB_NOLEAKTRACE)
+#define SLAB_CACHE_FLAGS (0)
 #endif
 
 /* Common flags available with current configuration */
@@ -215,10 +237,32 @@ DECLARE_STATIC_KEY_TRUE(slub_debug_enabled);
 DECLARE_STATIC_KEY_FALSE(slub_debug_enabled);
 #endif
 extern void print_tracking(struct kmem_cache *s, void *object);
+extern unsigned long get_each_object_track(struct kmem_cache *s,
+		struct page *page, enum track_item alloc,
+		int (*fn)(const struct kmem_cache *, const void *,
+		const struct track *, void *), void *private);
+extern slab_flags_t slub_debug;
+static inline bool __slub_debug_enabled(void)
+{
+	return static_branch_unlikely(&slub_debug_enabled);
+}
 #else
 static inline void print_tracking(struct kmem_cache *s, void *object)
 {
 }
+static inline bool __slub_debug_enabled(void)
+{
+	return false;
+}
+#ifdef CONFIG_SLUB
+static inline unsigned long get_each_object_track(struct kmem_cache *s,
+		struct page *page, enum track_item alloc,
+		int (*fn)(const struct kmem_cache *, const void *,
+		const struct track *, void *), void *private)
+{
+	return 0;
+}
+#endif
 #endif
 
 /*
@@ -228,22 +272,38 @@ static inline void print_tracking(struct kmem_cache *s, void *object)
  */
 static inline bool kmem_cache_debug_flags(struct kmem_cache *s, slab_flags_t flags)
 {
-#ifdef CONFIG_SLUB_DEBUG
-	VM_WARN_ON_ONCE(!(flags & SLAB_DEBUG_FLAGS));
-	if (static_branch_unlikely(&slub_debug_enabled))
+	if (IS_ENABLED(CONFIG_SLUB_DEBUG))
+		VM_WARN_ON_ONCE(!(flags & SLAB_DEBUG_FLAGS));
+	if (__slub_debug_enabled())
 		return s->flags & flags;
-#endif
 	return false;
 }
 
 #ifdef CONFIG_MEMCG_KMEM
+static inline struct obj_cgroup **page_obj_cgroups(struct page *page)
+{
+	/*
+	 * page->mem_cgroup and page->obj_cgroups are sharing the same
+	 * space. To distinguish between them in case we don't know for sure
+	 * that the page is a slab page (e.g. page_cgroup_ino()), let's
+	 * always set the lowest bit of obj_cgroups.
+	 */
+	return (struct obj_cgroup **)
+		((unsigned long)page->obj_cgroups & ~0x1UL);
+}
+
+static inline bool page_has_obj_cgroups(struct page *page)
+{
+	return ((unsigned long)page->obj_cgroups & 0x1UL);
+}
+
 int memcg_alloc_page_obj_cgroups(struct page *page, struct kmem_cache *s,
 				 gfp_t gfp);
 
 static inline void memcg_free_page_obj_cgroups(struct page *page)
 {
-	kfree(page_objcgs(page));
-	page->memcg_data = 0;
+	kfree(page_obj_cgroups(page));
+	page->obj_cgroups = NULL;
 }
 
 static inline size_t obj_full_size(struct kmem_cache *s)
@@ -313,7 +373,7 @@ static inline void memcg_slab_post_alloc_hook(struct kmem_cache *s,
 		if (likely(p[i])) {
 			page = virt_to_head_page(p[i]);
 
-			if (!page_objcgs(page) &&
+			if (!page_has_obj_cgroups(page) &&
 			    memcg_alloc_page_obj_cgroups(page, s, flags)) {
 				obj_cgroup_uncharge(objcg, obj_full_size(s));
 				continue;
@@ -321,7 +381,7 @@ static inline void memcg_slab_post_alloc_hook(struct kmem_cache *s,
 
 			off = obj_to_index(s, page, p[i]);
 			obj_cgroup_get(objcg);
-			page_objcgs(page)[off] = objcg;
+			page_obj_cgroups(page)[off] = objcg;
 			mod_objcg_state(objcg, page_pgdat(page),
 					cache_vmstat_idx(s), obj_full_size(s));
 		} else {
@@ -335,7 +395,6 @@ static inline void memcg_slab_free_hook(struct kmem_cache *s_orig,
 					void **p, int objects)
 {
 	struct kmem_cache *s;
-	struct obj_cgroup **objcgs;
 	struct obj_cgroup *objcg;
 	struct page *page;
 	unsigned int off;
@@ -349,8 +408,7 @@ static inline void memcg_slab_free_hook(struct kmem_cache *s_orig,
 			continue;
 
 		page = virt_to_head_page(p[i]);
-		objcgs = page_objcgs_check(page);
-		if (!objcgs)
+		if (!page_has_obj_cgroups(page))
 			continue;
 
 		if (!s_orig)
@@ -359,11 +417,11 @@ static inline void memcg_slab_free_hook(struct kmem_cache *s_orig,
 			s = s_orig;
 
 		off = obj_to_index(s, page, p[i]);
-		objcg = objcgs[off];
+		objcg = page_obj_cgroups(page)[off];
 		if (!objcg)
 			continue;
 
-		objcgs[off] = NULL;
+		page_obj_cgroups(page)[off] = NULL;
 		obj_cgroup_uncharge(objcg, obj_full_size(s));
 		mod_objcg_state(objcg, page_pgdat(page), cache_vmstat_idx(s),
 				-obj_full_size(s));
@@ -372,6 +430,11 @@ static inline void memcg_slab_free_hook(struct kmem_cache *s_orig,
 }
 
 #else /* CONFIG_MEMCG_KMEM */
+static inline bool page_has_obj_cgroups(struct page *page)
+{
+	return false;
+}
+
 static inline struct mem_cgroup *memcg_from_slab_obj(void *ptr)
 {
 	return NULL;
@@ -502,15 +565,24 @@ static inline struct kmem_cache *slab_pre_alloc_hook(struct kmem_cache *s,
 }
 
 static inline void slab_post_alloc_hook(struct kmem_cache *s,
-					struct obj_cgroup *objcg,
-					gfp_t flags, size_t size, void **p)
+					struct obj_cgroup *objcg, gfp_t flags,
+					size_t size, void **p, bool init)
 {
 	size_t i;
 
 	flags &= gfp_allowed_mask;
+
+	/*
+	 * As memory initialization might be integrated into KASAN,
+	 * kasan_slab_alloc and initialization memset must be
+	 * kept together to avoid discrepancies in behavior.
+	 *
+	 * As p[i] might get tagged, memset and kmemleak hook come after KASAN.
+	 */
 	for (i = 0; i < size; i++) {
-		p[i] = kasan_slab_alloc(s, p[i], flags);
-		/* As p[i] might get tagged, call kmemleak hook after KASAN. */
+		p[i] = kasan_slab_alloc(s, p[i], flags, init);
+		if (p[i] && init && !kasan_has_integrated_init())
+			memset(p[i], 0, s->object_size);
 		kmemleak_alloc_recursive(p[i], s->object_size, 1,
 					 s->flags, flags);
 	}
@@ -614,5 +686,11 @@ static inline bool slab_want_init_on_free(struct kmem_cache *c)
 			 (c->flags & (SLAB_TYPESAFE_BY_RCU | SLAB_POISON)));
 	return false;
 }
+
+#if defined(CONFIG_DEBUG_FS) && defined(CONFIG_SLUB_DEBUG)
+void debugfs_slab_release(struct kmem_cache *);
+#else
+static inline void debugfs_slab_release(struct kmem_cache *s) { }
+#endif
 
 #endif /* MM_SLAB_H */

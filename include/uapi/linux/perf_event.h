@@ -143,16 +143,12 @@ enum perf_event_sample_format {
 	PERF_SAMPLE_PHYS_ADDR			= 1U << 19,
 	PERF_SAMPLE_AUX				= 1U << 20,
 	PERF_SAMPLE_CGROUP			= 1U << 21,
-	PERF_SAMPLE_DATA_PAGE_SIZE		= 1U << 22,
-	PERF_SAMPLE_CODE_PAGE_SIZE		= 1U << 23,
-	PERF_SAMPLE_WEIGHT_STRUCT		= 1U << 24,
 
-	PERF_SAMPLE_MAX = 1U << 25,		/* non-ABI */
+	PERF_SAMPLE_MAX = 1U << 22,		/* non-ABI */
 
 	__PERF_SAMPLE_CALLCHAIN_EARLY		= 1ULL << 63, /* non-ABI; internal use */
 };
 
-#define PERF_SAMPLE_WEIGHT_TYPE	(PERF_SAMPLE_WEIGHT | PERF_SAMPLE_WEIGHT_STRUCT)
 /*
  * values to program into branch_sample_type when PERF_SAMPLE_BRANCH is set
  *
@@ -892,24 +888,7 @@ enum perf_event_type {
 	 * 	  char			data[size];
 	 * 	  u64			dyn_size; } && PERF_SAMPLE_STACK_USER
 	 *
-	 *	{ union perf_sample_weight
-	 *	 {
-	 *		u64		full; && PERF_SAMPLE_WEIGHT
-	 *	#if defined(__LITTLE_ENDIAN_BITFIELD)
-	 *		struct {
-	 *			u32	var1_dw;
-	 *			u16	var2_w;
-	 *			u16	var3_w;
-	 *		} && PERF_SAMPLE_WEIGHT_STRUCT
-	 *	#elif defined(__BIG_ENDIAN_BITFIELD)
-	 *		struct {
-	 *			u16	var3_w;
-	 *			u16	var2_w;
-	 *			u32	var1_dw;
-	 *		} && PERF_SAMPLE_WEIGHT_STRUCT
-	 *	#endif
-	 *	 }
-	 *	}
+	 *	{ u64			weight;   } && PERF_SAMPLE_WEIGHT
 	 *	{ u64			data_src; } && PERF_SAMPLE_DATA_SRC
 	 *	{ u64			transaction; } && PERF_SAMPLE_TRANSACTION
 	 *	{ u64			abi; # enum perf_sample_regs_abi
@@ -1149,26 +1128,14 @@ union perf_mem_data_src {
 			mem_lvl_num:4,	/* memory hierarchy level number */
 			mem_remote:1,   /* remote */
 			mem_snoopx:2,	/* snoop mode, ext */
-#ifdef __GENKSYMS__
 			mem_rsvd:24;
-#else
-			mem_blk:3,	/* access blocked */
-			mem_hops:3,	/* hop level */
-			mem_rsvd:18;
-#endif
 	};
 };
 #elif defined(__BIG_ENDIAN_BITFIELD)
 union perf_mem_data_src {
 	__u64 val;
 	struct {
-#ifdef __GENKSYMS__
 		__u64	mem_rsvd:24,
-#else
-		__u64	mem_rsvd:18,
-			mem_hops:3,	/* hop level */
-			mem_blk:3,	/* access blocked */
-#endif
 			mem_snoopx:2,	/* snoop mode, ext */
 			mem_remote:1,   /* remote */
 			mem_lvl_num:4,	/* memory hierarchy level number */
@@ -1215,9 +1182,7 @@ union perf_mem_data_src {
 #define PERF_MEM_LVLNUM_L2	0x02 /* L2 */
 #define PERF_MEM_LVLNUM_L3	0x03 /* L3 */
 #define PERF_MEM_LVLNUM_L4	0x04 /* L4 */
-/* 5-0x8 available */
-#define PERF_MEM_LVLNUM_EXTN_MEM 0x09 /* Extension memory */
-#define PERF_MEM_LVLNUM_IO	0x0a /* I/O */
+/* 5-0xa available */
 #define PERF_MEM_LVLNUM_ANY_CACHE 0x0b /* Any cache */
 #define PERF_MEM_LVLNUM_LFB	0x0c /* LFB */
 #define PERF_MEM_LVLNUM_RAM	0x0d /* RAM */
@@ -1235,7 +1200,7 @@ union perf_mem_data_src {
 #define PERF_MEM_SNOOP_SHIFT	19
 
 #define PERF_MEM_SNOOPX_FWD	0x01 /* forward */
-#define PERF_MEM_SNOOPX_PEER	0x02 /* xfer from peer */
+/* 1 free */
 #define PERF_MEM_SNOOPX_SHIFT  38
 
 /* locked instruction */
@@ -1252,20 +1217,6 @@ union perf_mem_data_src {
 #define PERF_MEM_TLB_WK		0x20 /* Hardware Walker*/
 #define PERF_MEM_TLB_OS		0x40 /* OS fault handler */
 #define PERF_MEM_TLB_SHIFT	26
-
-/* Access blocked */
-#define PERF_MEM_BLK_NA		0x01 /* not available */
-#define PERF_MEM_BLK_DATA	0x02 /* data could not be forwarded */
-#define PERF_MEM_BLK_ADDR	0x04 /* address conflict */
-#define PERF_MEM_BLK_SHIFT	40
-
-/* hop level */
-#define PERF_MEM_HOPS_0		0x01 /* remote core, same node */
-#define PERF_MEM_HOPS_1		0x02 /* remote node, same socket */
-#define PERF_MEM_HOPS_2		0x03 /* remote socket, same board */
-#define PERF_MEM_HOPS_3		0x04 /* remote board */
-/* 5-7 available */
-#define PERF_MEM_HOPS_SHIFT	43
 
 #define PERF_MEM_S(a, s) \
 	(((__u64)PERF_MEM_##a##_##s) << PERF_MEM_##a##_SHIFT)
@@ -1296,25 +1247,6 @@ struct perf_branch_entry {
 		cycles:16,  /* cycle count to last branch */
 		type:4,     /* branch type */
 		reserved:40;
-};
-
-union perf_sample_weight {
-	__u64		full;
-#if defined(__LITTLE_ENDIAN_BITFIELD)
-	struct {
-		__u32	var1_dw;
-		__u16	var2_w;
-		__u16	var3_w;
-	};
-#elif defined(__BIG_ENDIAN_BITFIELD)
-	struct {
-		__u16	var3_w;
-		__u16	var2_w;
-		__u32	var1_dw;
-	};
-#else
-#error "Unknown endianness"
-#endif
 };
 
 #endif /* _UAPI_LINUX_PERF_EVENT_H */

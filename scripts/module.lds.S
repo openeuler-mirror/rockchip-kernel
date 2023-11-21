@@ -3,11 +3,17 @@
  * Archs are free to supply their own linker scripts.  ld will
  * combine them automatically.
  */
+#include <asm/page.h>
+
 SECTIONS {
 	/DISCARD/ : {
 		*(.discard)
 		*(.discard.*)
-		*(*.discard.*)
+		/*
+		 * LLD may emit .eh_frame with CONFIG_CFI_CLANG despite
+		 * -fno-asynchronous-unwind-tables. Discard the section.
+		 */
+		*(.eh_frame)
 	}
 
 	__ksymtab		0 : { *(SORT(___ksymtab+*)) }
@@ -23,8 +29,6 @@ SECTIONS {
 
 	.init_array		0 : ALIGN(8) { *(SORT(.init_array.*)) *(.init_array) }
 
-	.altinstructions	0 : ALIGN(8) { KEEP(*(.altinstructions)) }
-	__bug_table		0 : ALIGN(8) { KEEP(*(__bug_table)) }
 	__jump_table		0 : ALIGN(8) { KEEP(*(__jump_table)) }
 
 	__patchable_function_entries : { *(__patchable_function_entries) }
@@ -46,11 +50,29 @@ SECTIONS {
 	}
 
 	.rodata : {
+		*(.rodata.._start)
 		*(.rodata .rodata.[0-9a-zA-Z_]*)
 		*(.rodata..L*)
+		*(.rodata.._end)
 	}
 
-	.text : { *(.text .text.[0-9a-zA-Z_]*) }
+	.text : ALIGN(PAGE_SIZE) {
+		*(.text.._start)
+#ifdef CONFIG_CFI_CLANG
+		/*
+		 * With CFI_CLANG, ensure __cfi_check is at the beginning of
+		 * the .text section, and that the section is aligned to page
+		 * size.
+		 */
+		*(.text.__cfi_check)
+#endif
+		*(.text .text.[0-9a-zA-Z_]*)
+		__cfi_jt_start = .;
+		*(.text..L.cfi.jumptable .text..L.cfi.jumptable.*)
+		__cfi_jt_end = .;
+		*(.text.._end)
+		*(.text.._fips140_unchecked)
+	}
 #endif
 }
 

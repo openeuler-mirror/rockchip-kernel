@@ -15,18 +15,6 @@
 #include <linux/poll.h>
 #include <uapi/linux/vfio.h>
 
-struct vfio_device {
-	struct device *dev;
-	const struct vfio_device_ops *ops;
-	struct vfio_group *group;
-
-	/* Members below here are private, not for driver use */
-	refcount_t refcount;
-	struct completion comp;
-	struct list_head group_next;
-	void *device_data;
-};
-
 /**
  * struct vfio_device_ops - VFIO bus driver device callbacks
  *
@@ -60,15 +48,11 @@ struct vfio_device_ops {
 extern struct iommu_group *vfio_iommu_group_get(struct device *dev);
 extern void vfio_iommu_group_put(struct iommu_group *group, struct device *dev);
 
-void vfio_init_group_dev(struct vfio_device *device, struct device *dev,
-			 const struct vfio_device_ops *ops, void *device_data);
-int vfio_register_group_dev(struct vfio_device *device);
 extern int vfio_add_group_dev(struct device *dev,
 			      const struct vfio_device_ops *ops,
 			      void *device_data);
 
 extern void *vfio_del_group_dev(struct device *dev);
-void vfio_unregister_group_dev(struct vfio_device *device);
 extern struct vfio_device *vfio_device_get_from_dev(struct device *dev);
 extern void vfio_device_put(struct vfio_device *device);
 extern void *vfio_device_data(struct vfio_device *device);
@@ -106,8 +90,6 @@ struct vfio_iommu_driver_ops {
 					       struct notifier_block *nb);
 	int		(*dma_rw)(void *iommu_data, dma_addr_t user_iova,
 				  void *data, size_t count, bool write);
-	KABI_EXTEND(struct iommu_domain *(*group_iommu_domain)(void *iommu_data,
-						               struct iommu_group *group))
 };
 
 extern int vfio_register_iommu_driver(const struct vfio_iommu_driver_ops *ops);
@@ -143,8 +125,6 @@ extern int vfio_group_unpin_pages(struct vfio_group *group,
 
 extern int vfio_dma_rw(struct vfio_group *group, dma_addr_t user_iova,
 		       void *data, size_t len, bool write);
-
-extern struct iommu_domain *vfio_group_iommu_domain(struct vfio_group *group);
 
 /* each type has independent events */
 enum vfio_notify_type {
@@ -233,60 +213,5 @@ extern int vfio_virqfd_enable(void *opaque,
 			      void (*thread)(void *, void *),
 			      void *data, struct virqfd **pvirqfd, int fd);
 extern void vfio_virqfd_disable(struct virqfd **pvirqfd);
-
-extern int vfio_pci_num_regions(void *device_data);
-extern struct pci_dev *vfio_pci_pdev(void *device_data);
-extern long vfio_pci_ioctl(void *device_data,
-			  unsigned int cmd, unsigned long arg);
-extern ssize_t vfio_pci_read(void *device_data, char __user *buf,
-			     size_t count, loff_t *ppos);
-extern ssize_t vfio_pci_write(void *device_data, const char __user *buf,
-			      size_t count, loff_t *ppos);
-extern int vfio_pci_mmap(void *device_data, struct vm_area_struct *vma);
-extern void vfio_pci_request(void *device_data, unsigned int count);
-extern int vfio_pci_open(void *device_data);
-extern void vfio_pci_release(void *device_data);
-extern void *vfio_pci_vendor_data(void *device_data);
-extern int vfio_pci_set_vendor_regions(void *device_data,
-					int num_vendor_regions);
-
-struct vfio_pci_vendor_driver_ops {
-	char			*name;
-	struct module		*owner;
-	/* Used to match device */
-	unsigned short		vendor;
-	unsigned short		device;
-	void			*(*probe)(struct pci_dev *pdev);
-	void			(*remove)(void *vendor_data);
-	struct vfio_device_ops *device_ops;
-};
-int __vfio_pci_register_vendor_driver(struct vfio_pci_vendor_driver_ops *ops);
-void vfio_pci_unregister_vendor_driver(struct vfio_pci_vendor_driver_ops *ops);
-
-#define vfio_pci_register_vendor_driver(__name, __probe, __remove,	\
-					__device_ops)			\
-static struct vfio_pci_vendor_driver_ops  __ops ## _node = {		\
-	.owner		= THIS_MODULE,					\
-	.name		= __name,					\
-	.probe		= __probe,					\
-	.remove		= __remove,					\
-	.device_ops	= __device_ops,					\
-};									\
-__vfio_pci_register_vendor_driver(&__ops ## _node)
-
-#define module_vfio_pci_register_vendor_handler(name, probe, remove,	\
-						device_ops)		\
-static int __init device_ops ## _module_init(void)			\
-{									\
-	vfio_pci_register_vendor_driver(name, probe, remove,		\
-					device_ops);			\
-	return 0;							\
-};									\
-static void __exit device_ops ## _module_exit(void)			\
-{									\
-	vfio_pci_unregister_vendor_driver(device_ops);			\
-};									\
-module_init(device_ops ## _module_init);				\
-module_exit(device_ops ## _module_exit)
 
 #endif /* VFIO_H */

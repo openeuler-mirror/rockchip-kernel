@@ -228,7 +228,20 @@ static void __loop_update_dio(struct loop_device *lo, bool dio)
 		blk_mq_unfreeze_queue(lo->lo_queue);
 }
 
-/*
+/**
+ * loop_validate_block_size() - validates the passed in block size
+ * @bsize: size to validate
+ */
+static int
+loop_validate_block_size(unsigned short bsize)
+{
+	if (bsize < 512 || bsize > PAGE_SIZE || !is_power_of_2(bsize))
+		return -EINVAL;
+
+	return 0;
+}
+
+/**
  * loop_set_size() - sets device size and notifies userspace
  * @lo: struct loop_device to set the size for
  * @size: new size of the loop device
@@ -797,33 +810,33 @@ static ssize_t loop_attr_backing_file_show(struct loop_device *lo, char *buf)
 
 static ssize_t loop_attr_offset_show(struct loop_device *lo, char *buf)
 {
-	return sysfs_emit(buf, "%llu\n", (unsigned long long)lo->lo_offset);
+	return sprintf(buf, "%llu\n", (unsigned long long)lo->lo_offset);
 }
 
 static ssize_t loop_attr_sizelimit_show(struct loop_device *lo, char *buf)
 {
-	return sysfs_emit(buf, "%llu\n", (unsigned long long)lo->lo_sizelimit);
+	return sprintf(buf, "%llu\n", (unsigned long long)lo->lo_sizelimit);
 }
 
 static ssize_t loop_attr_autoclear_show(struct loop_device *lo, char *buf)
 {
 	int autoclear = (lo->lo_flags & LO_FLAGS_AUTOCLEAR);
 
-	return sysfs_emit(buf, "%s\n", autoclear ? "1" : "0");
+	return sprintf(buf, "%s\n", autoclear ? "1" : "0");
 }
 
 static ssize_t loop_attr_partscan_show(struct loop_device *lo, char *buf)
 {
 	int partscan = (lo->lo_flags & LO_FLAGS_PARTSCAN);
 
-	return sysfs_emit(buf, "%s\n", partscan ? "1" : "0");
+	return sprintf(buf, "%s\n", partscan ? "1" : "0");
 }
 
 static ssize_t loop_attr_dio_show(struct loop_device *lo, char *buf)
 {
 	int dio = (lo->lo_flags & LO_FLAGS_DIRECT_IO);
 
-	return sysfs_emit(buf, "%s\n", dio ? "1" : "0");
+	return sprintf(buf, "%s\n", dio ? "1" : "0");
 }
 
 LOOP_ATTR_RO(backing_file);
@@ -1029,13 +1042,8 @@ loop_set_status_from_info(struct loop_device *lo,
 	if (err)
 		return err;
 
-	/* Avoid assigning overflow values */
-	if (info->lo_offset > LLONG_MAX || info->lo_sizelimit > LLONG_MAX)
-		return -EOVERFLOW;
-
 	lo->lo_offset = info->lo_offset;
 	lo->lo_sizelimit = info->lo_sizelimit;
-
 	memcpy(lo->lo_file_name, info->lo_file_name, LO_NAME_SIZE);
 	memcpy(lo->lo_crypt_name, info->lo_crypt_name, LO_NAME_SIZE);
 	lo->lo_file_name[LO_NAME_SIZE-1] = 0;
@@ -1113,7 +1121,7 @@ static int loop_configure(struct loop_device *lo, fmode_t mode,
 	}
 
 	if (config->block_size) {
-		error = blk_validate_block_size(config->block_size);
+		error = loop_validate_block_size(config->block_size);
 		if (error)
 			goto out_unlock;
 	}
@@ -1609,7 +1617,7 @@ static int loop_set_block_size(struct loop_device *lo, unsigned long arg)
 	if (lo->lo_state != Lo_bound)
 		return -ENXIO;
 
-	err = blk_validate_block_size(arg);
+	err = loop_validate_block_size(arg);
 	if (err)
 		return err;
 
@@ -2084,17 +2092,6 @@ static int loop_add(struct loop_device **l, int i)
 	struct gendisk *disk;
 	int err;
 
-	/*
-	 * i << part_shift is actually used as the first_minor.
-	 * So here should avoid i << part_shift overflow.
-	 * And, MKDEV() expect that the max bits of
-	 * first_minor is 20.
-	 */
-	if (i > 0 && i > MINORMASK >> part_shift) {
-		err = -EINVAL;
-		goto out;
-	}
-
 	err = -ENOMEM;
 	lo = kzalloc(sizeof(*lo), GFP_KERNEL);
 	if (!lo)
@@ -2108,8 +2105,7 @@ static int loop_add(struct loop_device **l, int i)
 		if (err == -ENOSPC)
 			err = -EEXIST;
 	} else {
-		err = idr_alloc(&loop_index_idr, lo, 0,
-				(MINORMASK >> part_shift) + 1, GFP_KERNEL);
+		err = idr_alloc(&loop_index_idr, lo, 0, 0, GFP_KERNEL);
 	}
 	if (err < 0)
 		goto out_free_dev;

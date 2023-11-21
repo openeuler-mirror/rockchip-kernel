@@ -17,23 +17,24 @@ static void propagate_protected_usage(struct page_counter *c,
 				      unsigned long usage)
 {
 	unsigned long protected, old_protected;
+	unsigned long low, min;
 	long delta;
 
 	if (!c->parent)
 		return;
 
-	protected = min(usage, READ_ONCE(c->min));
-	old_protected = atomic_long_read(&c->min_usage);
-	if (protected != old_protected) {
+	min = READ_ONCE(c->min);
+	if (min || atomic_long_read(&c->min_usage)) {
+		protected = min(usage, min);
 		old_protected = atomic_long_xchg(&c->min_usage, protected);
 		delta = protected - old_protected;
 		if (delta)
 			atomic_long_add(delta, &c->parent->children_min_usage);
 	}
 
-	protected = min(usage, READ_ONCE(c->low));
-	old_protected = atomic_long_read(&c->low_usage);
-	if (protected != old_protected) {
+	low = READ_ONCE(c->low);
+	if (low || atomic_long_read(&c->low_usage)) {
+		protected = min(usage, low);
 		old_protected = atomic_long_xchg(&c->low_usage, protected);
 		delta = protected - old_protected;
 		if (delta)
@@ -51,13 +52,9 @@ void page_counter_cancel(struct page_counter *counter, unsigned long nr_pages)
 	long new;
 
 	new = atomic_long_sub_return(nr_pages, &counter->usage);
-	/* More uncharges than charges? */
-	if (WARN_ONCE(new < 0, "page_counter underflow: %ld nr_pages=%lu\n",
-		      new, nr_pages)) {
-		new = 0;
-		atomic_long_set(&counter->usage, new);
-	}
 	propagate_protected_usage(counter, new);
+	/* More uncharges than charges? */
+	WARN_ON_ONCE(new < 0);
 }
 
 /**

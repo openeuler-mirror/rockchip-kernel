@@ -21,7 +21,7 @@
 #include <linux/if_vlan.h>
 #include <linux/vmalloc.h>
 #include <linux/sockptr.h>
-#include <crypto/sha1.h>
+#include <crypto/sha.h>
 
 #include <net/sch_generic.h>
 
@@ -578,13 +578,12 @@ DECLARE_STATIC_KEY_FALSE(bpf_stats_enabled_key);
 	if (static_branch_unlikely(&bpf_stats_enabled_key)) {		\
 		struct bpf_prog_stats *__stats;				\
 		u64 __start = sched_clock();				\
-		unsigned long flags;					\
 		__ret = dfunc(ctx, (prog)->insnsi, (prog)->bpf_func);	\
 		__stats = this_cpu_ptr(prog->aux->stats);		\
-		flags = u64_stats_update_begin_irqsave(&__stats->syncp);\
+		u64_stats_update_begin(&__stats->syncp);		\
 		__stats->cnt++;						\
 		__stats->nsecs += sched_clock() - __start;		\
-		u64_stats_update_end_irqrestore(&__stats->syncp, flags);\
+		u64_stats_update_end(&__stats->syncp);			\
 	} else {							\
 		__ret = dfunc(ctx, (prog)->insnsi, (prog)->bpf_func);	\
 	}								\
@@ -999,7 +998,6 @@ extern int bpf_jit_enable;
 extern int bpf_jit_harden;
 extern int bpf_jit_kallsyms;
 extern long bpf_jit_limit;
-extern long bpf_jit_limit_max;
 
 typedef void (*bpf_jit_fill_hole_t)(void *area, unsigned int size);
 
@@ -1296,11 +1294,6 @@ struct bpf_sysctl_kern {
 	loff_t *ppos;
 	/* Temporary "register" for indirect stores to ppos. */
 	u64 tmp_reg;
-};
-
-#define BPF_SOCKOPT_KERN_BUF_SIZE	32
-struct bpf_sockopt_buf {
-	u8		data[BPF_SOCKOPT_KERN_BUF_SIZE];
 };
 
 struct bpf_sockopt_kern {

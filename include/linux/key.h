@@ -20,7 +20,6 @@
 #include <linux/assoc_array.h>
 #include <linux/refcount.h>
 #include <linux/time64.h>
-#include <linux/kabi.h>
 
 #ifdef __KERNEL__
 #include <linux/uidgid.h>
@@ -273,7 +272,6 @@ struct key {
 	 * restriction.
 	 */
 	struct key_restriction *restrict_link;
-	KABI_RESERVE(1)
 };
 
 extern struct key *key_alloc(struct key_type *type,

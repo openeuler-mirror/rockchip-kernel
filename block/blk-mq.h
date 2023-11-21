@@ -35,21 +35,9 @@ struct blk_mq_ctx {
 	struct request_queue	*queue;
 	struct blk_mq_ctxs      *ctxs;
 	struct kobject		kobj;
+
+	ANDROID_OEM_DATA_ARRAY(1, 2);
 } ____cacheline_aligned_in_smp;
-
-struct request_wrapper {
-	/* Time that I/O was counted in part_get_stat_info(). */
-	u64 stat_time_ns;
-#ifdef CONFIG_BLK_RQ_ALLOC_TIME
-	/* Time that the first bio started allocating this request. */
-	u64 alloc_time_ns;
-#endif
-} ____cacheline_aligned;
-
-static inline struct request_wrapper *request_to_wrapper(void *rq)
-{
-	return rq - sizeof(struct request_wrapper);
-}
 
 void blk_mq_exit_queue(struct request_queue *q);
 int blk_mq_update_nr_requests(struct request_queue *q, unsigned int nr);
@@ -68,12 +56,15 @@ void blk_mq_put_rq_ref(struct request *rq);
  */
 void blk_mq_free_rqs(struct blk_mq_tag_set *set, struct blk_mq_tags *tags,
 		     unsigned int hctx_idx);
-void blk_mq_free_rq_map(struct blk_mq_tags *tags);
-struct blk_mq_tags *blk_mq_alloc_map_and_rqs(struct blk_mq_tag_set *set,
-				unsigned int hctx_idx, unsigned int depth);
-void blk_mq_free_map_and_rqs(struct blk_mq_tag_set *set,
-			     struct blk_mq_tags *tags,
-			     unsigned int hctx_idx);
+void blk_mq_free_rq_map(struct blk_mq_tags *tags, unsigned int flags);
+struct blk_mq_tags *blk_mq_alloc_rq_map(struct blk_mq_tag_set *set,
+					unsigned int hctx_idx,
+					unsigned int nr_tags,
+					unsigned int reserved_tags,
+					unsigned int flags);
+int blk_mq_alloc_rqs(struct blk_mq_tag_set *set, struct blk_mq_tags *tags,
+		     unsigned int hctx_idx, unsigned int depth);
+
 /*
  * Internal helpers for request insertion into sw queues
  */
@@ -140,7 +131,6 @@ extern int blk_mq_sysfs_register(struct request_queue *q);
 extern void blk_mq_sysfs_unregister(struct request_queue *q);
 extern void blk_mq_hctx_kobj_init(struct blk_mq_hw_ctx *hctx);
 
-void blk_mq_cancel_work_sync(struct request_queue *q);
 void blk_mq_release(struct request_queue *q);
 
 static inline struct blk_mq_ctx *__blk_mq_get_ctx(struct request_queue *q,
@@ -198,10 +188,6 @@ static inline bool blk_mq_hw_queue_mapped(struct blk_mq_hw_ctx *hctx)
 unsigned int blk_mq_in_flight(struct request_queue *q, struct hd_struct *part);
 void blk_mq_in_flight_rw(struct request_queue *q, struct hd_struct *part,
 			 unsigned int inflight[2]);
-#ifdef CONFIG_64BIT
-unsigned int blk_mq_in_flight_with_stat(struct request_queue *q,
-					struct hd_struct *part);
-#endif
 
 static inline void blk_mq_put_dispatch_budget(struct request_queue *q)
 {
@@ -298,17 +284,6 @@ static inline struct blk_plug *blk_mq_plug(struct request_queue *q,
 	return NULL;
 }
 
-/* Free all requests on the list */
-static inline void blk_mq_free_requests(struct list_head *list)
-{
-	while (!list_empty(list)) {
-		struct request *rq = list_entry_rq(list->next);
-
-		list_del_init(&rq->queuelist);
-		blk_mq_free_request(rq);
-	}
-}
-
 /*
  * For shared tag users, we track the number of currently active users
  * and attempt to provide a fair share of the tag depth for each of them.
@@ -327,20 +302,18 @@ static inline bool hctx_may_queue(struct blk_mq_hw_ctx *hctx,
 	if (bt->sb.depth == 1)
 		return true;
 
-	if (mq_unfair_dtag && !atomic_read(&hctx->tags->pending_queues))
-		return true;
-
 	if (blk_mq_is_sbitmap_shared(hctx->flags)) {
 		struct request_queue *q = hctx->queue;
+		struct blk_mq_tag_set *set = q->tag_set;
 
 		if (!test_bit(QUEUE_FLAG_HCTX_ACTIVE, &q->queue_flags))
 			return true;
+		users = atomic_read(&set->active_queues_shared_sbitmap);
 	} else {
 		if (!test_bit(BLK_MQ_S_TAG_ACTIVE, &hctx->state))
 			return true;
+		users = atomic_read(&hctx->tags->active_queues);
 	}
-
-	users = atomic_read(&hctx->tags->active_queues);
 
 	if (!users)
 		return true;
@@ -352,39 +325,5 @@ static inline bool hctx_may_queue(struct blk_mq_hw_ctx *hctx,
 	return __blk_mq_active_requests(hctx) < depth;
 }
 
-/**
- * bio_issue_as_root_blkg - see if this bio needs to be issued as root blkg
- * @return: true if this bio needs to be submitted with the root blkg context.
- *
- * In order to avoid priority inversions we sometimes need to issue a bio as if
- * it were attached to the root blkg, and then backcharge to the actual owning
- * blkg.  The idea is we do bio_blkcg() to look up the actual context for the
- * bio and attach the appropriate blkg to the bio.  Then we call this helper and
- * if it is true run with the root blkg for that queue and then do any
- * backcharging to the originating cgroup once the io is complete.
- */
-static inline bool bio_issue_as_root_blkg(struct bio *bio)
-{
-	return (bio->bi_opf & (REQ_META | REQ_SWAP)) != 0;
-}
-
-#ifdef CONFIG_BLK_CGROUP
-/**
- * blk_cgroup_mergeable - Determine whether to allow or disallow merges
- * @rq: request to merge into
- * @bio: bio to merge
- *
- * @bio and @rq should belong to the same cgroup and their issue_as_root should
- * match. The latter is necessary as we don't want to throttle e.g. a metadata
- * update because it happens to be next to a regular IO.
- */
-static inline bool blk_cgroup_mergeable(struct request *rq, struct bio *bio)
-{
-	return rq->bio->bi_blkg == bio->bi_blkg &&
-		bio_issue_as_root_blkg(rq->bio) == bio_issue_as_root_blkg(bio);
-}
-#else	/* CONFIG_BLK_CGROUP */
-static inline bool blk_cgroup_mergeable(struct request *rq, struct bio *bio) { return true; }
-#endif	/* CONFIG_BLK_CGROUP */
 
 #endif

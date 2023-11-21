@@ -2,7 +2,6 @@
 #ifndef LINUX_IOMAP_H
 #define LINUX_IOMAP_H 1
 
-#include <linux/kabi.h>
 #include <linux/atomic.h>
 #include <linux/bitmap.h>
 #include <linux/blk_types.h>
@@ -10,6 +9,7 @@
 #include <linux/types.h>
 #include <linux/mm_types.h>
 #include <linux/blkdev.h>
+#include <linux/android_kabi.h>
 
 struct address_space;
 struct fiemap_extent_info;
@@ -50,29 +50,20 @@ struct vm_fault;
  *
  * IOMAP_F_BUFFER_HEAD indicates that the file system requires the use of
  * buffer heads for this mapping.
- *
- * IOMAP_F_XATTR indicates that the iomap is for an extended attribute extent
- * rather than a file data extent.
  */
-#define IOMAP_F_NEW		(1U << 0)
-#define IOMAP_F_DIRTY		(1U << 1)
-#define IOMAP_F_SHARED		(1U << 2)
-#define IOMAP_F_MERGED		(1U << 3)
-#define IOMAP_F_BUFFER_HEAD	(1U << 4)
-#define IOMAP_F_XATTR		(1U << 6)
+#define IOMAP_F_NEW		0x01
+#define IOMAP_F_DIRTY		0x02
+#define IOMAP_F_SHARED		0x04
+#define IOMAP_F_MERGED		0x08
+#define IOMAP_F_BUFFER_HEAD	0x10
 
 /*
  * Flags set by the core iomap code during operations:
  *
  * IOMAP_F_SIZE_CHANGED indicates to the iomap_end method that the file size
  * has changed as the result of this write operation.
- *
- * IOMAP_F_STALE indicates that the iomap is not valid any longer and the file
- * range it covers needs to be remapped by the high level before the operation
- * can proceed.
  */
-#define IOMAP_F_SIZE_CHANGED	(1U << 8)
-#define IOMAP_F_STALE		(1U << 9)
+#define IOMAP_F_SIZE_CHANGED	0x100
 
 /*
  * Flags from 0x1000 up are for file system specific usage:
@@ -98,7 +89,8 @@ struct iomap {
 	void			*inline_data;
 	void			*private; /* filesystem private */
 	const struct iomap_page_ops *page_ops;
-	u64			validity_cookie; /* used with .iomap_valid() */
+
+	ANDROID_KABI_RESERVE(1);
 };
 
 static inline sector_t
@@ -122,23 +114,6 @@ struct iomap_page_ops {
 			struct iomap *iomap);
 	void (*page_done)(struct inode *inode, loff_t pos, unsigned copied,
 			struct page *page, struct iomap *iomap);
-
-	/*
-	 * Check that the cached iomap still maps correctly to the filesystem's
-	 * internal extent map. FS internal extent maps can change while iomap
-	 * is iterating a cached iomap, so this hook allows iomap to detect that
-	 * the iomap needs to be refreshed during a long running write
-	 * operation.
-	 *
-	 * The filesystem can store internal state (e.g. a sequence number) in
-	 * iomap->validity_cookie when the iomap is first mapped to be able to
-	 * detect changes between mapping time and whenever .iomap_valid() is
-	 * called.
-	 *
-	 * This is called with the folio over the specified file position held
-	 * locked by the iomap code.
-	 */
-	bool (*iomap_valid)(struct inode *inode, const struct iomap *iomap);
 };
 
 /*
@@ -170,10 +145,8 @@ struct iomap_ops {
 	int (*iomap_end)(struct inode *inode, loff_t pos, loff_t length,
 			ssize_t written, unsigned flags, struct iomap *iomap);
 
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
-	KABI_RESERVE(3)
-	KABI_RESERVE(4)
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
 };
 
 /*
@@ -226,12 +199,10 @@ struct iomap_ioend {
 	struct list_head	io_list;	/* next ioend in chain */
 	u16			io_type;
 	u16			io_flags;	/* IOMAP_F_* */
-	u32			io_folios;	/* folios added to ioend */
 	struct inode		*io_inode;	/* file being written to */
 	size_t			io_size;	/* size of the extent */
 	loff_t			io_offset;	/* offset in the file */
 	void			*io_private;	/* file system private data */
-	sector_t		io_sector;	/* start sector of ioend */
 	struct bio		*io_bio;	/* bio being built */
 	struct bio		io_inline_bio;	/* MUST BE LAST! */
 };

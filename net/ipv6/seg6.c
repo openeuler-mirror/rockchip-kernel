@@ -135,11 +135,6 @@ static int seg6_genl_sethmac(struct sk_buff *skb, struct genl_info *info)
 		goto out_unlock;
 	}
 
-	if (slen > nla_len(info->attrs[SEG6_ATTR_SECRET])) {
-		err = -EINVAL;
-		goto out_unlock;
-	}
-
 	if (hinfo) {
 		err = seg6_hmac_info_del(net, hmackeyid);
 		if (err)
@@ -382,11 +377,7 @@ static int __net_init seg6_net_init(struct net *net)
 	net->ipv6.seg6_data = sdata;
 
 #ifdef CONFIG_IPV6_SEG6_HMAC
-	if (seg6_hmac_net_init(net)) {
-		kfree(rcu_dereference_raw(sdata->tun_src));
-		kfree(sdata);
-		return -ENOMEM;
-	};
+	seg6_hmac_net_init(net);
 #endif
 
 	return 0;
@@ -400,7 +391,7 @@ static void __net_exit seg6_net_exit(struct net *net)
 	seg6_hmac_net_exit(net);
 #endif
 
-	kfree(rcu_dereference_raw(sdata->tun_src));
+	kfree(sdata->tun_src);
 	kfree(sdata);
 }
 

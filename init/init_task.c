@@ -57,10 +57,6 @@ unsigned long init_shadow_call_stack[SCS_SIZE / sizeof(long)]
 };
 #endif
 
-static struct task_struct_resvd init_task_struct_resvd = {
-	.task = &init_task,
-};
-
 /*
  * Set up the first task table, touch at your own risk!. Base=0,
  * limit=0x1fffff (=2MB)
@@ -180,7 +176,7 @@ struct task_struct init_task
 	.numa_group	= NULL,
 	.numa_faults	= NULL,
 #endif
-#ifdef CONFIG_KASAN
+#if defined(CONFIG_KASAN_GENERIC) || defined(CONFIG_KASAN_SW_TAGS)
 	.kasan_depth	= 1,
 #endif
 #ifdef CONFIG_KCSAN
@@ -214,16 +210,13 @@ struct task_struct init_task
 #ifdef CONFIG_SECURITY
 	.security	= NULL,
 #endif
-#ifdef CONFIG_QOS_SCHED_DYNAMIC_AFFINITY
-	.prefer_cpus	= NULL,
-#endif
 #ifdef CONFIG_SECCOMP_FILTER
 	.seccomp	= { .filter_count = ATOMIC_INIT(0) },
 #endif
-#ifdef CONFIG_BPF_SCHED
-	.tag		= 0,
+#ifdef CONFIG_ANDROID_STRUCT_PADDING
+	.android_vendor_data1 = {0, },
+	.android_oem_data1 = {0, },
 #endif
-	._resvd = &init_task_struct_resvd,
 };
 EXPORT_SYMBOL(init_task);
 

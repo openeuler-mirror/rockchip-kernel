@@ -23,7 +23,6 @@
 #include "xfs_da_btree.h"
 #include "xfs_dir2_priv.h"
 #include "xfs_attr_leaf.h"
-#include "xfs_types.h"
 
 kmem_zone_t *xfs_ifork_zone;
 
@@ -34,7 +33,7 @@ xfs_init_local_fork(
 	const void		*data,
 	int64_t			size)
 {
-	struct xfs_ifork	*ifp = xfs_ifork_ptr(ip, whichfork);
+	struct xfs_ifork	*ifp = XFS_IFORK_PTR(ip, whichfork);
 	int			mem_size = size, real_size = 0;
 	bool			zero_terminate;
 
@@ -104,7 +103,7 @@ xfs_iformat_extents(
 	int			whichfork)
 {
 	struct xfs_mount	*mp = ip->i_mount;
-	struct xfs_ifork	*ifp = xfs_ifork_ptr(ip, whichfork);
+	struct xfs_ifork	*ifp = XFS_IFORK_PTR(ip, whichfork);
 	int			state = xfs_bmap_fork_to_state(whichfork);
 	int			nex = XFS_DFORK_NEXTENTS(dip, whichfork);
 	int			size = nex * sizeof(xfs_bmbt_rec_t);
@@ -176,7 +175,7 @@ xfs_iformat_btree(
 	int			size;
 	int			level;
 
-	ifp = xfs_ifork_ptr(ip, whichfork);
+	ifp = XFS_IFORK_PTR(ip, whichfork);
 	dfp = (xfs_bmdr_block_t *)XFS_DFORK_PTR(dip, whichfork);
 	size = XFS_BMAP_BROOT_SPACE(mp, dfp);
 	nrecs = be16_to_cpu(dfp->bb_numrecs);
@@ -281,25 +280,6 @@ xfs_dfork_attr_shortform_size(
 	return be16_to_cpu(atp->hdr.totsize);
 }
 
-void
-xfs_ifork_init_attr(
-	struct xfs_inode	*ip,
-	enum xfs_dinode_fmt	format,
-	xfs_extnum_t		nextents)
-{
-	ip->i_af.if_format = format;
-	ip->i_af.if_nextents = nextents;
-}
-
-void
-xfs_ifork_zap_attr(
-	struct xfs_inode	*ip)
-{
-	xfs_idestroy_fork(&ip->i_af);
-	memset(&ip->i_af, 0, sizeof(struct xfs_ifork));
-	ip->i_af.if_format = XFS_DINODE_FMT_EXTENTS;
-}
-
 int
 xfs_iformat_attr_fork(
 	struct xfs_inode	*ip,
@@ -311,10 +291,13 @@ xfs_iformat_attr_fork(
 	 * Initialize the extent count early, as the per-format routines may
 	 * depend on it.
 	 */
-	xfs_ifork_init_attr(ip, dip->di_aformat,
-			be16_to_cpu(dip->di_anextents));
+	ip->i_afp = kmem_cache_zalloc(xfs_ifork_zone, GFP_NOFS | __GFP_NOFAIL);
+	ip->i_afp->if_format = dip->di_aformat;
+	if (unlikely(ip->i_afp->if_format == 0)) /* pre IRIX 6.2 file system */
+		ip->i_afp->if_format = XFS_DINODE_FMT_EXTENTS;
+	ip->i_afp->if_nextents = be16_to_cpu(dip->di_anextents);
 
-	switch (ip->i_af.if_format) {
+	switch (ip->i_afp->if_format) {
 	case XFS_DINODE_FMT_LOCAL:
 		error = xfs_iformat_local(ip, dip, XFS_ATTR_FORK,
 				xfs_dfork_attr_shortform_size(dip));
@@ -334,8 +317,10 @@ xfs_iformat_attr_fork(
 		break;
 	}
 
-	if (error)
-		xfs_ifork_zap_attr(ip);
+	if (error) {
+		kmem_cache_free(xfs_ifork_zone, ip->i_afp);
+		ip->i_afp = NULL;
+	}
 	return error;
 }
 
@@ -379,7 +364,7 @@ xfs_iroot_realloc(
 		return;
 	}
 
-	ifp = xfs_ifork_ptr(ip, whichfork);
+	ifp = XFS_IFORK_PTR(ip, whichfork);
 	if (rec_diff > 0) {
 		/*
 		 * If there wasn't any memory allocated before, just
@@ -409,7 +394,7 @@ xfs_iroot_realloc(
 						     (int)new_size);
 		ifp->if_broot_bytes = (int)new_size;
 		ASSERT(XFS_BMAP_BMDR_SPACE(ifp->if_broot) <=
-			xfs_inode_fork_size(ip, whichfork));
+			XFS_IFORK_SIZE(ip, whichfork));
 		memmove(np, op, cur_max * (uint)sizeof(xfs_fsblock_t));
 		return;
 	}
@@ -464,7 +449,7 @@ xfs_iroot_realloc(
 	ifp->if_broot_bytes = (int)new_size;
 	if (ifp->if_broot)
 		ASSERT(XFS_BMAP_BMDR_SPACE(ifp->if_broot) <=
-			xfs_inode_fork_size(ip, whichfork));
+			XFS_IFORK_SIZE(ip, whichfork));
 	return;
 }
 
@@ -490,11 +475,11 @@ xfs_idata_realloc(
 	int64_t			byte_diff,
 	int			whichfork)
 {
-	struct xfs_ifork	*ifp = xfs_ifork_ptr(ip, whichfork);
+	struct xfs_ifork	*ifp = XFS_IFORK_PTR(ip, whichfork);
 	int64_t			new_size = ifp->if_bytes + byte_diff;
 
 	ASSERT(new_size >= 0);
-	ASSERT(new_size <= xfs_inode_fork_size(ip, whichfork));
+	ASSERT(new_size <= XFS_IFORK_SIZE(ip, whichfork));
 
 	if (byte_diff == 0)
 		return;
@@ -555,7 +540,7 @@ xfs_iextents_copy(
 	int			whichfork)
 {
 	int			state = xfs_bmap_fork_to_state(whichfork);
-	struct xfs_ifork	*ifp = xfs_ifork_ptr(ip, whichfork);
+	struct xfs_ifork	*ifp = XFS_IFORK_PTR(ip, whichfork);
 	struct xfs_iext_cursor	icur;
 	struct xfs_bmbt_irec	rec;
 	int64_t			copied = 0;
@@ -607,7 +592,7 @@ xfs_iflush_fork(
 
 	if (!iip)
 		return;
-	ifp = xfs_ifork_ptr(ip, whichfork);
+	ifp = XFS_IFORK_PTR(ip, whichfork);
 	/*
 	 * This can happen if we gave up in iformat in an error path,
 	 * for the attribute fork.
@@ -623,7 +608,7 @@ xfs_iflush_fork(
 		if ((iip->ili_fields & dataflag[whichfork]) &&
 		    (ifp->if_bytes > 0)) {
 			ASSERT(ifp->if_u1.if_data != NULL);
-			ASSERT(ifp->if_bytes <= xfs_inode_fork_size(ip, whichfork));
+			ASSERT(ifp->if_bytes <= XFS_IFORK_SIZE(ip, whichfork));
 			memcpy(cp, ifp->if_u1.if_data, ifp->if_bytes);
 		}
 		break;
@@ -644,7 +629,7 @@ xfs_iflush_fork(
 		    (ifp->if_broot_bytes > 0)) {
 			ASSERT(ifp->if_broot != NULL);
 			ASSERT(XFS_BMAP_BMDR_SPACE(ifp->if_broot) <=
-			        xfs_inode_fork_size(ip, whichfork));
+			        XFS_IFORK_SIZE(ip, whichfork));
 			xfs_bmbt_to_bmdr(mp, ifp->if_broot, ifp->if_broot_bytes,
 				(xfs_bmdr_block_t *)cp,
 				XFS_DFORK_SIZE(dip, mp, whichfork));
@@ -674,7 +659,7 @@ xfs_iext_state_to_fork(
 	if (state & BMAP_COWFORK)
 		return ip->i_cowfp;
 	else if (state & BMAP_ATTRFORK)
-		return &ip->i_af;
+		return ip->i_afp;
 	return &ip->i_df;
 }
 
@@ -726,41 +711,20 @@ int
 xfs_ifork_verify_local_attr(
 	struct xfs_inode	*ip)
 {
-	struct xfs_ifork	*ifp = &ip->i_af;
+	struct xfs_ifork	*ifp = ip->i_afp;
 	xfs_failaddr_t		fa;
 
-	if (!xfs_inode_has_attr_fork(ip))
+	if (!ifp)
 		fa = __this_address;
 	else
 		fa = xfs_attr_shortform_verify(ip);
 
 	if (fa) {
 		xfs_inode_verifier_error(ip, -EFSCORRUPTED, "attr fork",
-				ifp->if_u1.if_data, ifp->if_bytes, fa);
+				ifp ? ifp->if_u1.if_data : NULL,
+				ifp ? ifp->if_bytes : 0, fa);
 		return -EFSCORRUPTED;
 	}
-
-	return 0;
-}
-
-int
-xfs_iext_count_may_overflow(
-	struct xfs_inode	*ip,
-	int			whichfork,
-	int			nr_to_add)
-{
-	struct xfs_ifork	*ifp = xfs_ifork_ptr(ip, whichfork);
-	uint64_t		max_exts;
-	uint64_t		nr_exts;
-
-	if (whichfork == XFS_COW_FORK)
-		return 0;
-
-	max_exts = (whichfork == XFS_ATTR_FORK) ? MAXAEXTNUM : MAXEXTNUM;
-
-	nr_exts = ifp->if_nextents + nr_to_add;
-	if (nr_exts < ifp->if_nextents || nr_exts > max_exts)
-		return -EFBIG;
 
 	return 0;
 }

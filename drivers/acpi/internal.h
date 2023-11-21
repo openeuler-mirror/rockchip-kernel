@@ -82,6 +82,7 @@ static inline void acpi_lpss_init(void) {}
 
 void acpi_apd_init(void);
 
+acpi_status acpi_hotplug_schedule(struct acpi_device *adev, u32 src);
 bool acpi_queue_hotplug_work(struct work_struct *work);
 void acpi_device_hotplug(struct acpi_device *adev, u32 src);
 bool acpi_scan_is_offline(struct acpi_device *adev, bool uevent);
@@ -183,8 +184,6 @@ struct acpi_ec {
 	struct work_struct work;
 	unsigned long timestamp;
 	unsigned long nr_pending_queries;
-	unsigned int events_in_progress;
-	unsigned int queries_in_progress;
 	bool busy_polling;
 	unsigned int polling_guard;
 };

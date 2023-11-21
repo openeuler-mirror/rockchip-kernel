@@ -31,7 +31,6 @@
 #include <linux/cn_proc.h>
 #include <linux/compat.h>
 #include <linux/sched/signal.h>
-#include <linux/minmax.h>
 
 #include <asm/syscall.h>	/* for syscall_get_* */
 
@@ -371,26 +370,6 @@ bool ptrace_may_access(struct task_struct *task, unsigned int mode)
 	return !err;
 }
 
-static int check_ptrace_options(unsigned long data)
-{
-	if (data & ~(unsigned long)PTRACE_O_MASK)
-		return -EINVAL;
-
-	if (unlikely(data & PTRACE_O_SUSPEND_SECCOMP)) {
-		if (!IS_ENABLED(CONFIG_CHECKPOINT_RESTORE) ||
-		    !IS_ENABLED(CONFIG_SECCOMP))
-			return -EINVAL;
-
-		if (!capable(CAP_SYS_ADMIN))
-			return -EPERM;
-
-		if (seccomp_mode(&current->seccomp) != SECCOMP_MODE_DISABLED ||
-		    current->ptrace & PT_SUSPEND_SECCOMP)
-			return -EPERM;
-	}
-	return 0;
-}
-
 static int ptrace_attach(struct task_struct *task, long request,
 			 unsigned long addr,
 			 unsigned long flags)
@@ -402,16 +381,8 @@ static int ptrace_attach(struct task_struct *task, long request,
 	if (seize) {
 		if (addr != 0)
 			goto out;
-		/*
-		 * This duplicates the check in check_ptrace_options() because
-		 * ptrace_attach() and ptrace_setoptions() have historically
-		 * used different error codes for unknown ptrace options.
-		 */
 		if (flags & ~(unsigned long)PTRACE_O_MASK)
 			goto out;
-		retval = check_ptrace_options(flags);
-		if (retval)
-			return retval;
 		flags = PT_PTRACED | PT_SEIZED | (flags << PT_OPT_FLAG_SHIFT);
 	} else {
 		flags = PT_PTRACED;
@@ -684,11 +655,22 @@ int ptrace_writedata(struct task_struct *tsk, char __user *src, unsigned long ds
 static int ptrace_setoptions(struct task_struct *child, unsigned long data)
 {
 	unsigned flags;
-	int ret;
 
-	ret = check_ptrace_options(data);
-	if (ret)
-		return ret;
+	if (data & ~(unsigned long)PTRACE_O_MASK)
+		return -EINVAL;
+
+	if (unlikely(data & PTRACE_O_SUSPEND_SECCOMP)) {
+		if (!IS_ENABLED(CONFIG_CHECKPOINT_RESTORE) ||
+		    !IS_ENABLED(CONFIG_SECCOMP))
+			return -EINVAL;
+
+		if (!capable(CAP_SYS_ADMIN))
+			return -EPERM;
+
+		if (seccomp_mode(&current->seccomp) != SECCOMP_MODE_DISABLED ||
+		    current->ptrace & PT_SUSPEND_SECCOMP)
+			return -EPERM;
+	}
 
 	/* Avoid intermediate state when all opts are cleared */
 	flags = child->ptrace;
@@ -812,24 +794,6 @@ static int ptrace_peek_siginfo(struct task_struct *child,
 
 	return ret;
 }
-
-#ifdef CONFIG_RSEQ
-static long ptrace_get_rseq_configuration(struct task_struct *task,
-					  unsigned long size, void __user *data)
-{
-	struct ptrace_rseq_configuration conf = {
-		.rseq_abi_pointer = (u64)(uintptr_t)task->rseq,
-		.rseq_abi_size = sizeof(*task->rseq),
-		.signature = task->rseq_sig,
-		.flags = 0,
-	};
-
-	size = min_t(unsigned long, size, sizeof(conf));
-	if (copy_to_user(data, &conf, size))
-		return -EFAULT;
-	return sizeof(conf);
-}
-#endif
 
 #ifdef PTRACE_SINGLESTEP
 #define is_singlestep(request)		((request) == PTRACE_SINGLESTEP)
@@ -1045,24 +1009,6 @@ ptrace_get_syscall_info(struct task_struct *child, unsigned long user_size,
 }
 #endif /* CONFIG_HAVE_ARCH_TRACEHOOK */
 
-static int ptrace_setsigmask(struct task_struct *child, sigset_t *new_set)
-{
-	sigdelsetmask(new_set, sigmask(SIGKILL)|sigmask(SIGSTOP));
-
-	/*
-	 * Every thread does recalc_sigpending() after resume, so
-	 * retarget_shared_pending() and recalc_sigpending() are not
-	 * called here.
-	 */
-	spin_lock_irq(&child->sighand->siglock);
-	child->blocked = *new_set;
-	spin_unlock_irq(&child->sighand->siglock);
-
-	clear_tsk_restore_sigmask(child);
-
-	return 0;
-}
-
 int ptrace_request(struct task_struct *child, long request,
 		   unsigned long addr, unsigned long data)
 {
@@ -1141,7 +1087,20 @@ int ptrace_request(struct task_struct *child, long request,
 			break;
 		}
 
-		ret = ptrace_setsigmask(child, &new_set);
+		sigdelsetmask(&new_set, sigmask(SIGKILL)|sigmask(SIGSTOP));
+
+		/*
+		 * Every thread does recalc_sigpending() after resume, so
+		 * retarget_shared_pending() and recalc_sigpending() are not
+		 * called here.
+		 */
+		spin_lock_irq(&child->sighand->siglock);
+		child->blocked = new_set;
+		spin_unlock_irq(&child->sighand->siglock);
+
+		clear_tsk_restore_sigmask(child);
+
+		ret = 0;
 		break;
 	}
 
@@ -1243,8 +1202,9 @@ int ptrace_request(struct task_struct *child, long request,
 		return ptrace_resume(child, request, data);
 
 	case PTRACE_KILL:
-		send_sig_info(SIGKILL, SEND_SIG_NOINFO, child);
-		return 0;
+		if (child->exit_state)	/* already dead */
+			return 0;
+		return ptrace_resume(child, request, SIGKILL);
 
 #ifdef CONFIG_HAVE_ARCH_TRACEHOOK
 	case PTRACE_GETREGSET:
@@ -1277,12 +1237,6 @@ int ptrace_request(struct task_struct *child, long request,
 	case PTRACE_SECCOMP_GET_METADATA:
 		ret = seccomp_get_metadata(child, addr, datavp);
 		break;
-
-#ifdef CONFIG_RSEQ
-	case PTRACE_GET_RSEQ_CONFIGURATION:
-		ret = ptrace_get_rseq_configuration(child, addr, datavp);
-		break;
-#endif
 
 	default:
 		break;
@@ -1369,7 +1323,6 @@ int compat_ptrace_request(struct task_struct *child, compat_long_t request,
 {
 	compat_ulong_t __user *datap = compat_ptr(data);
 	compat_ulong_t word;
-	sigset_t new_set;
 	kernel_siginfo_t siginfo;
 	int ret;
 
@@ -1408,24 +1361,6 @@ int compat_ptrace_request(struct task_struct *child, compat_long_t request,
 			&siginfo, (struct compat_siginfo __user *) datap);
 		if (!ret)
 			ret = ptrace_setsiginfo(child, &siginfo);
-		break;
-	case PTRACE_GETSIGMASK:
-		if (addr != sizeof(compat_sigset_t))
-			return -EINVAL;
-
-		ret = put_compat_sigset((compat_sigset_t __user *) datap,
-				&child->blocked, sizeof(compat_sigset_t));
-		break;
-	case PTRACE_SETSIGMASK:
-		if (addr != sizeof(compat_sigset_t))
-			return -EINVAL;
-
-		ret = get_compat_sigset(&new_set,
-				(compat_sigset_t __user *) datap);
-		if (ret)
-			break;
-
-		ret = ptrace_setsigmask(child, &new_set);
 		break;
 #ifdef CONFIG_HAVE_ARCH_TRACEHOOK
 	case PTRACE_GETREGSET:

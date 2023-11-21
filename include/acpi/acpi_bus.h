@@ -11,7 +11,6 @@
 
 #include <linux/device.h>
 #include <linux/property.h>
-#include <linux/kabi.h>
 
 /* TBD: Make dynamic */
 #define ACPI_MAX_HANDLES	10
@@ -278,8 +277,6 @@ struct acpi_device_power {
 	int state;		/* Current state */
 	struct acpi_device_power_flags flags;
 	struct acpi_device_power_state states[ACPI_D_STATE_COUNT];	/* Power states (D0-D3Cold) */
-
-	KABI_RESERVE(1)
 };
 
 /* Performance Management */
@@ -494,8 +491,6 @@ void acpi_bus_detach_private_data(acpi_handle);
 extern int acpi_notifier_call_chain(struct acpi_device *, u32, u32);
 extern int register_acpi_notifier(struct notifier_block *);
 extern int unregister_acpi_notifier(struct notifier_block *);
-int acpi_dev_for_each_child(struct acpi_device *adev,
-			    int (*fn)(struct acpi_device *, void *), void *data);
 
 /*
  * External Functions
@@ -610,10 +605,9 @@ int acpi_enable_wakeup_device_power(struct acpi_device *dev, int state);
 int acpi_disable_wakeup_device_power(struct acpi_device *dev);
 
 #ifdef CONFIG_X86
-bool acpi_device_override_status(struct acpi_device *adev, unsigned long long *status);
+bool acpi_device_always_present(struct acpi_device *adev);
 #else
-static inline bool acpi_device_override_status(struct acpi_device *adev,
-					       unsigned long long *status)
+static inline bool acpi_device_always_present(struct acpi_device *adev)
 {
 	return false;
 }

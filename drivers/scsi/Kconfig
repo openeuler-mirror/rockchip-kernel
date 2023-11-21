@@ -442,6 +442,17 @@ config SCSI_MVUMI
 	  To compile this driver as a module, choose M here: the
 	  module will be called mvumi.
 
+config SCSI_DPT_I2O
+	tristate "Adaptec I2O RAID support "
+	depends on SCSI && PCI && VIRT_TO_BUS
+	help
+	  This driver supports all of Adaptec's I2O based RAID controllers as 
+	  well as the DPT SmartRaid V cards.  This is an Adaptec maintained
+	  driver by Deanna Bonds.  See <file:Documentation/scsi/dpti.rst>.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called dpt_i2o.
+
 config SCSI_ADVANSYS
 	tristate "AdvanSys SCSI support"
 	depends on SCSI
@@ -470,7 +481,6 @@ config SCSI_ARCMSR
 
 source "drivers/scsi/esas2r/Kconfig"
 source "drivers/scsi/megaraid/Kconfig.megaraid"
-source "drivers/scsi/sssraid/Kconfig"
 source "drivers/scsi/mpt3sas/Kconfig"
 source "drivers/scsi/smartpqi/Kconfig"
 source "drivers/scsi/ufs/Kconfig"
@@ -1140,7 +1150,6 @@ source "drivers/scsi/qla2xxx/Kconfig"
 source "drivers/scsi/qla4xxx/Kconfig"
 source "drivers/scsi/qedi/Kconfig"
 source "drivers/scsi/qedf/Kconfig"
-source "drivers/scsi/huawei/Kconfig"
 
 config SCSI_LPFC
 	tristate "Emulex LightPulse Fibre Channel Support"

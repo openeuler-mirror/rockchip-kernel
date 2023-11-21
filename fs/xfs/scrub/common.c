@@ -74,16 +74,14 @@ __xchk_process_error(
 		return true;
 	case -EDEADLOCK:
 		/* Used to restart an op with deadlock avoidance. */
-		trace_xchk_deadlock_retry(
-				sc->ip ? sc->ip : XFS_I(file_inode(sc->file)),
-				sc->sm, *error);
+		trace_xchk_deadlock_retry(sc->ip, sc->sm, *error);
 		break;
 	case -EFSBADCRC:
 	case -EFSCORRUPTED:
 		/* Note the badness but don't abort. */
 		sc->sm->sm_flags |= errflag;
 		*error = 0;
-		fallthrough;
+		/* fall through */
 	default:
 		trace_xchk_op_error(sc, agno, bno, *error,
 				ret_ip);
@@ -136,7 +134,7 @@ __xchk_fblock_process_error(
 		/* Note the badness but don't abort. */
 		sc->sm->sm_flags |= errflag;
 		*error = 0;
-		fallthrough;
+		/* fall through */
 	default:
 		trace_xchk_file_op_error(sc, whichfork, offset, *error,
 				ret_ip);
@@ -491,7 +489,7 @@ xchk_ag_btcur_init(
 	}
 
 	/* Set up a finobt cursor for cross-referencing. */
-	if (sa->agi_bp && xfs_has_finobt(mp) &&
+	if (sa->agi_bp && xfs_sb_version_hasfinobt(&mp->m_sb) &&
 	    xchk_ag_btree_healthy_enough(sc, sa->pag, XFS_BTNUM_FINO)) {
 		sa->fino_cur = xfs_inobt_init_cursor(mp, sc->tp, sa->agi_bp,
 				agno, XFS_BTNUM_FINO);
@@ -500,7 +498,7 @@ xchk_ag_btcur_init(
 	}
 
 	/* Set up a rmapbt cursor for cross-referencing. */
-	if (sa->agf_bp && xfs_has_rmapbt(mp) &&
+	if (sa->agf_bp && xfs_sb_version_hasrmapbt(&mp->m_sb) &&
 	    xchk_ag_btree_healthy_enough(sc, sa->pag, XFS_BTNUM_RMAP)) {
 		sa->rmap_cur = xfs_rmapbt_init_cursor(mp, sc->tp, sa->agf_bp,
 				agno);
@@ -509,7 +507,7 @@ xchk_ag_btcur_init(
 	}
 
 	/* Set up a refcountbt cursor for cross-referencing. */
-	if (sa->agf_bp && xfs_has_reflink(mp) &&
+	if (sa->agf_bp && xfs_sb_version_hasreflink(&mp->m_sb) &&
 	    xchk_ag_btree_healthy_enough(sc, sa->pag, XFS_BTNUM_REFC)) {
 		sa->refc_cur = xfs_refcountbt_init_cursor(mp, sc->tp,
 				sa->agf_bp, agno);
@@ -715,7 +713,7 @@ xchk_get_inode(
 		if (error)
 			return -ENOENT;
 		error = -EFSCORRUPTED;
-		fallthrough;
+		/* fall through */
 	default:
 		trace_xchk_op_error(sc,
 				XFS_INO_TO_AGNO(mp, sc->sm->sm_ino),
@@ -863,7 +861,7 @@ xchk_metadata_inode_forks(
 		return error;
 
 	/* Look for incorrect shared blocks. */
-	if (xfs_has_reflink(sc->mp)) {
+	if (xfs_sb_version_hasreflink(&sc->mp->m_sb)) {
 		error = xfs_reflink_inode_has_shared_extents(sc->tp, sc->ip,
 				&shared);
 		if (!xchk_fblock_process_error(sc, XFS_DATA_FORK, 0,
@@ -904,8 +902,7 @@ xchk_stop_reaping(
 	struct xfs_scrub	*sc)
 {
 	sc->flags |= XCHK_REAPING_DISABLED;
-	xfs_blockgc_stop(sc->mp);
-	xfs_inodegc_stop(sc->mp);
+	xfs_stop_block_reaping(sc->mp);
 }
 
 /* Restart background reaping of resources. */
@@ -913,13 +910,6 @@ void
 xchk_start_reaping(
 	struct xfs_scrub	*sc)
 {
-	/*
-	 * Readonly filesystems do not perform inactivation or speculative
-	 * preallocation, so there's no need to restart the workers.
-	 */
-	if (!xfs_is_readonly(sc->mp)) {
-		xfs_inodegc_start(sc->mp);
-		xfs_blockgc_start(sc->mp);
-	}
+	xfs_start_block_reaping(sc->mp);
 	sc->flags &= ~XCHK_REAPING_DISABLED;
 }

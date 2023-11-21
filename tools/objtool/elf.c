@@ -43,24 +43,75 @@ static void elf_hash_init(struct hlist_head *table)
 #define elf_hash_for_each_possible(name, obj, member, key)			\
 	hlist_for_each_entry(obj, &name[hash_min(key, elf_hash_bits())], member)
 
-static bool symbol_to_offset(struct rb_node *a, const struct rb_node *b)
+static void rb_add(struct rb_root *tree, struct rb_node *node,
+		   int (*cmp)(struct rb_node *, const struct rb_node *))
+{
+	struct rb_node **link = &tree->rb_node;
+	struct rb_node *parent = NULL;
+
+	while (*link) {
+		parent = *link;
+		if (cmp(node, parent) < 0)
+			link = &parent->rb_left;
+		else
+			link = &parent->rb_right;
+	}
+
+	rb_link_node(node, parent, link);
+	rb_insert_color(node, tree);
+}
+
+static struct rb_node *rb_find_first(const struct rb_root *tree, const void *key,
+			       int (*cmp)(const void *key, const struct rb_node *))
+{
+	struct rb_node *node = tree->rb_node;
+	struct rb_node *match = NULL;
+
+	while (node) {
+		int c = cmp(key, node);
+		if (c <= 0) {
+			if (!c)
+				match = node;
+			node = node->rb_left;
+		} else if (c > 0) {
+			node = node->rb_right;
+		}
+	}
+
+	return match;
+}
+
+static struct rb_node *rb_next_match(struct rb_node *node, const void *key,
+				    int (*cmp)(const void *key, const struct rb_node *))
+{
+	node = rb_next(node);
+	if (node && cmp(key, node))
+		node = NULL;
+	return node;
+}
+
+#define rb_for_each(tree, node, key, cmp) \
+	for ((node) = rb_find_first((tree), (key), (cmp)); \
+	     (node); (node) = rb_next_match((node), (key), (cmp)))
+
+static int symbol_to_offset(struct rb_node *a, const struct rb_node *b)
 {
 	struct symbol *sa = rb_entry(a, struct symbol, node);
 	struct symbol *sb = rb_entry(b, struct symbol, node);
 
 	if (sa->offset < sb->offset)
-		return true;
+		return -1;
 	if (sa->offset > sb->offset)
-		return false;
+		return 1;
 
 	if (sa->len < sb->len)
-		return true;
+		return -1;
 	if (sa->len > sb->len)
-		return false;
+		return 1;
 
 	sa->alias = sb;
 
-	return false;
+	return 0;
 }
 
 static int symbol_by_offset(const void *key, const struct rb_node *node)
@@ -114,7 +165,7 @@ struct symbol *find_symbol_by_offset(struct section *sec, unsigned long offset)
 {
 	struct rb_node *node;
 
-	rb_for_each(node, &offset, &sec->symbol_tree, symbol_by_offset) {
+	rb_for_each(&sec->symbol_tree, node, &offset, symbol_by_offset) {
 		struct symbol *s = rb_entry(node, struct symbol, node);
 
 		if (s->offset == offset && s->type != STT_SECTION)
@@ -128,7 +179,7 @@ struct symbol *find_func_by_offset(struct section *sec, unsigned long offset)
 {
 	struct rb_node *node;
 
-	rb_for_each(node, &offset, &sec->symbol_tree, symbol_by_offset) {
+	rb_for_each(&sec->symbol_tree, node, &offset, symbol_by_offset) {
 		struct symbol *s = rb_entry(node, struct symbol, node);
 
 		if (s->offset == offset && s->type == STT_FUNC)
@@ -142,7 +193,7 @@ struct symbol *find_symbol_containing(const struct section *sec, unsigned long o
 {
 	struct rb_node *node;
 
-	rb_for_each(node, &offset, &sec->symbol_tree, symbol_by_offset) {
+	rb_for_each(&sec->symbol_tree, node, &offset, symbol_by_offset) {
 		struct symbol *s = rb_entry(node, struct symbol, node);
 
 		if (s->type != STT_SECTION)
@@ -156,7 +207,7 @@ struct symbol *find_func_containing(struct section *sec, unsigned long offset)
 {
 	struct rb_node *node;
 
-	rb_for_each(node, &offset, &sec->symbol_tree, symbol_by_offset) {
+	rb_for_each(&sec->symbol_tree, node, &offset, symbol_by_offset) {
 		struct symbol *s = rb_entry(node, struct symbol, node);
 
 		if (s->type == STT_FUNC)
@@ -295,15 +346,13 @@ static void elf_add_symbol(struct elf *elf, struct symbol *sym)
 	struct list_head *entry;
 	struct rb_node *pnode;
 
-	sym->alias = sym;
-
 	sym->type = GELF_ST_TYPE(sym->sym.st_info);
 	sym->bind = GELF_ST_BIND(sym->sym.st_info);
 
 	sym->offset = sym->sym.st_value;
 	sym->len = sym->sym.st_size;
 
-	rb_add(&sym->node, &sym->sec->symbol_tree, symbol_to_offset);
+	rb_add(&sym->sec->symbol_tree, &sym->node, symbol_to_offset);
 	pnode = rb_prev(&sym->node);
 	if (pnode)
 		entry = &rb_entry(pnode, struct symbol, node)->list;
@@ -325,8 +374,6 @@ static int read_symbols(struct elf *elf)
 {
 	struct section *symtab, *symtab_shndx, *sec;
 	struct symbol *sym, *pfunc;
-	struct list_head *entry;
-	struct rb_node *pnode;
 	int symbols_nr, i;
 	char *coldstr;
 	Elf_Data *shndx_data = NULL;
@@ -371,9 +418,6 @@ static int read_symbols(struct elf *elf)
 			goto err;
 		}
 
-		sym->type = GELF_ST_TYPE(sym->sym.st_info);
-		sym->bind = GELF_ST_BIND(sym->sym.st_info);
-
 		if ((sym->sym.st_shndx > SHN_UNDEF &&
 		     sym->sym.st_shndx < SHN_LORESERVE) ||
 		    (shndx_data && sym->sym.st_shndx == SHN_XINDEX)) {
@@ -386,32 +430,14 @@ static int read_symbols(struct elf *elf)
 				     sym->name);
 				goto err;
 			}
-			if (sym->type == STT_SECTION) {
+			if (GELF_ST_TYPE(sym->sym.st_info) == STT_SECTION) {
 				sym->name = sym->sec->name;
 				sym->sec->sym = sym;
 			}
 		} else
 			sym->sec = find_section_by_index(elf, 0);
 
-		sym->offset = sym->sym.st_value;
-		sym->len = sym->sym.st_size;
-
-		rb_add(&sym->node, &sym->sec->symbol_tree, symbol_to_offset);
-		pnode = rb_prev(&sym->node);
-		if (pnode)
-			entry = &rb_entry(pnode, struct symbol, node)->list;
-		else
-			entry = &sym->sec->symbol_list;
-		list_add(&sym->list, entry);
-		elf_hash_add(elf->symbol_hash, &sym->hash, sym->idx);
-		elf_hash_add(elf->symbol_name_hash, &sym->name_hash, str_hash(sym->name));
-
-		/*
-		 * Don't store empty STT_NOTYPE symbols in the rbtree.  They
-		 * can exist within a function, confusing the sorting.
-		 */
-		if (!sym->len)
-			rb_erase(&sym->node, &sym->sec->symbol_tree);
+		elf_add_symbol(elf, sym);
 	}
 
 	if (stats)
@@ -483,7 +509,7 @@ static struct section *elf_create_reloc_section(struct elf *elf,
 						int reltype);
 
 int elf_add_reloc(struct elf *elf, struct section *sec, unsigned long offset,
-		  unsigned int type, struct symbol *sym, s64 addend)
+		  unsigned int type, struct symbol *sym, int addend)
 {
 	struct reloc *reloc;
 
@@ -511,244 +537,37 @@ int elf_add_reloc(struct elf *elf, struct section *sec, unsigned long offset,
 	return 0;
 }
 
-/*
- * Ensure that any reloc section containing references to @sym is marked
- * changed such that it will get re-generated in elf_rebuild_reloc_sections()
- * with the new symbol index.
- */
-static void elf_dirty_reloc_sym(struct elf *elf, struct symbol *sym)
-{
-	struct section *sec;
-
-	list_for_each_entry(sec, &elf->sections, list) {
-		struct reloc *reloc;
-
-		if (sec->changed)
-			continue;
-
-		list_for_each_entry(reloc, &sec->reloc_list, list) {
-			if (reloc->sym == sym) {
-				sec->changed = true;
-				break;
-			}
-		}
-	}
-}
-
-/*
- * The libelf API is terrible; gelf_update_sym*() takes a data block relative
- * index value, *NOT* the symbol index. As such, iterate the data blocks and
- * adjust index until it fits.
- *
- * If no data block is found, allow adding a new data block provided the index
- * is only one past the end.
- */
-static int elf_update_symbol(struct elf *elf, struct section *symtab,
-			     struct section *symtab_shndx, struct symbol *sym)
-{
-	Elf32_Word shndx = sym->sec ? sym->sec->idx : SHN_UNDEF;
-	Elf_Data *symtab_data = NULL, *shndx_data = NULL;
-	Elf64_Xword entsize = symtab->sh.sh_entsize;
-	int max_idx, idx = sym->idx;
-	Elf_Scn *s, *t = NULL;
-	bool is_special_shndx = sym->sym.st_shndx >= SHN_LORESERVE &&
-				sym->sym.st_shndx != SHN_XINDEX;
-
-	if (is_special_shndx)
-		shndx = sym->sym.st_shndx;
-
-	s = elf_getscn(elf->elf, symtab->idx);
-	if (!s) {
-		WARN_ELF("elf_getscn");
-		return -1;
-	}
-
-	if (symtab_shndx) {
-		t = elf_getscn(elf->elf, symtab_shndx->idx);
-		if (!t) {
-			WARN_ELF("elf_getscn");
-			return -1;
-		}
-	}
-
-	for (;;) {
-		/* get next data descriptor for the relevant sections */
-		symtab_data = elf_getdata(s, symtab_data);
-		if (t)
-			shndx_data = elf_getdata(t, shndx_data);
-
-		/* end-of-list */
-		if (!symtab_data) {
-			void *buf;
-
-			if (idx) {
-				/* we don't do holes in symbol tables */
-				WARN("index out of range");
-				return -1;
-			}
-
-			/* if @idx == 0, it's the next contiguous entry, create it */
-			symtab_data = elf_newdata(s);
-			if (t)
-				shndx_data = elf_newdata(t);
-
-			buf = calloc(1, entsize);
-			if (!buf) {
-				WARN("malloc");
-				return -1;
-			}
-
-			symtab_data->d_buf = buf;
-			symtab_data->d_size = entsize;
-			symtab_data->d_align = 1;
-			symtab_data->d_type = ELF_T_SYM;
-
-			symtab->sh.sh_size += entsize;
-			symtab->changed = true;
-
-			if (t) {
-				shndx_data->d_buf = &sym->sec->idx;
-				shndx_data->d_size = sizeof(Elf32_Word);
-				shndx_data->d_align = sizeof(Elf32_Word);
-				shndx_data->d_type = ELF_T_WORD;
-
-				symtab_shndx->sh.sh_size += sizeof(Elf32_Word);
-				symtab_shndx->changed = true;
-			}
-
-			break;
-		}
-
-		/* empty blocks should not happen */
-		if (!symtab_data->d_size) {
-			WARN("zero size data");
-			return -1;
-		}
-
-		/* is this the right block? */
-		max_idx = symtab_data->d_size / entsize;
-		if (idx < max_idx)
-			break;
-
-		/* adjust index and try again */
-		idx -= max_idx;
-	}
-
-	/* something went side-ways */
-	if (idx < 0) {
-		WARN("negative index");
-		return -1;
-	}
-
-	/* setup extended section index magic and write the symbol */
-	if ((shndx >= SHN_UNDEF && shndx < SHN_LORESERVE) || is_special_shndx) {
-		sym->sym.st_shndx = shndx;
-		if (!shndx_data)
-			shndx = 0;
-	} else {
-		sym->sym.st_shndx = SHN_XINDEX;
-		if (!shndx_data) {
-			WARN("no .symtab_shndx");
-			return -1;
-		}
-	}
-
-	if (!gelf_update_symshndx(symtab_data, shndx_data, idx, &sym->sym, shndx)) {
-		WARN_ELF("gelf_update_symshndx");
-		return -1;
-	}
-
-	return 0;
-}
-
-static struct symbol *
-elf_create_section_symbol(struct elf *elf, struct section *sec)
-{
-	struct section *symtab, *symtab_shndx;
-	Elf32_Word first_non_local, new_idx;
-	struct symbol *sym, *old;
-
-	symtab = find_section_by_name(elf, ".symtab");
-	if (symtab) {
-		symtab_shndx = find_section_by_name(elf, ".symtab_shndx");
-	} else {
-		WARN("no .symtab");
-		return NULL;
-	}
-
-	sym = calloc(1, sizeof(*sym));
-	if (!sym) {
-		perror("malloc");
-		return NULL;
-	}
-
-	sym->name = sec->name;
-	sym->sec = sec;
-
-	// st_name 0
-	sym->sym.st_info = GELF_ST_INFO(STB_LOCAL, STT_SECTION);
-	// st_other 0
-	// st_value 0
-	// st_size 0
-
-	/*
-	 * Move the first global symbol, as per sh_info, into a new, higher
-	 * symbol index. This fees up a spot for a new local symbol.
-	 */
-	first_non_local = symtab->sh.sh_info;
-	new_idx = symtab->sh.sh_size / symtab->sh.sh_entsize;
-	old = find_symbol_by_index(elf, first_non_local);
-	if (old) {
-		old->idx = new_idx;
-
-		hlist_del(&old->hash);
-		elf_hash_add(elf->symbol_hash, &old->hash, old->idx);
-
-		elf_dirty_reloc_sym(elf, old);
-
-		if (elf_update_symbol(elf, symtab, symtab_shndx, old)) {
-			WARN("elf_update_symbol move");
-			return NULL;
-		}
-
-		new_idx = first_non_local;
-	}
-
-	sym->idx = new_idx;
-	if (elf_update_symbol(elf, symtab, symtab_shndx, sym)) {
-		WARN("elf_update_symbol");
-		return NULL;
-	}
-
-	/*
-	 * Either way, we added a LOCAL symbol.
-	 */
-	symtab->sh.sh_info += 1;
-
-	elf_add_symbol(elf, sym);
-
-	return sym;
-}
-
 int elf_add_reloc_to_insn(struct elf *elf, struct section *sec,
 			  unsigned long offset, unsigned int type,
 			  struct section *insn_sec, unsigned long insn_off)
 {
-	struct symbol *sym = insn_sec->sym;
-	int addend = insn_off;
+	struct symbol *sym;
+	int addend;
 
-	if (!sym) {
+	if (insn_sec->sym) {
+		sym = insn_sec->sym;
+		addend = insn_off;
+
+	} else {
 		/*
-		 * Due to how weak functions work, we must use section based
-		 * relocations. Symbol based relocations would result in the
-		 * weak and non-weak function annotations being overlaid on the
-		 * non-weak function after linking.
+		 * The Clang assembler strips section symbols, so we have to
+		 * reference the function symbol instead:
 		 */
-		sym = elf_create_section_symbol(elf, insn_sec);
-		if (!sym)
-			return -1;
+		sym = find_symbol_containing(insn_sec, insn_off);
+		if (!sym) {
+			/*
+			 * Hack alert.  This happens when we need to reference
+			 * the NOP pad insn immediately after the function.
+			 */
+			sym = find_symbol_containing(insn_sec, insn_off - 1);
+		}
 
-		insn_sec->sym = sym;
+		if (!sym) {
+			WARN("can't find symbol containing %s+0x%lx", insn_sec->name, insn_off);
+			return -1;
+		}
+
+		addend = insn_off - sym->offset;
 	}
 
 	return elf_add_reloc(elf, sec, offset, type, sym, addend);

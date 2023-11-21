@@ -112,7 +112,7 @@ static u64 cpuacct_cpuusage_read(struct cpuacct *ca, int cpu,
 	/*
 	 * Take rq->lock to make 64-bit read safe on 32-bit platforms.
 	 */
-	raw_spin_rq_lock_irq(cpu_rq(cpu));
+	raw_spin_lock_irq(&cpu_rq(cpu)->lock);
 #endif
 
 	if (index == CPUACCT_STAT_NSTATS) {
@@ -126,7 +126,7 @@ static u64 cpuacct_cpuusage_read(struct cpuacct *ca, int cpu,
 	}
 
 #ifndef CONFIG_64BIT
-	raw_spin_rq_unlock_irq(cpu_rq(cpu));
+	raw_spin_unlock_irq(&cpu_rq(cpu)->lock);
 #endif
 
 	return data;
@@ -141,14 +141,14 @@ static void cpuacct_cpuusage_write(struct cpuacct *ca, int cpu, u64 val)
 	/*
 	 * Take rq->lock to make 64-bit write safe on 32-bit platforms.
 	 */
-	raw_spin_rq_lock_irq(cpu_rq(cpu));
+	raw_spin_lock_irq(&cpu_rq(cpu)->lock);
 #endif
 
 	for (i = 0; i < CPUACCT_STAT_NSTATS; i++)
 		cpuusage->usages[i] = val;
 
 #ifndef CONFIG_64BIT
-	raw_spin_rq_unlock_irq(cpu_rq(cpu));
+	raw_spin_unlock_irq(&cpu_rq(cpu)->lock);
 #endif
 }
 
@@ -253,13 +253,13 @@ static int cpuacct_all_seq_show(struct seq_file *m, void *V)
 			 * Take rq->lock to make 64-bit read safe on 32-bit
 			 * platforms.
 			 */
-			raw_spin_rq_lock_irq(cpu_rq(cpu));
+			raw_spin_lock_irq(&cpu_rq(cpu)->lock);
 #endif
 
 			seq_printf(m, " %llu", cpuusage->usages[index]);
 
 #ifndef CONFIG_64BIT
-			raw_spin_rq_unlock_irq(cpu_rq(cpu));
+			raw_spin_unlock_irq(&cpu_rq(cpu)->lock);
 #endif
 		}
 		seq_puts(m, "\n");
@@ -374,31 +374,3 @@ struct cgroup_subsys cpuacct_cgrp_subsys = {
 	.legacy_cftypes	= files,
 	.early_init	= true,
 };
-
-#ifdef CONFIG_PSI
-
-static bool psi_v1_enable;
-static int __init setup_psi_v1(char *str)
-{
-	int ret;
-
-	ret = kstrtobool(str, &psi_v1_enable);
-	if (!psi_v1_enable)
-		static_branch_enable(&psi_v1_disabled);
-
-	return ret == 0;
-}
-__setup("psi_v1=", setup_psi_v1);
-
-extern struct cftype cgroup_v1_psi_files[];
-static int __init cgroup_v1_psi_init(void)
-{
-	if (!psi_v1_enable)
-		return 0;
-
-	cgroup_add_legacy_cftypes(&cpuacct_cgrp_subsys, cgroup_v1_psi_files);
-	return 0;
-}
-
-late_initcall_sync(cgroup_v1_psi_init);
-#endif

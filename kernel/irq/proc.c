@@ -144,7 +144,7 @@ static ssize_t write_irq_affinity(int type, struct file *file,
 	if (!irq_can_set_affinity_usr(irq) || no_irq_affinity)
 		return -EIO;
 
-	if (!zalloc_cpumask_var(&new_value, GFP_KERNEL))
+	if (!alloc_cpumask_var(&new_value, GFP_KERNEL))
 		return -ENOMEM;
 
 	if (type)
@@ -157,9 +157,9 @@ static ssize_t write_irq_affinity(int type, struct file *file,
 	/*
 	 * Do not allow disabling IRQs completely - it's a too easy
 	 * way to make the system unusable accidentally :-) At least
-	 * one online CPU still has to be targeted.
+	 * one active CPU still has to be targeted.
 	 */
-	if (!cpumask_intersects(new_value, cpu_online_mask)) {
+	if (!cpumask_intersects(new_value, cpu_active_mask)) {
 		/*
 		 * Special case for empty set - allow the architecture code
 		 * to set default SMP affinity.
@@ -238,7 +238,7 @@ static ssize_t default_affinity_write(struct file *file,
 	cpumask_var_t new_value;
 	int err;
 
-	if (!zalloc_cpumask_var(&new_value, GFP_KERNEL))
+	if (!alloc_cpumask_var(&new_value, GFP_KERNEL))
 		return -ENOMEM;
 
 	err = cpumask_parse_user(buffer, count, new_value);

@@ -173,7 +173,7 @@ static void wait_transaction_locked(journal_t *journal)
 	int need_to_start;
 	tid_t tid = journal->j_running_transaction->t_tid;
 
-	prepare_to_wait_exclusive(&journal->j_wait_transaction_locked, &wait,
+	prepare_to_wait(&journal->j_wait_transaction_locked, &wait,
 			TASK_UNINTERRUPTIBLE);
 	need_to_start = !tid_geq(journal->j_commit_request, tid);
 	read_unlock(&journal->j_state_lock);
@@ -199,7 +199,7 @@ static void wait_transaction_switching(journal_t *journal)
 		read_unlock(&journal->j_state_lock);
 		return;
 	}
-	prepare_to_wait_exclusive(&journal->j_wait_transaction_locked, &wait,
+	prepare_to_wait(&journal->j_wait_transaction_locked, &wait,
 			TASK_UNINTERRUPTIBLE);
 	read_unlock(&journal->j_state_lock);
 	/*
@@ -894,7 +894,7 @@ void jbd2_journal_unlock_updates (journal_t *journal)
 	write_lock(&journal->j_state_lock);
 	--journal->j_barrier_count;
 	write_unlock(&journal->j_state_lock);
-	wake_up_all(&journal->j_wait_transaction_locked);
+	wake_up(&journal->j_wait_transaction_locked);
 }
 
 static void warn_dirty_buffer(struct buffer_head *bh)
@@ -984,28 +984,36 @@ repeat:
 	 * ie. locked but not dirty) or tune2fs (which may actually have
 	 * the buffer dirtied, ugh.)  */
 
-	if (buffer_dirty(bh) && jh->b_transaction) {
-		warn_dirty_buffer(bh);
+	if (buffer_dirty(bh)) {
 		/*
-		 * We need to clean the dirty flag and we must do it under the
-		 * buffer lock to be sure we don't race with running write-out.
+		 * First question: is this buffer already part of the current
+		 * transaction or the existing committing transaction?
+		 */
+		if (jh->b_transaction) {
+			J_ASSERT_JH(jh,
+				jh->b_transaction == transaction ||
+				jh->b_transaction ==
+					journal->j_committing_transaction);
+			if (jh->b_next_transaction)
+				J_ASSERT_JH(jh, jh->b_next_transaction ==
+							transaction);
+			warn_dirty_buffer(bh);
+		}
+		/*
+		 * In any case we need to clean the dirty flag and we must
+		 * do it under the buffer lock to be sure we don't race
+		 * with running write-out.
 		 */
 		JBUFFER_TRACE(jh, "Journalling dirty buffer");
 		clear_buffer_dirty(bh);
-		/*
-		 * The buffer is going to be added to BJ_Reserved list now and
-		 * nothing guarantees jbd2_journal_dirty_metadata() will be
-		 * ever called for it. So we need to set jbddirty bit here to
-		 * make sure the buffer is dirtied and written out when the
-		 * journaling machinery is done with it.
-		 */
 		set_buffer_jbddirty(bh);
 	}
+
+	unlock_buffer(bh);
 
 	error = -EROFS;
 	if (is_handle_aborted(handle)) {
 		spin_unlock(&jh->b_state_lock);
-		unlock_buffer(bh);
 		goto out;
 	}
 	error = 0;
@@ -1015,10 +1023,8 @@ repeat:
 	 * b_next_transaction points to it
 	 */
 	if (jh->b_transaction == transaction ||
-	    jh->b_next_transaction == transaction) {
-		unlock_buffer(bh);
+	    jh->b_next_transaction == transaction)
 		goto done;
-	}
 
 	/*
 	 * this is the first time this transaction is touching this buffer,
@@ -1042,24 +1048,10 @@ repeat:
 		 */
 		smp_wmb();
 		spin_lock(&journal->j_list_lock);
-		if (test_clear_buffer_dirty(bh)) {
-			/*
-			 * Execute buffer dirty clearing and jh->b_transaction
-			 * assignment under journal->j_list_lock locked to
-			 * prevent bh being removed from checkpoint list if
-			 * the buffer is in an intermediate state (not dirty
-			 * and jh->b_transaction is NULL).
-			 */
-			JBUFFER_TRACE(jh, "Journalling dirty buffer");
-			set_buffer_jbddirty(bh);
-		}
 		__jbd2_journal_file_buffer(jh, transaction, BJ_Reserved);
 		spin_unlock(&journal->j_list_lock);
-		unlock_buffer(bh);
 		goto done;
 	}
-	unlock_buffer(bh);
-
 	/*
 	 * If there is already a copy-out version of this buffer, then we don't
 	 * need to make another one
@@ -1468,6 +1460,8 @@ int jbd2_journal_dirty_metadata(handle_t *handle, struct buffer_head *bh)
 	struct journal_head *jh;
 	int ret = 0;
 
+	if (is_handle_aborted(handle))
+		return -EROFS;
 	if (!buffer_jbd(bh))
 		return -EUCLEAN;
 
@@ -1513,18 +1507,6 @@ int jbd2_journal_dirty_metadata(handle_t *handle, struct buffer_head *bh)
 
 	journal = transaction->t_journal;
 	spin_lock(&jh->b_state_lock);
-
-	if (is_handle_aborted(handle)) {
-		/*
-		 * Check journal aborting with @jh->b_state_lock locked,
-		 * since 'jh->b_transaction' could be replaced with
-		 * 'jh->b_next_transaction' during old transaction
-		 * committing if journal aborted, which may fail
-		 * assertion on 'jh->b_frozen_data == NULL'.
-		 */
-		ret = -EROFS;
-		goto out_unlock_bh;
-	}
 
 	if (jh->b_modified == 0) {
 		/*
@@ -1758,7 +1740,8 @@ int jbd2_journal_forget(handle_t *handle, struct buffer_head *bh)
 		 * Otherwise, if the buffer has been written to disk,
 		 * it is safe to remove the checkpoint and drop it.
 		 */
-		if (jbd2_journal_try_remove_checkpoint(jh) >= 0) {
+		if (!buffer_dirty(bh)) {
+			__jbd2_journal_remove_checkpoint(jh);
 			spin_unlock(&journal->j_list_lock);
 			goto drop;
 		}
@@ -2073,6 +2056,35 @@ void jbd2_journal_unfile_buffer(journal_t *journal, struct journal_head *jh)
 	__brelse(bh);
 }
 
+/*
+ * Called from jbd2_journal_try_to_free_buffers().
+ *
+ * Called under jh->b_state_lock
+ */
+static void
+__journal_try_to_free_buffer(journal_t *journal, struct buffer_head *bh)
+{
+	struct journal_head *jh;
+
+	jh = bh2jh(bh);
+
+	if (buffer_locked(bh) || buffer_dirty(bh))
+		goto out;
+
+	if (jh->b_next_transaction != NULL || jh->b_transaction != NULL)
+		goto out;
+
+	spin_lock(&journal->j_list_lock);
+	if (jh->b_cp_transaction != NULL) {
+		/* written-back checkpointed metadata buffer */
+		JBUFFER_TRACE(jh, "remove from checkpoint list");
+		__jbd2_journal_remove_checkpoint(jh);
+	}
+	spin_unlock(&journal->j_list_lock);
+out:
+	return;
+}
+
 /**
  * jbd2_journal_try_to_free_buffers() - try to free page buffers.
  * @journal: journal for operation
@@ -2111,6 +2123,7 @@ int jbd2_journal_try_to_free_buffers(journal_t *journal, struct page *page)
 {
 	struct buffer_head *head;
 	struct buffer_head *bh;
+	bool has_write_io_error = false;
 	int ret = 0;
 
 	J_ASSERT(PageLocked(page));
@@ -2130,21 +2143,31 @@ int jbd2_journal_try_to_free_buffers(journal_t *journal, struct page *page)
 			continue;
 
 		spin_lock(&jh->b_state_lock);
-		if (!jh->b_transaction && !jh->b_next_transaction) {
-			spin_lock(&journal->j_list_lock);
-			/* Remove written-back checkpointed metadata buffer */
-			if (jh->b_cp_transaction != NULL)
-				jbd2_journal_try_remove_checkpoint(jh);
-			spin_unlock(&journal->j_list_lock);
-		}
+		__journal_try_to_free_buffer(journal, bh);
 		spin_unlock(&jh->b_state_lock);
 		jbd2_journal_put_journal_head(jh);
 		if (buffer_jbd(bh))
 			goto busy;
+
+		/*
+		 * If we free a metadata buffer which has been failed to
+		 * write out, the jbd2 checkpoint procedure will not detect
+		 * this failure and may lead to filesystem inconsistency
+		 * after cleanup journal tail.
+		 */
+		if (buffer_write_io_error(bh)) {
+			pr_err("JBD2: Error while async write back metadata bh %llu.",
+			       (unsigned long long)bh->b_blocknr);
+			has_write_io_error = true;
+		}
 	} while ((bh = bh->b_this_page) != head);
 
 	ret = try_to_free_buffers(page);
+
 busy:
+	if (has_write_io_error)
+		jbd2_journal_abort(journal, -EIO);
+
 	return ret;
 }
 

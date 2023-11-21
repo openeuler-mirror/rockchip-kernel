@@ -47,7 +47,7 @@ static struct hdac_ext_stream *cl_stream_prepare(struct snd_sof_dev *sdev, unsig
 	ret = snd_dma_alloc_pages(SNDRV_DMA_TYPE_DEV_SG, &pci->dev, size, dmab);
 	if (ret < 0) {
 		dev_err(sdev->dev, "error: memory alloc failed: %x\n", ret);
-		goto out_put;
+		goto error;
 	}
 
 	hstream->period_bytes = 0;/* initialize period_bytes */
@@ -58,30 +58,29 @@ static struct hdac_ext_stream *cl_stream_prepare(struct snd_sof_dev *sdev, unsig
 		ret = hda_dsp_iccmax_stream_hw_params(sdev, dsp_stream, dmab, NULL);
 		if (ret < 0) {
 			dev_err(sdev->dev, "error: iccmax stream prepare failed: %x\n", ret);
-			goto out_free;
+			goto error;
 		}
 	} else {
 		ret = hda_dsp_stream_hw_params(sdev, dsp_stream, dmab, NULL);
 		if (ret < 0) {
 			dev_err(sdev->dev, "error: hdac prepare failed: %x\n", ret);
-			goto out_free;
+			goto error;
 		}
 		hda_dsp_stream_spib_config(sdev, dsp_stream, HDA_DSP_SPIB_ENABLE, size);
 	}
 
 	return dsp_stream;
 
-out_free:
-	snd_dma_free_pages(dmab);
-out_put:
+error:
 	hda_dsp_stream_put(sdev, direction, hstream->stream_tag);
+	snd_dma_free_pages(dmab);
 	return ERR_PTR(ret);
 }
 
 /*
- * first boot sequence has some extra steps.
- * power on all host managed cores and only unstall/run the boot core to boot the
- * DSP then turn off all non boot cores (if any) is powered on.
+ * first boot sequence has some extra steps. core 0 waits for power
+ * status on core 1, so power up core 1 also momentarily, keep it in
+ * reset/stall and then turn it off
  */
 static int cl_dsp_init(struct snd_sof_dev *sdev, int stream_tag)
 {
@@ -115,7 +114,7 @@ static int cl_dsp_init(struct snd_sof_dev *sdev, int stream_tag)
 			  ((stream_tag - 1) << 9)));
 
 	/* step 3: unset core 0 reset state & unstall/run core 0 */
-	ret = hda_dsp_core_run(sdev, chip->init_core_mask);
+	ret = hda_dsp_core_run(sdev, BIT(0));
 	if (ret < 0) {
 		if (hda->boot_iteration == HDA_FW_BOOT_ATTEMPTS)
 			dev_err(sdev->dev,

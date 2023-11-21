@@ -2504,8 +2504,7 @@ static int bpf_object__finalize_btf(struct bpf_object *obj)
 static inline bool libbpf_prog_needs_vmlinux_btf(struct bpf_program *prog)
 {
 	if (prog->type == BPF_PROG_TYPE_STRUCT_OPS ||
-	    prog->type == BPF_PROG_TYPE_LSM ||
-	    prog->type == BPF_PROG_TYPE_SCHED)
+	    prog->type == BPF_PROG_TYPE_LSM)
 		return true;
 
 	/* BPF_PROG_TYPE_TRACING programs which do not attach to other programs
@@ -3480,9 +3479,6 @@ static struct bpf_program *find_prog_by_sec_insn(const struct bpf_object *obj,
 	int l = 0, r = obj->nr_programs - 1, m;
 	struct bpf_program *prog;
 
-	if (!obj->nr_programs)
-		return NULL;
-
 	while (l < r) {
 		m = l + (r - l + 1) / 2;
 		prog = &obj->programs[m];
@@ -3656,7 +3652,7 @@ static int bpf_get_map_info_from_fdinfo(int fd, struct bpf_map_info *info)
 int bpf_map__reuse_fd(struct bpf_map *map, int fd)
 {
 	struct bpf_map_info info = {};
-	__u32 len = sizeof(info), name_len;
+	__u32 len = sizeof(info);
 	int new_fd, err;
 	char *new_name;
 
@@ -3666,12 +3662,7 @@ int bpf_map__reuse_fd(struct bpf_map *map, int fd)
 	if (err)
 		return err;
 
-	name_len = strlen(info.name);
-	if (name_len == BPF_OBJ_NAME_LEN - 1 && strncmp(map->name, info.name, name_len) == 0)
-		new_name = strdup(map->name);
-	else
-		new_name = strdup(info.name);
-
+	new_name = strdup(info.name);
 	if (!new_name)
 		return -errno;
 
@@ -4227,30 +4218,6 @@ static int bpf_object__create_map(struct bpf_object *obj, struct bpf_map *map)
 		}
 		if (map->inner_map_fd >= 0)
 			create_attr.inner_map_fd = map->inner_map_fd;
-	}
-
-	switch (def->type) {
-	case BPF_MAP_TYPE_PERF_EVENT_ARRAY:
-	case BPF_MAP_TYPE_CGROUP_ARRAY:
-	case BPF_MAP_TYPE_STACK_TRACE:
-	case BPF_MAP_TYPE_ARRAY_OF_MAPS:
-	case BPF_MAP_TYPE_HASH_OF_MAPS:
-	case BPF_MAP_TYPE_DEVMAP:
-	case BPF_MAP_TYPE_DEVMAP_HASH:
-	case BPF_MAP_TYPE_CPUMAP:
-	case BPF_MAP_TYPE_XSKMAP:
-	case BPF_MAP_TYPE_SOCKMAP:
-	case BPF_MAP_TYPE_SOCKHASH:
-	case BPF_MAP_TYPE_QUEUE:
-	case BPF_MAP_TYPE_STACK:
-	case BPF_MAP_TYPE_RINGBUF:
-		create_attr.btf_fd = 0;
-		create_attr.btf_key_type_id = 0;
-		create_attr.btf_value_type_id = 0;
-		map->btf_key_type_id = 0;
-		map->btf_value_type_id = 0;
-	default:
-		break;
 	}
 
 	map->fd = bpf_create_map_xattr(&create_attr);
@@ -6747,8 +6714,7 @@ load_program(struct bpf_program *prog, struct bpf_insn *insns, int insns_cnt,
 	    prog->type == BPF_PROG_TYPE_LSM) {
 		load_attr.attach_btf_id = prog->attach_btf_id;
 	} else if (prog->type == BPF_PROG_TYPE_TRACING ||
-		   prog->type == BPF_PROG_TYPE_EXT ||
-		   prog->type == BPF_PROG_TYPE_SCHED) {
+		   prog->type == BPF_PROG_TYPE_EXT) {
 		load_attr.attach_prog_fd = prog->attach_prog_fd;
 		load_attr.attach_btf_id = prog->attach_btf_id;
 	} else {
@@ -6855,8 +6821,7 @@ int bpf_program__load(struct bpf_program *prog, char *license, __u32 kern_ver)
 
 	if ((prog->type == BPF_PROG_TYPE_TRACING ||
 	     prog->type == BPF_PROG_TYPE_LSM ||
-	     prog->type == BPF_PROG_TYPE_EXT ||
-	     prog->type == BPF_PROG_TYPE_SCHED) && !prog->attach_btf_id) {
+	     prog->type == BPF_PROG_TYPE_EXT) && !prog->attach_btf_id) {
 		btf_id = libbpf_find_attach_btf_id(prog);
 		if (btf_id <= 0)
 			return btf_id;
@@ -8281,7 +8246,6 @@ BPF_PROG_TYPE_FNS(tracing, BPF_PROG_TYPE_TRACING);
 BPF_PROG_TYPE_FNS(struct_ops, BPF_PROG_TYPE_STRUCT_OPS);
 BPF_PROG_TYPE_FNS(extension, BPF_PROG_TYPE_EXT);
 BPF_PROG_TYPE_FNS(sk_lookup, BPF_PROG_TYPE_SK_LOOKUP);
-BPF_PROG_TYPE_FNS(sched, BPF_PROG_TYPE_SCHED);
 
 enum bpf_attach_type
 bpf_program__get_expected_attach_type(struct bpf_program *prog)
@@ -8345,8 +8309,6 @@ static struct bpf_link *attach_trace(const struct bpf_sec_def *sec,
 static struct bpf_link *attach_lsm(const struct bpf_sec_def *sec,
 				   struct bpf_program *prog);
 static struct bpf_link *attach_iter(const struct bpf_sec_def *sec,
-				    struct bpf_program *prog);
-static struct bpf_link *attach_sched(const struct bpf_sec_def *sec,
 				    struct bpf_program *prog);
 
 static const struct bpf_sec_def section_defs[] = {
@@ -8416,10 +8378,6 @@ static const struct bpf_sec_def section_defs[] = {
 		.expected_attach_type = BPF_TRACE_ITER,
 		.is_attach_btf = true,
 		.attach_fn = attach_iter),
-	SEC_DEF("sched/", SCHED,
-		.is_attach_btf = true,
-		.expected_attach_type = BPF_SCHED,
-		.attach_fn = attach_sched),
 	BPF_EAPROG_SEC("xdp_devmap/",		BPF_PROG_TYPE_XDP,
 						BPF_XDP_DEVMAP),
 	BPF_EAPROG_SEC("xdp_cpumap/",		BPF_PROG_TYPE_XDP,
@@ -8503,7 +8461,7 @@ static const struct bpf_sec_def section_defs[] = {
 #undef BPF_APROG_COMPAT
 #undef SEC_DEF
 
-#define MAX_TYPE_NAME_SIZE 31
+#define MAX_TYPE_NAME_SIZE 32
 
 static const struct bpf_sec_def *find_sec_def(const char *sec_name)
 {
@@ -8707,7 +8665,6 @@ invalid_prog:
 #define BTF_TRACE_PREFIX "btf_trace_"
 #define BTF_LSM_PREFIX "bpf_lsm_"
 #define BTF_ITER_PREFIX "bpf_iter_"
-#define BTF_SCHED_PREFIX "bpf_sched_"
 #define BTF_MAX_NAME_SIZE 128
 
 static int find_btf_by_prefix_kind(const struct btf *btf, const char *prefix,
@@ -8740,9 +8697,6 @@ static inline int __find_vmlinux_btf_id(struct btf *btf, const char *name,
 					      BTF_KIND_FUNC);
 	else if (attach_type == BPF_TRACE_ITER)
 		err = find_btf_by_prefix_kind(btf, BTF_ITER_PREFIX, name,
-					      BTF_KIND_FUNC);
-	else if (attach_type == BPF_SCHED)
-		err = find_btf_by_prefix_kind(btf, BTF_SCHED_PREFIX, name,
 					      BTF_KIND_FUNC);
 	else
 		err = btf__find_by_name_kind(btf, name, BTF_KIND_FUNC);
@@ -9723,11 +9677,6 @@ struct bpf_link *bpf_program__attach_trace(struct bpf_program *prog)
 	return bpf_program__attach_btf_id(prog);
 }
 
-struct bpf_link *bpf_program__attach_sched(struct bpf_program *prog)
-{
-	return bpf_program__attach_btf_id(prog);
-}
-
 struct bpf_link *bpf_program__attach_lsm(struct bpf_program *prog)
 {
 	return bpf_program__attach_btf_id(prog);
@@ -9737,12 +9686,6 @@ static struct bpf_link *attach_trace(const struct bpf_sec_def *sec,
 				     struct bpf_program *prog)
 {
 	return bpf_program__attach_trace(prog);
-}
-
-static struct bpf_link *attach_sched(const struct bpf_sec_def *sec,
-				     struct bpf_program *prog)
-{
-	return bpf_program__attach_sched(prog);
 }
 
 static struct bpf_link *attach_lsm(const struct bpf_sec_def *sec,

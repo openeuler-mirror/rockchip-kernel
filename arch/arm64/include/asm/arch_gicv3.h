@@ -146,14 +146,6 @@ static inline u32 gic_read_rpr(void)
 #define gicr_write_vpendbaser(v, c)	writeq_relaxed(v, c)
 #define gicr_read_vpendbaser(c)		readq_relaxed(c)
 
-extern struct static_key_false supports_pseudo_nmis;
-
-static inline bool gic_supports_nmi(void)
-{
-       return IS_ENABLED(CONFIG_ARM64_PSEUDO_NMI) &&
-              static_branch_likely(&supports_pseudo_nmis);
-}
-
 static inline bool gic_prio_masking_enabled(void)
 {
 	return system_uses_irq_prio_masking();
@@ -184,15 +176,5 @@ static inline void gic_arch_enable_irqs(void)
 	asm volatile ("msr daifclr, #2" : : : "memory");
 }
 
-static inline void gic_arch_disable_irqs(void)
-{
-	asm volatile ("msr daifset, #2" : : : "memory");
-}
-
-static inline void gic_arch_restore_irqs(unsigned long flags)
-{
-	if (gic_supports_nmi() && !(flags & GIC_PRIO_PSR_I_SET))
-		gic_arch_enable_irqs();
-}
 #endif /* __ASSEMBLY__ */
 #endif /* __ASM_ARCH_GICV3_H */

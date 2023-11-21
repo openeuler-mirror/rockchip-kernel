@@ -103,6 +103,7 @@ xfs_rmapbt_alloc_block(
 	xfs_extent_busy_reuse(cur->bc_mp, cur->bc_ag.agno, bno, 1,
 			false);
 
+	xfs_trans_agbtree_delta(cur->bc_tp, 1);
 	new->s = cpu_to_be32(bno);
 	be32_add_cpu(&agf->agf_rmap_blocks, 1);
 	xfs_alloc_log_agf(cur->bc_tp, agbp, XFS_AGF_RMAP_BLOCKS);
@@ -124,7 +125,7 @@ xfs_rmapbt_free_block(
 	xfs_agblock_t		bno;
 	int			error;
 
-	bno = xfs_daddr_to_agbno(cur->bc_mp, xfs_buf_daddr(bp));
+	bno = xfs_daddr_to_agbno(cur->bc_mp, XFS_BUF_ADDR(bp));
 	trace_xfs_rmapbt_free_block(cur->bc_mp, cur->bc_ag.agno,
 			bno, 1);
 	be32_add_cpu(&agf->agf_rmap_blocks, -1);
@@ -135,6 +136,7 @@ xfs_rmapbt_free_block(
 
 	xfs_extent_busy_insert(cur->bc_tp, be32_to_cpu(agf->agf_seqno), bno, 1,
 			      XFS_EXTENT_BUSY_SKIP_DISCARD);
+	xfs_trans_agbtree_delta(cur->bc_tp, -1);
 
 	pag = cur->bc_ag.agbp->b_pag;
 	xfs_ag_resv_free_extent(pag, XFS_AG_RESV_RMAPBT, NULL, 1);
@@ -307,7 +309,7 @@ xfs_rmapbt_verify(
 	if (!xfs_verify_magic(bp, block->bb_magic))
 		return __this_address;
 
-	if (!xfs_has_rmapbt(mp))
+	if (!xfs_sb_version_hasrmapbt(&mp->m_sb))
 		return __this_address;
 	fa = xfs_btree_sblock_v5hdr_verify(bp);
 	if (fa)
@@ -558,7 +560,7 @@ xfs_rmapbt_compute_maxlevels(
 	 * disallow reflinking when less than 10% of the per-AG metadata
 	 * block reservation since the fallback is a regular file copy.
 	 */
-	if (xfs_has_reflink(mp))
+	if (xfs_sb_version_hasreflink(&mp->m_sb))
 		mp->m_rmap_maxlevels = XFS_BTREE_MAXLEVELS;
 	else
 		mp->m_rmap_maxlevels = xfs_btree_compute_maxlevels(
@@ -606,7 +608,7 @@ xfs_rmapbt_calc_reserves(
 	xfs_extlen_t		tree_len;
 	int			error;
 
-	if (!xfs_has_rmapbt(mp))
+	if (!xfs_sb_version_hasrmapbt(&mp->m_sb))
 		return 0;
 
 	error = xfs_alloc_read_agf(mp, tp, agno, 0, &agbp);

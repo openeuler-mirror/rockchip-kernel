@@ -849,7 +849,6 @@ void msm_gem_describe(struct drm_gem_object *obj, struct seq_file *m)
 					get_pid_task(aspace->pid, PIDTYPE_PID);
 				if (task) {
 					comm = kstrdup(task->comm, GFP_KERNEL);
-					put_task_struct(task);
 				} else {
 					comm = NULL;
 				}
@@ -1062,7 +1061,7 @@ static struct drm_gem_object *_msm_gem_new(struct drm_device *dev,
 
 	ret = msm_gem_new_impl(dev, size, flags, &obj);
 	if (ret)
-		return ERR_PTR(ret);
+		goto fail;
 
 	msm_obj = to_msm_bo(obj);
 
@@ -1150,7 +1149,7 @@ struct drm_gem_object *msm_gem_import(struct drm_device *dev,
 
 	ret = msm_gem_new_impl(dev, size, MSM_BO_WC, &obj);
 	if (ret)
-		return ERR_PTR(ret);
+		goto fail;
 
 	drm_gem_private_object_init(dev, obj, size);
 

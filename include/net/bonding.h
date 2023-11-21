@@ -114,8 +114,6 @@ static inline int is_netpoll_tx_blocked(struct net_device *dev)
 #define is_netpoll_tx_blocked(dev) (0)
 #endif
 
-extern int sysctl_bond_broadcast_arp_or_nd;
-
 struct bond_params {
 	int mode;
 	int xmit_policy;
@@ -661,8 +659,6 @@ struct bond_vlan_tag *bond_verify_device_path(struct net_device *start_dev,
 int bond_update_slave_arr(struct bonding *bond, struct slave *skipslave);
 void bond_slave_arr_work_rearm(struct bonding *bond, unsigned long delay);
 void bond_work_init_all(struct bonding *bond);
-void bond_create_sysctl(void);
-void bond_destroy_sysctl(void);
 
 #ifdef CONFIG_PROC_FS
 void bond_create_proc_entry(struct bonding *bond);
@@ -766,9 +762,6 @@ extern struct rtnl_link_ops bond_link_ops;
 
 /* exported from bond_sysfs_slave.c */
 extern const struct sysfs_ops slave_sysfs_ops;
-
-/* exported from bond_3ad.c */
-extern const u8 lacpdu_mcast_addr[];
 
 static inline netdev_tx_t bond_tx_drop(struct net_device *dev, struct sk_buff *skb)
 {

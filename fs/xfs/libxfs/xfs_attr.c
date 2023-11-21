@@ -63,10 +63,9 @@ int
 xfs_inode_hasattr(
 	struct xfs_inode	*ip)
 {
-	if (!xfs_inode_has_attr_fork(ip))
-		return 0;
-	if (ip->i_af.if_format == XFS_DINODE_FMT_EXTENTS &&
-	    ip->i_af.if_nextents == 0)
+	if (!XFS_IFORK_Q(ip) ||
+	    (ip->i_afp->if_format == XFS_DINODE_FMT_EXTENTS &&
+	     ip->i_afp->if_nextents == 0))
 		return 0;
 	return 1;
 }
@@ -88,7 +87,7 @@ xfs_attr_get_ilocked(
 	if (!xfs_inode_hasattr(args->dp))
 		return -ENOATTR;
 
-	if (args->dp->i_af.if_format == XFS_DINODE_FMT_LOCAL)
+	if (args->dp->i_afp->if_format == XFS_DINODE_FMT_LOCAL)
 		return xfs_attr_shortform_getvalue(args);
 	if (xfs_bmap_one_block(args->dp, XFS_ATTR_FORK))
 		return xfs_attr_leaf_get(args);
@@ -120,7 +119,7 @@ xfs_attr_get(
 
 	XFS_STATS_INC(args->dp->i_mount, xs_attr_get);
 
-	if (xfs_is_shutdown(args->dp->i_mount))
+	if (XFS_FORCED_SHUTDOWN(args->dp->i_mount))
 		return -EIO;
 
 	args->geo = args->dp->i_mount->m_attr_geo;
@@ -184,7 +183,7 @@ xfs_attr_try_sf_addname(
 	/*
 	 * Build initial attribute list (if required).
 	 */
-	if (dp->i_af.if_format == XFS_DINODE_FMT_EXTENTS)
+	if (dp->i_afp->if_format == XFS_DINODE_FMT_EXTENTS)
 		xfs_attr_shortform_create(args);
 
 	error = xfs_attr_shortform_addname(args);
@@ -198,7 +197,7 @@ xfs_attr_try_sf_addname(
 	if (!error && !(args->op_flags & XFS_DA_OP_NOTIME))
 		xfs_trans_ichgtime(args->trans, dp, XFS_ICHGTIME_CHG);
 
-	if (xfs_has_wsync(dp->i_mount))
+	if (dp->i_mount->m_flags & XFS_MOUNT_WSYNC)
 		xfs_trans_set_sync(args->trans);
 
 	return error;
@@ -212,9 +211,9 @@ static inline bool
 xfs_attr_is_shortform(
 	struct xfs_inode    *ip)
 {
-	return ip->i_af.if_format == XFS_DINODE_FMT_LOCAL ||
-	       (ip->i_af.if_format == XFS_DINODE_FMT_EXTENTS &&
-		ip->i_af.if_nextents == 0);
+	return ip->i_afp->if_format == XFS_DINODE_FMT_LOCAL ||
+	       (ip->i_afp->if_format == XFS_DINODE_FMT_EXTENTS &&
+		ip->i_afp->if_nextents == 0);
 }
 
 /*
@@ -332,8 +331,8 @@ xfs_attr_set_args(
 /*
  * Return EEXIST if attr is found, or ENOATTR if not
  */
-static int
-xfs_attr_lookup(
+int
+xfs_has_attr(
 	struct xfs_da_args	*args)
 {
 	struct xfs_inode	*dp = args->dp;
@@ -343,8 +342,8 @@ xfs_attr_lookup(
 	if (!xfs_inode_hasattr(dp))
 		return -ENOATTR;
 
-	if (dp->i_af.if_format == XFS_DINODE_FMT_LOCAL) {
-		ASSERT(dp->i_af.if_flags & XFS_IFINLINE);
+	if (dp->i_afp->if_format == XFS_DINODE_FMT_LOCAL) {
+		ASSERT(dp->i_afp->if_flags & XFS_IFINLINE);
 		return xfs_attr_sf_findname(args, NULL, NULL);
 	}
 
@@ -372,8 +371,8 @@ xfs_attr_remove_args(
 
 	if (!xfs_inode_hasattr(dp)) {
 		error = -ENOATTR;
-	} else if (dp->i_af.if_format == XFS_DINODE_FMT_LOCAL) {
-		ASSERT(dp->i_af.if_flags & XFS_IFINLINE);
+	} else if (dp->i_afp->if_format == XFS_DINODE_FMT_LOCAL) {
+		ASSERT(dp->i_afp->if_flags & XFS_IFINLINE);
 		error = xfs_attr_shortform_remove(args);
 	} else if (xfs_bmap_one_block(dp, XFS_ATTR_FORK)) {
 		error = xfs_attr_leaf_removename(args);
@@ -397,10 +396,9 @@ xfs_attr_set(
 	struct xfs_trans_res	tres;
 	bool			rsvd = (args->attr_filter & XFS_ATTR_ROOT);
 	int			error, local;
-	int			rmt_blks = 0;
 	unsigned int		total;
 
-	if (xfs_is_shutdown(dp->i_mount))
+	if (XFS_FORCED_SHUTDOWN(dp->i_mount))
 		return -EIO;
 
 	error = xfs_qm_dqattach(dp);
@@ -428,7 +426,7 @@ xfs_attr_set(
 		 * If the inode doesn't have an attribute fork, add one.
 		 * (inode must not be locked when we call this routine)
 		 */
-		if (xfs_inode_has_attr_fork(dp) == 0) {
+		if (XFS_IFORK_Q(dp) == 0) {
 			int sf_size = sizeof(struct xfs_attr_sf_hdr) +
 				xfs_attr_sf_entsize_byname(args->namelen,
 						args->valuelen);
@@ -444,34 +442,35 @@ xfs_attr_set(
 		tres.tr_logcount = XFS_ATTRSET_LOG_COUNT;
 		tres.tr_logflags = XFS_TRANS_PERM_LOG_RES;
 		total = args->total;
-
-		if (!local)
-			rmt_blks = xfs_attr3_rmt_blocks(mp, args->valuelen);
 	} else {
 		XFS_STATS_INC(mp, xs_attr_remove);
 
 		tres = M_RES(mp)->tr_attrrm;
 		total = XFS_ATTRRM_SPACE_RES(mp);
-		rmt_blks = xfs_attr3_rmt_blocks(mp, XFS_XATTR_SIZE_MAX);
 	}
 
 	/*
 	 * Root fork attributes can use reserved data blocks for this
 	 * operation if necessary
 	 */
-	error = xfs_trans_alloc_inode(dp, &tres, total, 0, rsvd, &args->trans);
+	error = xfs_trans_alloc(mp, &tres, total, 0,
+			rsvd ? XFS_TRANS_RESERVE : 0, &args->trans);
 	if (error)
 		return error;
 
-	if (args->value || xfs_inode_hasattr(dp)) {
-		error = xfs_iext_count_may_overflow(dp, XFS_ATTR_FORK,
-				XFS_IEXT_ATTR_MANIP_CNT(rmt_blks));
+	xfs_ilock(dp, XFS_ILOCK_EXCL);
+	xfs_trans_ijoin(args->trans, dp, 0);
+	if (args->value) {
+		unsigned int	quota_flags = XFS_QMOPT_RES_REGBLKS;
+
+		if (rsvd)
+			quota_flags |= XFS_QMOPT_FORCE_RES;
+		error = xfs_trans_reserve_quota_nblks(args->trans, dp,
+				args->total, 0, quota_flags);
 		if (error)
 			goto out_trans_cancel;
-	}
 
-	error = xfs_attr_lookup(args);
-	if (args->value) {
+		error = xfs_has_attr(args);
 		if (error == -EEXIST && (args->attr_flags & XATTR_CREATE))
 			goto out_trans_cancel;
 		if (error == -ENOATTR && (args->attr_flags & XATTR_REPLACE))
@@ -486,6 +485,7 @@ xfs_attr_set(
 		if (!args->trans)
 			goto out_unlock;
 	} else {
+		error = xfs_has_attr(args);
 		if (error != -EEXIST)
 			goto out_trans_cancel;
 
@@ -498,7 +498,7 @@ xfs_attr_set(
 	 * If this is a synchronous mount, make sure that the
 	 * transaction goes to disk before returning to the user.
 	 */
-	if (xfs_has_wsync(mp))
+	if (mp->m_flags & XFS_MOUNT_WSYNC)
 		xfs_trans_set_sync(args->trans);
 
 	if (!(args->op_flags & XFS_DA_OP_NOTIME))
@@ -527,7 +527,7 @@ static inline int xfs_attr_sf_totsize(struct xfs_inode *dp)
 {
 	struct xfs_attr_shortform *sf;
 
-	sf = (struct xfs_attr_shortform *)dp->i_af.if_u1.if_data;
+	sf = (struct xfs_attr_shortform *)dp->i_afp->if_u1.if_data;
 	return be16_to_cpu(sf->hdr.totsize);
 }
 
@@ -876,18 +876,21 @@ xfs_attr_node_hasname(
 
 	state = xfs_da_state_alloc(args);
 	if (statep != NULL)
-		*statep = state;
+		*statep = NULL;
 
 	/*
 	 * Search to see if name exists, and get back a pointer to it.
 	 */
 	error = xfs_da3_node_lookup_int(state, &retval);
-	if (error)
-		retval = error;
-
-	if (!statep)
+	if (error) {
 		xfs_da_state_free(state);
+		return error;
+	}
 
+	if (statep != NULL)
+		*statep = state;
+	else
+		xfs_da_state_free(state);
 	return retval;
 }
 
@@ -1312,7 +1315,7 @@ xfs_attr_fillstate(xfs_da_state_t *state)
 	ASSERT((path->active >= 0) && (path->active < XFS_DA_NODE_MAXDEPTH));
 	for (blk = path->blk, level = 0; level < path->active; blk++, level++) {
 		if (blk->bp) {
-			blk->disk_blkno = xfs_buf_daddr(blk->bp);
+			blk->disk_blkno = XFS_BUF_ADDR(blk->bp);
 			blk->bp = NULL;
 		} else {
 			blk->disk_blkno = 0;
@@ -1327,7 +1330,7 @@ xfs_attr_fillstate(xfs_da_state_t *state)
 	ASSERT((path->active >= 0) && (path->active < XFS_DA_NODE_MAXDEPTH));
 	for (blk = path->blk, level = 0; level < path->active; blk++, level++) {
 		if (blk->bp) {
-			blk->disk_blkno = xfs_buf_daddr(blk->bp);
+			blk->disk_blkno = XFS_BUF_ADDR(blk->bp);
 			blk->bp = NULL;
 		} else {
 			blk->disk_blkno = 0;

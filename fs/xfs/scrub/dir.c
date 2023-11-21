@@ -52,7 +52,7 @@ xchk_dir_check_ftype(
 	int			ino_dtype;
 	int			error = 0;
 
-	if (!xfs_has_ftype(mp)) {
+	if (!xfs_sb_version_hasftype(&mp->m_sb)) {
 		if (dtype != DT_UNKNOWN && dtype != DT_DIR)
 			xchk_fblock_set_corrupt(sdc->sc, XFS_DATA_FORK,
 					offset);
@@ -66,18 +66,8 @@ xchk_dir_check_ftype(
 	 * eofblocks cleanup (which allocates what would be a nested
 	 * transaction), we can't use DONTCACHE here because DONTCACHE
 	 * inodes can trigger immediate inactive cleanup of the inode.
-	 *
-	 * If _iget returns -EINVAL or -ENOENT then the child inode number is
-	 * garbage and the directory is corrupt.  If the _iget returns
-	 * -EFSCORRUPTED or -EFSBADCRC then the child is corrupt which is a
-	 *  cross referencing error.  Any other error is an operational error.
 	 */
 	error = xfs_iget(mp, sdc->sc->tp, inum, 0, 0, &ip);
-	if (error == -EINVAL || error == -ENOENT) {
-		error = -EFSCORRUPTED;
-		xchk_fblock_process_error(sdc->sc, XFS_DATA_FORK, 0, &error);
-		goto out;
-	}
 	if (!xchk_fblock_xref_process_error(sdc->sc, XFS_DATA_FORK, offset,
 			&error))
 		goto out;
@@ -115,7 +105,6 @@ xchk_dir_actor(
 	struct xfs_name		xname;
 	xfs_ino_t		lookup_ino;
 	xfs_dablk_t		offset;
-	bool			checked_ftype = false;
 	int			error = 0;
 
 	sdc = container_of(dir_iter, struct xchk_dir_ctx, dir_iter);
@@ -141,10 +130,9 @@ xchk_dir_actor(
 
 	if (!strncmp(".", name, namelen)) {
 		/* If this is "." then check that the inum matches the dir. */
-		if (xfs_has_ftype(mp) && type != DT_DIR)
+		if (xfs_sb_version_hasftype(&mp->m_sb) && type != DT_DIR)
 			xchk_fblock_set_corrupt(sdc->sc, XFS_DATA_FORK,
 					offset);
-		checked_ftype = true;
 		if (ino != ip->i_ino)
 			xchk_fblock_set_corrupt(sdc->sc, XFS_DATA_FORK,
 					offset);
@@ -153,10 +141,9 @@ xchk_dir_actor(
 		 * If this is ".." in the root inode, check that the inum
 		 * matches this dir.
 		 */
-		if (xfs_has_ftype(mp) && type != DT_DIR)
+		if (xfs_sb_version_hasftype(&mp->m_sb) && type != DT_DIR)
 			xchk_fblock_set_corrupt(sdc->sc, XFS_DATA_FORK,
 					offset);
-		checked_ftype = true;
 		if (ip->i_ino == mp->m_sb.sb_rootino && ino != ip->i_ino)
 			xchk_fblock_set_corrupt(sdc->sc, XFS_DATA_FORK,
 					offset);
@@ -180,11 +167,9 @@ xchk_dir_actor(
 	}
 
 	/* Verify the file type.  This function absorbs error codes. */
-	if (!checked_ftype) {
-		error = xchk_dir_check_ftype(sdc, offset, lookup_ino, type);
-		if (error)
-			goto out;
-	}
+	error = xchk_dir_check_ftype(sdc, offset, lookup_ino, type);
+	if (error)
+		goto out;
 out:
 	/*
 	 * A negative error code returned here is supposed to cause the
@@ -527,7 +512,7 @@ xchk_directory_leaf1_bestfree(
 	bestcount = be32_to_cpu(ltp->bestcount);
 	bestp = xfs_dir2_leaf_bests_p(ltp);
 
-	if (xfs_has_crc(sc->mp)) {
+	if (xfs_sb_version_hascrc(&sc->mp->m_sb)) {
 		struct xfs_dir3_leaf_hdr	*hdr3 = bp->b_addr;
 
 		if (hdr3->pad != cpu_to_be32(0))
@@ -624,7 +609,7 @@ xchk_directory_free_bestfree(
 		return error;
 	xchk_buffer_recheck(sc, bp);
 
-	if (xfs_has_crc(sc->mp)) {
+	if (xfs_sb_version_hascrc(&sc->mp->m_sb)) {
 		struct xfs_dir3_free_hdr	*hdr3 = bp->b_addr;
 
 		if (hdr3->pad != cpu_to_be32(0))
@@ -663,7 +648,7 @@ xchk_directory_blocks(
 {
 	struct xfs_bmbt_irec	got;
 	struct xfs_da_args	args;
-	struct xfs_ifork	*ifp = xfs_ifork_ptr(sc->ip, XFS_DATA_FORK);
+	struct xfs_ifork	*ifp = XFS_IFORK_PTR(sc->ip, XFS_DATA_FORK);
 	struct xfs_mount	*mp = sc->mp;
 	xfs_fileoff_t		leaf_lblk;
 	xfs_fileoff_t		free_lblk;

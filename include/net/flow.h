@@ -13,7 +13,6 @@
 #include <linux/atomic.h>
 #include <net/flow_dissector.h>
 #include <linux/uidgid.h>
-#include <linux/kabi.h>
 
 /*
  * ifindex generation is per-net namespace, and loopback is
@@ -42,9 +41,6 @@ struct flowi_common {
 	kuid_t  flowic_uid;
 	struct flowi_tunnel flowic_tun_key;
 	__u32		flowic_multipath_hash;
-
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
 };
 
 union flowi_uli {
@@ -97,9 +93,6 @@ struct flowi4 {
 #define fl4_ipsec_spi		uli.spi
 #define fl4_mh_type		uli.mht.type
 #define fl4_gre_key		uli.gre_key
-
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
 } __attribute__((__aligned__(BITS_PER_LONG/8)));
 
 static inline void flowi4_init_output(struct flowi4 *fl4, int oif,
@@ -176,9 +169,6 @@ struct flowidn {
 	union flowi_uli		uli;
 #define fld_sport		uli.ports.sport
 #define fld_dport		uli.ports.dport
-
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
 } __attribute__((__aligned__(BITS_PER_LONG/8)));
 
 struct flowi {
@@ -205,19 +195,9 @@ static inline struct flowi *flowi4_to_flowi(struct flowi4 *fl4)
 	return container_of(fl4, struct flowi, u.ip4);
 }
 
-static inline struct flowi_common *flowi4_to_flowi_common(struct flowi4 *fl4)
-{
-	return &(flowi4_to_flowi(fl4)->u.__fl_common);
-}
-
 static inline struct flowi *flowi6_to_flowi(struct flowi6 *fl6)
 {
 	return container_of(fl6, struct flowi, u.ip6);
-}
-
-static inline struct flowi_common *flowi6_to_flowi_common(struct flowi6 *fl6)
-{
-	return &(flowi6_to_flowi(fl6)->u.__fl_common);
 }
 
 static inline struct flowi *flowidn_to_flowi(struct flowidn *fldn)

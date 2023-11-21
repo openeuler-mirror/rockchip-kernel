@@ -1,0 +1,136 @@
+Sat Sep 2 11:32:39 CST 2023 - INFO, build boot...
+Sat Sep 2 11:32:39 CST 2023 - INFO, kernel is the latest
+Sat Sep 2 11:32:39 CST 2023 - INFO, make kernel done.
+Sat Sep 2 11:33:05 CST 2023 - INFO, build boot...
+Sat Sep 2 11:33:05 CST 2023 - INFO, kernel is the latest
+Sat Sep 2 11:33:05 CST 2023 - INFO, make kernel done.
+Sat Sep 2 11:33:07 CST 2023 - INFO, device tree name is rk3399-firefly.dtb
+Sat Sep 2 11:33:07 CST 2023 - INFO, prepare kernel done.
+Sat Sep 2 11:33:07 CST 2023 - INFO, start make bootimg...
+Sat Sep 2 11:33:07 CST 2023 - INFO, start gen initrd...
+Sat Sep 2 11:33:11 CST 2023 - INFO, gen initrd donw.
+Sat Sep 2 11:33:11 CST 2023 - INFO, gen extlinux config for rk3399-firefly.dtb
+Sat Sep 2 11:33:11 CST 2023 - INFO, gen extlinux config done.
+Sat Sep 2 11:33:11 CST 2023 - INFO, make boot image done.
+Sat Sep 2 11:33:11 CST 2023 - INFO, clean boot directory.
+Sat Sep 2 11:33:11 CST 2023 - INFO, The boot.img is generated in the /home/yuzuki/Github/rockchip/scripts/build.
+Sat Sep 2 11:36:00 CST 2023 - INFO, build boot...
+Sat Sep 2 11:36:00 CST 2023 - INFO, kernel is the latest
+Sat Sep 2 11:36:00 CST 2023 - INFO, make kernel done.
+Sat Sep 2 11:36:01 CST 2023 - INFO, device tree name is rk3399-firefly.dtb
+Sat Sep 2 11:36:01 CST 2023 - INFO, prepare kernel done.
+Sat Sep 2 11:36:01 CST 2023 - INFO, start make bootimg...
+Sat Sep 2 11:36:01 CST 2023 - INFO, start gen initrd...
+Sat Sep 2 11:36:06 CST 2023 - INFO, gen initrd donw.
+Sat Sep 2 11:36:06 CST 2023 - INFO, gen extlinux config for rk3399-firefly.dtb
+Sat Sep 2 11:36:06 CST 2023 - INFO, gen extlinux config done.
+Sat Sep 2 11:36:06 CST 2023 - INFO, make boot image done.
+Sat Sep 2 11:36:06 CST 2023 - INFO, clean boot directory.
+Sat Sep 2 11:36:06 CST 2023 - INFO, The boot.img is generated in the /home/yuzuki/Github/rockchip/scripts/build.
+Sat Sep 2 11:38:07 CST 2023 - INFO, build boot...
+Sat Sep 2 11:38:07 CST 2023 - INFO, kernel is the latest
+Sat Sep 2 11:38:07 CST 2023 - INFO, make kernel done.
+Sat Sep 2 11:38:21 CST 2023 - INFO, build boot...
+Sat Sep 2 11:38:21 CST 2023 - INFO, kernel is the latest
+Sat Sep 2 11:38:21 CST 2023 - INFO, make kernel done.
+Sat Sep 2 11:38:22 CST 2023 - INFO, device tree name is rk3568-firefly-roc-pc.dtb
+Sat Sep 2 11:38:22 CST 2023 - INFO, prepare kernel done.
+Sat Sep 2 11:38:22 CST 2023 - INFO, start make bootimg...
+Sat Sep 2 11:38:22 CST 2023 - INFO, start gen initrd...
+Sat Sep 2 11:38:26 CST 2023 - INFO, gen initrd donw.
+Sat Sep 2 11:38:26 CST 2023 - INFO, gen extlinux config for rk3568-firefly-roc-pc.dtb
+Sat Sep 2 11:38:26 CST 2023 - INFO, gen extlinux config done.
+Sat Sep 2 11:38:27 CST 2023 - INFO, make boot image done.
+Sat Sep 2 11:38:27 CST 2023 - INFO, clean boot directory.
+Sat Sep 2 11:38:27 CST 2023 - INFO, The boot.img is generated in the /home/yuzuki/Github/rockchip/scripts/build.
+Sat Sep 2 11:53:05 CST 2023 - INFO, build boot...
+Sat Sep 2 11:53:05 CST 2023 - INFO, kernel is the latest
+Sat Sep 2 11:53:05 CST 2023 - INFO, make kernel done.
+Sat Sep 2 11:53:06 CST 2023 - INFO, device tree name is rk3568-firefly-roc-pc.dtb
+Sat Sep 2 11:53:06 CST 2023 - INFO, prepare kernel done.
+Sat Sep 2 11:53:06 CST 2023 - INFO, start make bootimg...
+Sat Sep 2 11:53:06 CST 2023 - INFO, start gen initrd...
+Sat Sep 2 11:53:11 CST 2023 - INFO, gen initrd donw.
+Sat Sep 2 11:53:11 CST 2023 - INFO, gen extlinux config for rk3568-firefly-roc-pc.dtb
+Sat Sep 2 11:53:11 CST 2023 - INFO, gen extlinux config done.
+Sat Sep 2 11:53:11 CST 2023 - INFO, make boot image done.
+Sat Sep 2 11:53:11 CST 2023 - INFO, clean boot directory.
+Sat Sep 2 11:53:11 CST 2023 - INFO, The boot.img is generated in the /home/yuzuki/Github/rockchip/scripts/build.
+Sat Sep 2 14:40:38 CST 2023 - INFO, build boot...
+Sat Sep 2 14:40:38 CST 2023 - INFO, kernel is the latest
+Sat Sep 2 14:40:38 CST 2023 - INFO, make kernel done.
+Sat Sep 2 14:40:39 CST 2023 - INFO, device tree name is rk3568-evb2-lp4x-v10.dtb
+Sat Sep 2 14:40:39 CST 2023 - INFO, prepare kernel done.
+Sat Sep 2 14:40:39 CST 2023 - INFO, start make bootimg...
+Sat Sep 2 14:40:39 CST 2023 - INFO, start gen initrd...
+Sat Sep 2 14:40:43 CST 2023 - INFO, gen initrd donw.
+Sat Sep 2 14:40:43 CST 2023 - INFO, gen extlinux config for rk3568-evb2-lp4x-v10.dtb
+Sat Sep 2 14:40:43 CST 2023 - INFO, gen extlinux config done.
+Sat Sep 2 14:40:43 CST 2023 - INFO, make boot image done.
+Sat Sep 2 14:40:43 CST 2023 - INFO, clean boot directory.
+Sat Sep 2 14:40:43 CST 2023 - INFO, The boot.img is generated in the /home/yuzuki/Github/rockchip/scripts/build.
+Sat Sep 2 14:44:16 CST 2023 - INFO, build boot...
+Sat Sep 2 14:44:16 CST 2023 - INFO, kernel is the latest
+Sat Sep 2 14:44:16 CST 2023 - INFO, make kernel done.
+Sat Sep 2 14:44:17 CST 2023 - INFO, device tree name is rk3568-evb2-lp4x-v10.dtb
+Sat Sep 2 14:44:17 CST 2023 - INFO, prepare kernel done.
+Sat Sep 2 14:44:17 CST 2023 - INFO, start make bootimg...
+Sat Sep 2 14:44:17 CST 2023 - INFO, start gen initrd...
+Sat Sep 2 14:44:22 CST 2023 - INFO, gen initrd donw.
+Sat Sep 2 14:44:22 CST 2023 - INFO, gen extlinux config for rk3568-evb2-lp4x-v10.dtb
+Sat Sep 2 14:44:22 CST 2023 - INFO, gen extlinux config done.
+Sat Sep 2 14:44:22 CST 2023 - INFO, make boot image done.
+Sat Sep 2 14:44:22 CST 2023 - INFO, clean boot directory.
+Sat Sep 2 14:44:22 CST 2023 - INFO, The boot.img is generated in the /home/yuzuki/Github/rockchip/scripts/build.
+Sat Sep 2 14:45:30 CST 2023 - INFO, build boot...
+Sat Sep 2 14:45:30 CST 2023 - INFO, kernel is the latest
+Sat Sep 2 14:45:30 CST 2023 - INFO, make kernel done.
+Sat Sep 2 14:45:31 CST 2023 - INFO, device tree name is rk3568-evb2-lp4x-v10.dtb
+Sat Sep 2 14:45:31 CST 2023 - INFO, prepare kernel done.
+Sat Sep 2 14:45:31 CST 2023 - INFO, start make bootimg...
+Sat Sep 2 14:45:31 CST 2023 - INFO, start gen initrd...
+Sat Sep 2 14:45:35 CST 2023 - INFO, gen initrd donw.
+Sat Sep 2 14:45:35 CST 2023 - INFO, gen extlinux config for rk3568-evb2-lp4x-v10.dtb
+Sat Sep 2 14:45:35 CST 2023 - INFO, gen extlinux config done.
+Sat Sep 2 14:45:36 CST 2023 - INFO, make boot image done.
+Sat Sep 2 14:45:36 CST 2023 - INFO, clean boot directory.
+Sat Sep 2 14:45:36 CST 2023 - INFO, The boot.img is generated in the /home/yuzuki/Github/rockchip/scripts/build.
+Sat Sep 2 14:47:32 CST 2023 - INFO, build boot...
+Sat Sep 2 14:47:32 CST 2023 - INFO, kernel is the latest
+Sat Sep 2 14:47:32 CST 2023 - INFO, make kernel done.
+Sat Sep 2 14:47:33 CST 2023 - INFO, device tree name is rk3568-evb2-lp4x-v10.dtb
+Sat Sep 2 14:47:33 CST 2023 - INFO, prepare kernel done.
+Sat Sep 2 14:47:33 CST 2023 - INFO, start make bootimg...
+Sat Sep 2 14:47:33 CST 2023 - INFO, start gen initrd...
+Sat Sep 2 14:47:37 CST 2023 - INFO, gen initrd donw.
+Sat Sep 2 14:47:37 CST 2023 - INFO, gen extlinux config for rk3568-evb2-lp4x-v10.dtb
+Sat Sep 2 14:47:37 CST 2023 - INFO, gen extlinux config done.
+Sat Sep 2 14:47:37 CST 2023 - INFO, make boot image done.
+Sat Sep 2 14:47:37 CST 2023 - INFO, clean boot directory.
+Sat Sep 2 14:47:37 CST 2023 - INFO, The boot.img is generated in the /home/yuzuki/Github/rockchip/scripts/build.
+Sat Sep 2 14:48:52 CST 2023 - INFO, build boot...
+Sat Sep 2 14:48:52 CST 2023 - INFO, kernel is the latest
+Sat Sep 2 14:48:52 CST 2023 - INFO, make kernel done.
+Sat Sep 2 14:48:53 CST 2023 - INFO, device tree name is rk3568-evb2-lp4x-v10.dtb
+Sat Sep 2 14:48:53 CST 2023 - INFO, prepare kernel done.
+Sat Sep 2 14:48:53 CST 2023 - INFO, start make bootimg...
+Sat Sep 2 14:48:53 CST 2023 - INFO, start gen initrd...
+Sat Sep 2 14:48:57 CST 2023 - INFO, gen initrd donw.
+Sat Sep 2 14:48:57 CST 2023 - INFO, gen extlinux config for rk3568-evb2-lp4x-v10.dtb
+Sat Sep 2 14:48:57 CST 2023 - INFO, gen extlinux config done.
+Sat Sep 2 14:48:57 CST 2023 - INFO, make boot image done.
+Sat Sep 2 14:48:57 CST 2023 - INFO, clean boot directory.
+Sat Sep 2 14:48:57 CST 2023 - INFO, The boot.img is generated in the /home/yuzuki/Github/rockchip/scripts/build.
+Sat Sep 2 14:48:58 CST 2023 - INFO, build boot...
+Sat Sep 2 14:48:58 CST 2023 - INFO, kernel is the latest
+Sat Sep 2 14:48:58 CST 2023 - INFO, make kernel done.
+Sat Sep 2 14:48:59 CST 2023 - INFO, device tree name is rk3568-firefly-roc-pc.dtb
+Sat Sep 2 14:48:59 CST 2023 - INFO, prepare kernel done.
+Sat Sep 2 14:48:59 CST 2023 - INFO, start make bootimg...
+Sat Sep 2 14:48:59 CST 2023 - INFO, start gen initrd...
+Sat Sep 2 14:49:03 CST 2023 - INFO, gen initrd donw.
+Sat Sep 2 14:49:03 CST 2023 - INFO, gen extlinux config for rk3568-firefly-roc-pc.dtb
+Sat Sep 2 14:49:03 CST 2023 - INFO, gen extlinux config done.
+Sat Sep 2 14:49:04 CST 2023 - INFO, make boot image done.
+Sat Sep 2 14:49:04 CST 2023 - INFO, clean boot directory.
+Sat Sep 2 14:49:04 CST 2023 - INFO, The boot.img is generated in the /home/yuzuki/Github/rockchip/scripts/build.

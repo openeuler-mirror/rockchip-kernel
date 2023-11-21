@@ -66,7 +66,7 @@
  * Fast Commit Ineligibility
  * -------------------------
  * Not all operations are supported by fast commits today (e.g extended
- * attributes). Fast commit ineligibility is marked by calling one of the
+ * attributes). Fast commit ineligiblity is marked by calling one of the
  * two following functions:
  *
  * - ext4_fc_mark_ineligible(): This makes next fast commit operation to fall
@@ -371,33 +371,25 @@ static int __track_dentry_update(struct inode *inode, void *arg, bool update)
 	struct __track_dentry_update_args *dentry_update =
 		(struct __track_dentry_update_args *)arg;
 	struct dentry *dentry = dentry_update->dentry;
-	struct inode *dir = dentry->d_parent->d_inode;
-	struct super_block *sb = inode->i_sb;
-	struct ext4_sb_info *sbi = EXT4_SB(sb);
+	struct ext4_sb_info *sbi = EXT4_SB(inode->i_sb);
 
 	mutex_unlock(&ei->i_fc_lock);
-
-	if (IS_ENCRYPTED(dir)) {
-		ext4_fc_mark_ineligible(sb, EXT4_FC_REASON_ENCRYPTED_FILENAME);
-		mutex_lock(&ei->i_fc_lock);
-		return -EOPNOTSUPP;
-	}
-
 	node = kmem_cache_alloc(ext4_fc_dentry_cachep, GFP_NOFS);
 	if (!node) {
-		ext4_fc_mark_ineligible(sb, EXT4_FC_REASON_NOMEM);
+		ext4_fc_mark_ineligible(inode->i_sb, EXT4_FC_REASON_NOMEM);
 		mutex_lock(&ei->i_fc_lock);
 		return -ENOMEM;
 	}
 
 	node->fcd_op = dentry_update->op;
-	node->fcd_parent = dir->i_ino;
+	node->fcd_parent = dentry->d_parent->d_inode->i_ino;
 	node->fcd_ino = inode->i_ino;
 	if (dentry->d_name.len > DNAME_INLINE_LEN) {
 		node->fcd_name.name = kmalloc(dentry->d_name.len, GFP_NOFS);
 		if (!node->fcd_name.name) {
 			kmem_cache_free(ext4_fc_dentry_cachep, node);
-			ext4_fc_mark_ineligible(sb, EXT4_FC_REASON_NOMEM);
+			ext4_fc_mark_ineligible(inode->i_sb,
+				EXT4_FC_REASON_NOMEM);
 			mutex_lock(&ei->i_fc_lock);
 			return -ENOMEM;
 		}
@@ -636,9 +628,6 @@ static u8 *ext4_fc_reserve_space(struct super_block *sb, int len, u32 *crc)
 		*crc = ext4_chksum(sbi, *crc, tl, sizeof(*tl));
 	if (pad_len > 0)
 		ext4_fc_memzero(sb, tl + 1, pad_len, crc);
-	/* Don't leak uninitialized memory in the unused last byte. */
-	*((u8 *)(tl + 1) + pad_len) = 0;
-
 	ext4_fc_submit_bh(sb);
 
 	ret = jbd2_fc_get_buf(EXT4_SB(sb)->s_journal, &bh);
@@ -695,8 +684,6 @@ static int ext4_fc_write_tail(struct super_block *sb, u32 crc)
 	dst += sizeof(tail.fc_tid);
 	tail.fc_crc = cpu_to_le32(crc);
 	ext4_fc_memcpy(sb, dst, &tail.fc_crc, sizeof(tail.fc_crc), NULL);
-	dst += sizeof(tail.fc_crc);
-	memset(dst, 0, bsize - off); /* Don't leak uninitialized memory. */
 
 	ext4_fc_submit_bh(sb);
 
@@ -779,25 +766,22 @@ static int ext4_fc_write_inode(struct inode *inode, u32 *crc)
 	tl.fc_tag = cpu_to_le16(EXT4_FC_TAG_INODE);
 	tl.fc_len = cpu_to_le16(inode_len + sizeof(fc_inode.fc_ino));
 
-	ret = -ECANCELED;
 	dst = ext4_fc_reserve_space(inode->i_sb,
 			sizeof(tl) + inode_len + sizeof(fc_inode.fc_ino), crc);
 	if (!dst)
-		goto err;
+		return -ECANCELED;
 
 	if (!ext4_fc_memcpy(inode->i_sb, dst, &tl, sizeof(tl), crc))
-		goto err;
+		return -ECANCELED;
 	dst += sizeof(tl);
 	if (!ext4_fc_memcpy(inode->i_sb, dst, &fc_inode, sizeof(fc_inode), crc))
-		goto err;
+		return -ECANCELED;
 	dst += sizeof(fc_inode);
 	if (!ext4_fc_memcpy(inode->i_sb, dst, (u8 *)ext4_raw_inode(&iloc),
 					inode_len, crc))
-		goto err;
-	ret = 0;
-err:
-	brelse(iloc.bh);
-	return ret;
+		return -ECANCELED;
+
+	return 0;
 }
 
 /*
@@ -848,12 +832,6 @@ static int ext4_fc_write_inode_data(struct inode *inode, u32 *crc)
 					    sizeof(lrange), (u8 *)&lrange, crc))
 				return -ENOSPC;
 		} else {
-			unsigned int max = (map.m_flags & EXT4_MAP_UNWRITTEN) ?
-				EXT_UNWRITTEN_MAX_LEN : EXT_INIT_MAX_LEN;
-
-			/* Limit the number of blocks in one extent */
-			map.m_len = min(max, map.m_len);
-
 			fc_ext.fc_ino = cpu_to_le32(inode->i_ino);
 			ex = (struct ext4_extent *)&fc_ext.fc_ex;
 			ex->ee_block = cpu_to_le32(map.m_lblk);
@@ -1300,7 +1278,7 @@ static int ext4_fc_replay_unlink(struct super_block *sb, struct ext4_fc_tl *tl,
 		return 0;
 	}
 
-	ret = __ext4_unlink(old_parent, &entry, inode, NULL);
+	ret = __ext4_unlink(NULL, old_parent, &entry, inode);
 	/* -ENOENT ok coz it might not exist anymore. */
 	if (ret == -ENOENT)
 		ret = 0;
@@ -1404,17 +1382,14 @@ static int ext4_fc_record_modified_inode(struct super_block *sb, int ino)
 		if (state->fc_modified_inodes[i] == ino)
 			return 0;
 	if (state->fc_modified_inodes_used == state->fc_modified_inodes_size) {
-		int *fc_modified_inodes;
-
-		fc_modified_inodes = krealloc(state->fc_modified_inodes,
-				sizeof(int) * (state->fc_modified_inodes_size +
-				EXT4_FC_REPLAY_REALLOC_INCREMENT),
-				GFP_KERNEL);
-		if (!fc_modified_inodes)
-			return -ENOMEM;
-		state->fc_modified_inodes = fc_modified_inodes;
 		state->fc_modified_inodes_size +=
 			EXT4_FC_REPLAY_REALLOC_INCREMENT;
+		state->fc_modified_inodes = krealloc(
+					state->fc_modified_inodes, sizeof(int) *
+					state->fc_modified_inodes_size,
+					GFP_KERNEL);
+		if (!state->fc_modified_inodes)
+			return -ENOMEM;
 	}
 	state->fc_modified_inodes[state->fc_modified_inodes_used++] = ino;
 	return 0;
@@ -1446,9 +1421,7 @@ static int ext4_fc_replay_inode(struct super_block *sb, struct ext4_fc_tl *tl,
 	}
 	inode = NULL;
 
-	ret = ext4_fc_record_modified_inode(sb, ino);
-	if (ret)
-		goto out;
+	ext4_fc_record_modified_inode(sb, ino);
 
 	raw_fc_inode = (struct ext4_inode *)
 		(val + offsetof(struct ext4_fc_inode, fc_raw_inode));
@@ -1579,45 +1552,32 @@ out:
 }
 
 /*
- * Record physical disk regions which are in use as per fast commit area,
- * and used by inodes during replay phase. Our simple replay phase
- * allocator excludes these regions from allocation.
+ * Record physical disk regions which are in use as per fast commit area. Our
+ * simple replay phase allocator excludes these regions from allocation.
  */
-int ext4_fc_record_regions(struct super_block *sb, int ino,
-		ext4_lblk_t lblk, ext4_fsblk_t pblk, int len, int replay)
+static int ext4_fc_record_regions(struct super_block *sb, int ino,
+		ext4_lblk_t lblk, ext4_fsblk_t pblk, int len)
 {
 	struct ext4_fc_replay_state *state;
 	struct ext4_fc_alloc_region *region;
 
 	state = &EXT4_SB(sb)->s_fc_replay_state;
-	/*
-	 * during replay phase, the fc_regions_valid may not same as
-	 * fc_regions_used, update it when do new additions.
-	 */
-	if (replay && state->fc_regions_used != state->fc_regions_valid)
-		state->fc_regions_used = state->fc_regions_valid;
 	if (state->fc_regions_used == state->fc_regions_size) {
-		struct ext4_fc_alloc_region *fc_regions;
-
-		fc_regions = krealloc(state->fc_regions,
-				      sizeof(struct ext4_fc_alloc_region) *
-				      (state->fc_regions_size +
-				       EXT4_FC_REPLAY_REALLOC_INCREMENT),
-				      GFP_KERNEL);
-		if (!fc_regions)
-			return -ENOMEM;
 		state->fc_regions_size +=
 			EXT4_FC_REPLAY_REALLOC_INCREMENT;
-		state->fc_regions = fc_regions;
+		state->fc_regions = krealloc(
+					state->fc_regions,
+					state->fc_regions_size *
+					sizeof(struct ext4_fc_alloc_region),
+					GFP_KERNEL);
+		if (!state->fc_regions)
+			return -ENOMEM;
 	}
 	region = &state->fc_regions[state->fc_regions_used++];
 	region->ino = ino;
 	region->lblk = lblk;
 	region->pblk = pblk;
 	region->len = len;
-
-	if (replay)
-		state->fc_regions_valid++;
 
 	return 0;
 }
@@ -1650,8 +1610,6 @@ static int ext4_fc_replay_add_range(struct super_block *sb,
 	}
 
 	ret = ext4_fc_record_modified_inode(sb, inode->i_ino);
-	if (ret)
-		goto out;
 
 	start = le32_to_cpu(ex->ee_block);
 	start_pblk = ext4_ext_pblock(ex);
@@ -1669,14 +1627,18 @@ static int ext4_fc_replay_add_range(struct super_block *sb,
 		map.m_pblk = 0;
 		ret = ext4_map_blocks(NULL, inode, &map, 0);
 
-		if (ret < 0)
-			goto out;
+		if (ret < 0) {
+			iput(inode);
+			return 0;
+		}
 
 		if (ret == 0) {
 			/* Range is not mapped */
 			path = ext4_find_extent(inode, cur, NULL, 0);
-			if (IS_ERR(path))
-				goto out;
+			if (IS_ERR(path)) {
+				iput(inode);
+				return 0;
+			}
 			memset(&newex, 0, sizeof(newex));
 			newex.ee_block = cpu_to_le32(cur);
 			ext4_ext_store_pblock(
@@ -1690,8 +1652,10 @@ static int ext4_fc_replay_add_range(struct super_block *sb,
 			up_write((&EXT4_I(inode)->i_data_sem));
 			ext4_ext_drop_refs(path);
 			kfree(path);
-			if (ret)
-				goto out;
+			if (ret) {
+				iput(inode);
+				return 0;
+			}
 			goto next;
 		}
 
@@ -1704,8 +1668,10 @@ static int ext4_fc_replay_add_range(struct super_block *sb,
 			ret = ext4_ext_replay_update_ex(inode, cur, map.m_len,
 					ext4_ext_is_unwritten(ex),
 					start_pblk + cur - start);
-			if (ret)
-				goto out;
+			if (ret) {
+				iput(inode);
+				return 0;
+			}
 			/*
 			 * Mark the old blocks as free since they aren't used
 			 * anymore. We maintain an array of all the modified
@@ -1725,8 +1691,10 @@ static int ext4_fc_replay_add_range(struct super_block *sb,
 			ext4_ext_is_unwritten(ex), map.m_pblk);
 		ret = ext4_ext_replay_update_ex(inode, cur, map.m_len,
 					ext4_ext_is_unwritten(ex), map.m_pblk);
-		if (ret)
-			goto out;
+		if (ret) {
+			iput(inode);
+			return 0;
+		}
 		/*
 		 * We may have split the extent tree while toggling the state.
 		 * Try to shrink the extent tree now.
@@ -1738,7 +1706,6 @@ next:
 	}
 	ext4_ext_replay_shrink_inode(inode, i_size_read(inode) >>
 					sb->s_blocksize_bits);
-out:
 	iput(inode);
 	return 0;
 }
@@ -1768,8 +1735,6 @@ ext4_fc_replay_del_range(struct super_block *sb, struct ext4_fc_tl *tl,
 	}
 
 	ret = ext4_fc_record_modified_inode(sb, inode->i_ino);
-	if (ret)
-		goto out;
 
 	jbd_debug(1, "DEL_RANGE, inode %ld, lblk %d, len %d\n",
 			inode->i_ino, le32_to_cpu(lrange.fc_lblk),
@@ -1779,8 +1744,10 @@ ext4_fc_replay_del_range(struct super_block *sb, struct ext4_fc_tl *tl,
 		map.m_len = remaining;
 
 		ret = ext4_map_blocks(NULL, inode, &map, 0);
-		if (ret < 0)
-			goto out;
+		if (ret < 0) {
+			iput(inode);
+			return 0;
+		}
 		if (ret > 0) {
 			remaining -= ret;
 			cur += ret;
@@ -1791,18 +1758,16 @@ ext4_fc_replay_del_range(struct super_block *sb, struct ext4_fc_tl *tl,
 		}
 	}
 
-	down_write(&EXT4_I(inode)->i_data_sem);
-	ret = ext4_ext_remove_space(inode, le32_to_cpu(lrange.fc_lblk),
-				le32_to_cpu(lrange.fc_lblk) +
-				le32_to_cpu(lrange.fc_len) - 1);
-	up_write(&EXT4_I(inode)->i_data_sem);
+	ret = ext4_punch_hole(inode,
+		le32_to_cpu(lrange.fc_lblk) << sb->s_blocksize_bits,
+		le32_to_cpu(lrange.fc_len) <<  sb->s_blocksize_bits);
 	if (ret)
-		goto out;
+		jbd_debug(1, "ext4_punch_hole returned %d", ret);
 	ext4_ext_replay_shrink_inode(inode,
 		i_size_read(inode) >> sb->s_blocksize_bits);
 	ext4_mark_inode_dirty(NULL, inode);
-out:
 	iput(inode);
+
 	return 0;
 }
 
@@ -1980,7 +1945,7 @@ static int ext4_fc_replay_scan(journal_t *journal,
 			ret = ext4_fc_record_regions(sb,
 				le32_to_cpu(ext.fc_ino),
 				le32_to_cpu(ex->ee_block), ext4_ext_pblock(ex),
-				ext4_ext_get_actual_len(ex), 0);
+				ext4_ext_get_actual_len(ex));
 			if (ret < 0)
 				break;
 			ret = JBD2_FC_REPLAY_CONTINUE;
@@ -2150,17 +2115,17 @@ void ext4_fc_init(struct super_block *sb, journal_t *journal)
 	journal->j_fc_cleanup_callback = ext4_fc_cleanup;
 }
 
-static const char * const fc_ineligible_reasons[] = {
-	[EXT4_FC_REASON_XATTR] = "Extended attributes changed",
-	[EXT4_FC_REASON_CROSS_RENAME] = "Cross rename",
-	[EXT4_FC_REASON_JOURNAL_FLAG_CHANGE] = "Journal flag changed",
-	[EXT4_FC_REASON_NOMEM] = "Insufficient memory",
-	[EXT4_FC_REASON_SWAP_BOOT] = "Swap boot",
-	[EXT4_FC_REASON_RESIZE] = "Resize",
-	[EXT4_FC_REASON_RENAME_DIR] = "Dir renamed",
-	[EXT4_FC_REASON_FALLOC_RANGE] = "Falloc range op",
-	[EXT4_FC_REASON_INODE_JOURNAL_DATA] = "Data journalling",
-	[EXT4_FC_REASON_ENCRYPTED_FILENAME] = "Encrypted filename",
+static const char *fc_ineligible_reasons[] = {
+	"Extended attributes changed",
+	"Cross rename",
+	"Journal flag changed",
+	"Insufficient memory",
+	"Swap boot",
+	"Resize",
+	"Dir renamed",
+	"Falloc range op",
+	"Data journalling",
+	"FC Commit Failed"
 };
 
 int ext4_fc_info_show(struct seq_file *seq, void *v)
@@ -2194,9 +2159,4 @@ int __init ext4_fc_init_dentry_cache(void)
 		return -ENOMEM;
 
 	return 0;
-}
-
-void ext4_fc_destroy_dentry_cache(void)
-{
-	kmem_cache_destroy(ext4_fc_dentry_cachep);
 }

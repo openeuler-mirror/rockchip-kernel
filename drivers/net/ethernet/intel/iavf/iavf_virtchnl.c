@@ -241,13 +241,10 @@ out:
 void iavf_configure_queues(struct iavf_adapter *adapter)
 {
 	struct virtchnl_vsi_queue_config_info *vqci;
-	int i, max_frame = adapter->vf_res->max_mtu;
-	int pairs = adapter->num_active_queues;
 	struct virtchnl_queue_pair_info *vqpi;
+	int pairs = adapter->num_active_queues;
+	int i, max_frame = IAVF_MAX_RXBUFFER;
 	size_t len;
-
-	if (max_frame > IAVF_MAX_RXBUFFER || !max_frame)
-		max_frame = IAVF_MAX_RXBUFFER;
 
 	if (adapter->current_op != VIRTCHNL_OP_UNKNOWN) {
 		/* bail because we already have a command pending */
@@ -1463,7 +1460,7 @@ void iavf_virtchnl_completion(struct iavf_adapter *adapter,
 		iavf_free_all_tx_resources(adapter);
 		iavf_free_all_rx_resources(adapter);
 		if (adapter->state == __IAVF_DOWN_PENDING) {
-			iavf_change_state(adapter, __IAVF_DOWN);
+			adapter->state = __IAVF_DOWN;
 			wake_up(&adapter->down_waitqueue);
 		}
 		break;

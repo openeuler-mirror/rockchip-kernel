@@ -41,7 +41,6 @@
 #include <linux/sizes.h>
 #include <linux/io.h>
 #include <linux/acpi.h>
-#include <linux/of_irq.h>
 
 #include "amba-pl011.h"
 
@@ -1049,9 +1048,6 @@ static void pl011_dma_rx_callback(void *data)
  */
 static inline void pl011_dma_rx_stop(struct uart_amba_port *uap)
 {
-	if (!uap->using_rx_dma)
-		return;
-
 	/* FIXME.  Just disable the DMA enable */
 	uap->dmacr &= ~UART011_RXDMAE;
 	pl011_write(uap->dmacr, uap, REG_DMACR);
@@ -1330,15 +1326,6 @@ static void pl011_stop_rx(struct uart_port *port)
 	pl011_dma_rx_stop(uap);
 }
 
-static void pl011_throttle_rx(struct uart_port *port)
-{
-	unsigned long flags;
-
-	spin_lock_irqsave(&port->lock, flags);
-	pl011_stop_rx(port);
-	spin_unlock_irqrestore(&port->lock, flags);
-}
-
 static void pl011_enable_ms(struct uart_port *port)
 {
 	struct uart_amba_port *uap =
@@ -1478,67 +1465,6 @@ static void check_apply_cts_event_workaround(struct uart_amba_port *uap)
 	pl011_read(uap, REG_ICR);
 }
 
-#ifdef CONFIG_SERIAL_ATTACHED_MBIGEN
-struct workaround_oem_info {
-	char oem_id[ACPI_OEM_ID_SIZE + 1];
-	char oem_table_id[ACPI_OEM_TABLE_ID_SIZE + 1];
-	u32 oem_revision;
-};
-
-static bool pl011_enable_hisi_wkrd;
-static struct workaround_oem_info pl011_wkrd_info[] = {
-	{
-		.oem_id		= "HISI  ",
-		.oem_table_id	= "HIP08   ",
-		.oem_revision	= 0x300,
-	}, {
-		.oem_id		= "HISI  ",
-		.oem_table_id	= "HIP08   ",
-		.oem_revision	= 0x301,
-	}, {
-		.oem_id		= "HISI  ",
-		.oem_table_id	= "HIP08   ",
-		.oem_revision	= 0x400,
-	}, {
-		.oem_id		= "HISI  ",
-		.oem_table_id	= "HIP08   ",
-		.oem_revision	= 0x401,
-	}, {
-		.oem_id		= "HISI  ",
-		.oem_table_id	= "HIP08   ",
-		.oem_revision	= 0x402,
-	}
-};
-
-static void pl011_check_hisi_workaround(void)
-{
-	struct acpi_table_header *tbl;
-	acpi_status status = AE_OK;
-	int i;
-
-	status = acpi_get_table(ACPI_SIG_MADT, 0, &tbl);
-	if (ACPI_FAILURE(status) || !tbl)
-		return;
-
-	for (i = 0; i < ARRAY_SIZE(pl011_wkrd_info); i++) {
-		if (!memcmp(pl011_wkrd_info[i].oem_id, tbl->oem_id, ACPI_OEM_ID_SIZE) &&
-		    !memcmp(pl011_wkrd_info[i].oem_table_id, tbl->oem_table_id, ACPI_OEM_TABLE_ID_SIZE) &&
-		    pl011_wkrd_info[i].oem_revision == tbl->oem_revision) {
-			pl011_enable_hisi_wkrd = true;
-			break;
-		}
-	}
-
-	acpi_put_table(tbl);
-}
-
-#else
-
-#define pl011_enable_hisi_wkrd	0
-static inline void pl011_check_hisi_workaround(void){ }
-
-#endif
-
 static irqreturn_t pl011_int(int irq, void *dev_id)
 {
 	struct uart_amba_port *uap = dev_id;
@@ -1574,11 +1500,6 @@ static irqreturn_t pl011_int(int irq, void *dev_id)
 			status = pl011_read(uap, REG_RIS) & uap->im;
 		} while (status != 0);
 		handled = 1;
-	}
-
-	if (pl011_enable_hisi_wkrd) {
-		pl011_write(0, uap, REG_IMSC);
-		pl011_write(uap->im, uap, REG_IMSC);
 	}
 
 	spin_unlock_irqrestore(&uap->port.lock, flags);
@@ -1758,8 +1679,6 @@ static int pl011_hwinit(struct uart_port *port)
 		if (plat->init)
 			plat->init();
 	}
-
-	pl011_check_hisi_workaround();
 	return 0;
 }
 
@@ -1798,10 +1717,9 @@ static int pl011_allocate_irq(struct uart_amba_port *uap)
  */
 static void pl011_enable_interrupts(struct uart_amba_port *uap)
 {
-	unsigned long flags;
 	unsigned int i;
 
-	spin_lock_irqsave(&uap->port.lock, flags);
+	spin_lock_irq(&uap->port.lock);
 
 	/* Clear out any spuriously appearing RX interrupts */
 	pl011_write(UART011_RTIS | UART011_RXIS, uap, REG_ICR);
@@ -1823,23 +1741,7 @@ static void pl011_enable_interrupts(struct uart_amba_port *uap)
 	if (!pl011_dma_rx_running(uap))
 		uap->im |= UART011_RXIM;
 	pl011_write(uap->im, uap, REG_IMSC);
-	spin_unlock_irqrestore(&uap->port.lock, flags);
-}
-
-static void pl011_unthrottle_rx(struct uart_port *port)
-{
-	struct uart_amba_port *uap = container_of(port, struct uart_amba_port, port);
-	unsigned long flags;
-
-	spin_lock_irqsave(&uap->port.lock, flags);
-
-	uap->im = UART011_RTIM;
-	if (!pl011_dma_rx_running(uap))
-		uap->im |= UART011_RXIM;
-
-	pl011_write(uap->im, uap, REG_IMSC);
-
-	spin_unlock_irqrestore(&uap->port.lock, flags);
+	spin_unlock_irq(&uap->port.lock);
 }
 
 static int pl011_startup(struct uart_port *port)
@@ -2182,12 +2084,31 @@ static const char *pl011_type(struct uart_port *port)
 }
 
 /*
+ * Release the memory region(s) being used by 'port'
+ */
+static void pl011_release_port(struct uart_port *port)
+{
+	release_mem_region(port->mapbase, SZ_4K);
+}
+
+/*
+ * Request the memory region(s) being used by 'port'
+ */
+static int pl011_request_port(struct uart_port *port)
+{
+	return request_mem_region(port->mapbase, SZ_4K, "uart-pl011")
+			!= NULL ? 0 : -EBUSY;
+}
+
+/*
  * Configure/autoconfigure the port.
  */
 static void pl011_config_port(struct uart_port *port, int flags)
 {
-	if (flags & UART_CONFIG_TYPE)
+	if (flags & UART_CONFIG_TYPE) {
 		port->type = PORT_AMBA;
+		pl011_request_port(port);
+	}
 }
 
 /*
@@ -2202,8 +2123,6 @@ static int pl011_verify_port(struct uart_port *port, struct serial_struct *ser)
 		ret = -EINVAL;
 	if (ser->baud_base < 9600)
 		ret = -EINVAL;
-	if (port->mapbase != (unsigned long) ser->iomem_base)
-		ret = -EINVAL;
 	return ret;
 }
 
@@ -2214,8 +2133,6 @@ static const struct uart_ops amba_pl011_pops = {
 	.stop_tx	= pl011_stop_tx,
 	.start_tx	= pl011_start_tx,
 	.stop_rx	= pl011_stop_rx,
-	.throttle	= pl011_throttle_rx,
-	.unthrottle	= pl011_unthrottle_rx,
 	.enable_ms	= pl011_enable_ms,
 	.break_ctl	= pl011_break_ctl,
 	.startup	= pl011_startup,
@@ -2223,6 +2140,8 @@ static const struct uart_ops amba_pl011_pops = {
 	.flush_buffer	= pl011_dma_flush_buffer,
 	.set_termios	= pl011_set_termios,
 	.type		= pl011_type,
+	.release_port	= pl011_release_port,
+	.request_port	= pl011_request_port,
 	.config_port	= pl011_config_port,
 	.verify_port	= pl011_verify_port,
 #ifdef CONFIG_CONSOLE_POLL
@@ -2252,6 +2171,8 @@ static const struct uart_ops sbsa_uart_pops = {
 	.shutdown	= sbsa_uart_shutdown,
 	.set_termios	= sbsa_uart_set_termios,
 	.type		= pl011_type,
+	.release_port	= pl011_release_port,
+	.request_port	= pl011_request_port,
 	.config_port	= pl011_config_port,
 	.verify_port	= pl011_verify_port,
 #ifdef CONFIG_CONSOLE_POLL
@@ -2744,17 +2665,8 @@ static int pl011_probe(struct amba_device *dev, const struct amba_id *id)
 	uap->vendor = vendor;
 	uap->fifosize = vendor->get_fifosize(dev);
 	uap->port.iotype = vendor->access_32b ? UPIO_MEM32 : UPIO_MEM;
-	uap->port.ops = &amba_pl011_pops;
-
-	/* if no irq domain found, irq number is 0, try again */
-	if (!dev->irq[0] && dev->dev.of_node) {
-		ret = of_irq_get(dev->dev.of_node, 0);
-		if (ret < 0)
-			return ret;
-		dev->irq[0] = ret;
-	}
-
 	uap->port.irq = dev->irq[0];
+	uap->port.ops = &amba_pl011_pops;
 
 	snprintf(uap->type, sizeof(uap->type), "PL011 rev%u", amba_rev(dev));
 
@@ -2878,7 +2790,6 @@ MODULE_DEVICE_TABLE(of, sbsa_uart_of_match);
 
 static const struct acpi_device_id sbsa_uart_acpi_match[] = {
 	{ "ARMH0011", 0 },
-	{ "ARMHB000", 0 },
 	{},
 };
 MODULE_DEVICE_TABLE(acpi, sbsa_uart_acpi_match);

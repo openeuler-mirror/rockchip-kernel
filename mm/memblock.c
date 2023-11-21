@@ -29,10 +29,6 @@
 # define INIT_MEMBLOCK_RESERVED_REGIONS		INIT_MEMBLOCK_REGIONS
 #endif
 
-#ifndef INIT_MEMBLOCK_MEMORY_REGIONS
-#define INIT_MEMBLOCK_MEMORY_REGIONS		INIT_MEMBLOCK_REGIONS
-#endif
-
 /**
  * DOC: memblock overview
  *
@@ -59,9 +55,9 @@
  * the allocator metadata. The "memory" and "reserved" types are nicely
  * wrapped with struct memblock. This structure is statically
  * initialized at build time. The region arrays are initially sized to
- * %INIT_MEMBLOCK_MEMORY_REGIONS for "memory" and
- * %INIT_MEMBLOCK_RESERVED_REGIONS for "reserved". The region array
- * for "physmem" is initially sized to %INIT_PHYSMEM_REGIONS.
+ * %INIT_MEMBLOCK_REGIONS for "memory" and %INIT_MEMBLOCK_RESERVED_REGIONS
+ * for "reserved". The region array for "physmem" is initially sized to
+ * %INIT_PHYSMEM_REGIONS.
  * The memblock_allow_resize() enables automatic resizing of the region
  * arrays during addition of new regions. This feature should be used
  * with care so that memory allocated for the region array will not
@@ -101,12 +97,32 @@ struct pglist_data __refdata contig_page_data;
 EXPORT_SYMBOL(contig_page_data);
 #endif
 
+#if defined(CONFIG_ROCKCHIP_THUNDER_BOOT) && defined(CONFIG_SMP)
+static unsigned long defer_start __initdata;
+static unsigned long defer_end __initdata;
+
+#define DEFAULT_DEFER_FREE_BLOCK_SIZE SZ_256M
+static unsigned long defer_free_block_size __initdata =
+	DEFAULT_DEFER_FREE_BLOCK_SIZE;
+
+static int __init early_defer_free_block_size(char *p)
+{
+	defer_free_block_size = memparse(p, &p);
+
+	pr_debug("defer_free_block_size = 0x%lx\n", defer_free_block_size);
+
+	return 0;
+}
+
+early_param("defer_free_block_size", early_defer_free_block_size);
+#endif
+
 unsigned long max_low_pfn;
 unsigned long min_low_pfn;
 unsigned long max_pfn;
 unsigned long long max_possible_pfn;
 
-static struct memblock_region memblock_memory_init_regions[INIT_MEMBLOCK_MEMORY_REGIONS] __initdata_memblock;
+static struct memblock_region memblock_memory_init_regions[INIT_MEMBLOCK_REGIONS] __initdata_memblock;
 static struct memblock_region memblock_reserved_init_regions[INIT_MEMBLOCK_RESERVED_REGIONS] __initdata_memblock;
 #ifdef CONFIG_HAVE_MEMBLOCK_PHYS_MAP
 static struct memblock_region memblock_physmem_init_regions[INIT_PHYSMEM_REGIONS];
@@ -115,7 +131,7 @@ static struct memblock_region memblock_physmem_init_regions[INIT_PHYSMEM_REGIONS
 struct memblock memblock __initdata_memblock = {
 	.memory.regions		= memblock_memory_init_regions,
 	.memory.cnt		= 1,	/* empty dummy entry */
-	.memory.max		= INIT_MEMBLOCK_MEMORY_REGIONS,
+	.memory.max		= INIT_MEMBLOCK_REGIONS,
 	.memory.name		= "memory",
 
 	.reserved.regions	= memblock_reserved_init_regions,
@@ -161,11 +177,6 @@ static int memblock_can_resize __initdata_memblock;
 static int memblock_memory_in_slab __initdata_memblock = 0;
 static int memblock_reserved_in_slab __initdata_memblock = 0;
 
-bool __init_memblock memblock_has_mirror(void)
-{
-	return system_has_some_mirror;
-}
-
 static enum memblock_flags __init_memblock choose_memblock_flags(void)
 {
 	return system_has_some_mirror ? MEMBLOCK_MIRROR : MEMBLOCK_NONE;
@@ -190,8 +201,6 @@ bool __init_memblock memblock_overlaps_region(struct memblock_type *type,
 					phys_addr_t base, phys_addr_t size)
 {
 	unsigned long i;
-
-	memblock_cap_size(base, &size);
 
 	for (i = 0; i < type->cnt; i++)
 		if (memblock_addrs_overlap(base, size, type->regions[i].base,
@@ -336,7 +345,7 @@ again:
 					    NUMA_NO_NODE, flags);
 
 	if (!ret && (flags & MEMBLOCK_MIRROR)) {
-		pr_warn_ratelimited("Could not allocate %pap bytes of mirrored memory\n",
+		pr_warn("Could not allocate %pap bytes of mirrored memory\n",
 			&size);
 		flags &= ~MEMBLOCK_MIRROR;
 		goto again;
@@ -375,20 +384,14 @@ void __init memblock_discard(void)
 		addr = __pa(memblock.reserved.regions);
 		size = PAGE_ALIGN(sizeof(struct memblock_region) *
 				  memblock.reserved.max);
-		if (memblock_reserved_in_slab)
-			kfree(memblock.reserved.regions);
-		else
-			__memblock_free_late(addr, size);
+		__memblock_free_late(addr, size);
 	}
 
 	if (memblock.memory.regions != memblock_memory_init_regions) {
 		addr = __pa(memblock.memory.regions);
 		size = PAGE_ALIGN(sizeof(struct memblock_region) *
 				  memblock.memory.max);
-		if (memblock_memory_in_slab)
-			kfree(memblock.memory.regions);
-		else
-			__memblock_free_late(addr, size);
+		__memblock_free_late(addr, size);
 	}
 
 	memblock_memory = NULL;
@@ -823,6 +826,9 @@ int __init_memblock memblock_free(phys_addr_t base, phys_addr_t size)
 	kmemleak_free_part_phys(base, size);
 	return memblock_remove_range(&memblock.reserved, base, size);
 }
+#ifdef CONFIG_ARCH_KEEP_MEMBLOCK
+EXPORT_SYMBOL_GPL(memblock_free);
+#endif
 
 int __init_memblock memblock_reserve(phys_addr_t base, phys_addr_t size)
 {
@@ -851,7 +857,7 @@ int __init_memblock memblock_physmem_add(phys_addr_t base, phys_addr_t size)
  * @base: base address of the region
  * @size: size of the region
  * @set: set or clear the flag
- * @flag: the flag to update
+ * @flag: the flag to udpate
  *
  * This function isolates region [@base, @base + @size), and sets/clears flag
  *
@@ -942,18 +948,6 @@ int __init_memblock memblock_clear_nomap(phys_addr_t base, phys_addr_t size)
 	return memblock_setclr_flag(base, size, 0, MEMBLOCK_NOMAP);
 }
 
-/**
- * memblock_mark_memmap - Mark a memory region with flag MEMBLOCK_MEMMAP.
- * @base: the base phys addr of the region
- * @size: the size of the region
- *
- * Return: 0 on success, -errno on failure.
- */
-int __init_memblock memblock_mark_memmap(phys_addr_t base, phys_addr_t size)
-{
-	return memblock_setclr_flag(base, size, 1, MEMBLOCK_MEMMAP);
-}
-
 static bool should_skip_region(struct memblock_type *type,
 			       struct memblock_region *m,
 			       int nid, int flags)
@@ -975,10 +969,6 @@ static bool should_skip_region(struct memblock_type *type,
 
 	/* if we want mirror memory skip non-mirror memory regions */
 	if ((flags & MEMBLOCK_MIRROR) && !memblock_is_mirror(m))
-		return true;
-
-	/* skip mirror memory regions with MEMBLOCK_NOMIRROR  */
-	if ((flags & MEMBLOCK_NOMIRROR) && memblock_is_mirror(m))
 		return true;
 
 	/* skip nomap memory unless we were asked for it explicitly */
@@ -1378,77 +1368,9 @@ again:
 
 	if (flags & MEMBLOCK_MIRROR) {
 		flags &= ~MEMBLOCK_MIRROR;
-		pr_warn_ratelimited("Could not allocate %pap bytes of mirrored memory\n",
+		pr_warn("Could not allocate %pap bytes of mirrored memory\n",
 			&size);
 		goto again;
-	}
-
-	return 0;
-
-done:
-	/* Skip kmemleak for kasan_init() due to high volume. */
-	if (end != MEMBLOCK_ALLOC_KASAN)
-		/*
-		 * The min_count is set to 0 so that memblock allocated
-		 * blocks are never reported as leaks. This is because many
-		 * of these blocks are only referred via the physical
-		 * address which is not looked up by kmemleak.
-		 */
-		kmemleak_alloc_phys(found, size, 0, 0);
-
-	return found;
-}
-
-/**
- * memblock_alloc_range_nid - allocate boot memory block
- * @size: size of memory block to be allocated in bytes
- * @align: alignment of the region and block's size
- * @start: the lower bound of the memory region to allocate (phys address)
- * @end: the upper bound of the memory region to allocate (phys address)
- * @nid: nid of the free area to find, %NUMA_NO_NODE for any node
- * @exact_nid: control the allocation fall back to other nodes
- * @flags: alloc memory with specify flag
- *
- * The allocation is performed from memory region limited by
- * memblock.current_limit if @end == %MEMBLOCK_ALLOC_ACCESSIBLE.
- *
- * If the specified node can not hold the requested memory and @exact_nid
- * is false, the allocation falls back to any node in the system.
- *
- * In addition, function sets the min_count to 0 using kmemleak_alloc_phys for
- * allocated boot memory block, so that it is never reported as leaks.
- *
- * Return:
- * Physical address of allocated memory block on success, %0 on failure.
- */
-static phys_addr_t __init memblock_alloc_range_nid_flags(
-	phys_addr_t size, phys_addr_t align, phys_addr_t start, phys_addr_t end,
-	int nid, bool exact_nid, enum memblock_flags flags)
-{
-	phys_addr_t found;
-
-	if (WARN_ONCE(
-		    nid == MAX_NUMNODES,
-		    "Usage of MAX_NUMNODES is deprecated. Use NUMA_NO_NODE instead\n"))
-		nid = NUMA_NO_NODE;
-
-	if (!align) {
-		/* Can't use WARNs this early in boot on powerpc */
-		dump_stack();
-		align = SMP_CACHE_BYTES;
-	}
-
-	found = memblock_find_in_range_node(size, align, start, end, nid,
-					    flags);
-	if (found && !memblock_reserve(found, size))
-		goto done;
-
-	if (nid != NUMA_NO_NODE && !exact_nid) {
-		found = memblock_find_in_range_node(size, align, start,
-						    end, NUMA_NO_NODE,
-						    flags);
-		if (found && !memblock_reserve(found, size))
-			goto done;
 	}
 
 	return 0;
@@ -1484,6 +1406,9 @@ phys_addr_t __init memblock_phys_alloc_range(phys_addr_t size,
 					     phys_addr_t start,
 					     phys_addr_t end)
 {
+	memblock_dbg("%s: %llu bytes align=0x%llx from=%pa max_addr=%pa %pS\n",
+		     __func__, (u64)size, (u64)align, &start, &end,
+		     (void *)_RET_IP_);
 	return memblock_alloc_range_nid(size, align, start, end, NUMA_NO_NODE,
 					false);
 }
@@ -1582,12 +1507,18 @@ void * __init memblock_alloc_exact_nid_raw(
 			phys_addr_t min_addr, phys_addr_t max_addr,
 			int nid)
 {
+	void *ptr;
+
 	memblock_dbg("%s: %llu bytes align=0x%llx nid=%d from=%pa max_addr=%pa %pS\n",
 		     __func__, (u64)size, (u64)align, nid, &min_addr,
 		     &max_addr, (void *)_RET_IP_);
 
-	return memblock_alloc_internal(size, align, min_addr, max_addr, nid,
-				       true);
+	ptr = memblock_alloc_internal(size, align,
+					   min_addr, max_addr, nid, true);
+	if (ptr && size > 0)
+		page_init_poison(ptr, size);
+
+	return ptr;
 }
 
 /**
@@ -1614,41 +1545,14 @@ void * __init memblock_alloc_try_nid_raw(
 			phys_addr_t min_addr, phys_addr_t max_addr,
 			int nid)
 {
-	memblock_dbg("%s: %llu bytes align=0x%llx nid=%d from=%pa max_addr=%pa %pS\n",
-		     __func__, (u64)size, (u64)align, nid, &min_addr,
-		     &max_addr, (void *)_RET_IP_);
-
-	return memblock_alloc_internal(size, align, min_addr, max_addr, nid,
-				       false);
-}
-
-void * __init memblock_alloc_try_nid_raw_flags(
-			phys_addr_t size, phys_addr_t align,
-			phys_addr_t min_addr, phys_addr_t max_addr,
-			int nid, enum memblock_flags flags)
-{
-	phys_addr_t alloc;
 	void *ptr;
 
 	memblock_dbg("%s: %llu bytes align=0x%llx nid=%d from=%pa max_addr=%pa %pS\n",
 		     __func__, (u64)size, (u64)align, nid, &min_addr,
 		     &max_addr, (void *)_RET_IP_);
 
-	if (max_addr > memblock.current_limit)
-		max_addr = memblock.current_limit;
-
-	alloc = memblock_alloc_range_nid_flags(size, align, min_addr, max_addr,
-					       nid, false, flags);
-
-	/* retry allocation without lower limit */
-	if (!alloc && min_addr)
-		alloc = memblock_alloc_range_nid_flags(size, align, 0, max_addr,
-						       nid, false, flags);
-
-	if (!alloc)
-		return NULL;
-
-	ptr = phys_to_virt(alloc);
+	ptr = memblock_alloc_internal(size, align,
+					   min_addr, max_addr, nid, false);
 	if (ptr && size > 0)
 		page_init_poison(ptr, size);
 
@@ -1742,6 +1646,7 @@ phys_addr_t __init_memblock memblock_end_of_DRAM(void)
 
 	return (memblock.memory.regions[idx].base + memblock.memory.regions[idx].size);
 }
+EXPORT_SYMBOL_GPL(memblock_end_of_DRAM);
 
 static phys_addr_t __init_memblock __find_max_addr(phys_addr_t limit)
 {
@@ -1914,6 +1819,7 @@ bool __init_memblock memblock_is_region_memory(phys_addr_t base, phys_addr_t siz
  */
 bool __init_memblock memblock_is_region_reserved(phys_addr_t base, phys_addr_t size)
 {
+	memblock_cap_size(base, &size);
 	return memblock_overlaps_region(&memblock.reserved, base, size);
 }
 
@@ -2027,6 +1933,28 @@ static void __init __free_pages_memory(unsigned long start, unsigned long end)
 	}
 }
 
+#if defined(CONFIG_ROCKCHIP_THUNDER_BOOT) && defined(CONFIG_SMP)
+int __init defer_free_memblock(void *unused)
+{
+	if (defer_start == 0)
+		return 0;
+
+	pr_debug("start = %ld, end = %ld\n", defer_start, defer_end);
+
+	__free_pages_memory(defer_start, defer_end);
+
+	totalram_pages_add(defer_end - defer_start);
+
+	pr_info("%s: size %luM free %luM [%luM - %luM] total %luM\n", __func__,
+		defer_free_block_size >> 20,
+		(defer_end - defer_start) >> (20 - PAGE_SHIFT),
+		defer_end >> (20 - PAGE_SHIFT),
+		defer_start >> (20 - PAGE_SHIFT),
+		totalram_pages() >> (20 - PAGE_SHIFT));
+	return 0;
+}
+#endif
+
 static unsigned long __init __free_memory_core(phys_addr_t start,
 				 phys_addr_t end)
 {
@@ -2036,6 +1964,15 @@ static unsigned long __init __free_memory_core(phys_addr_t start,
 
 	if (start_pfn >= end_pfn)
 		return 0;
+
+#if defined(CONFIG_ROCKCHIP_THUNDER_BOOT) && defined(CONFIG_SMP)
+	if ((end - start) > defer_free_block_size) {
+		defer_start = start_pfn;
+		defer_end = end_pfn;
+
+		return 0;
+	}
+#endif
 
 	__free_pages_memory(start_pfn, end_pfn);
 

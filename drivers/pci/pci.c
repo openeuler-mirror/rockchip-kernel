@@ -31,8 +31,8 @@
 #include <linux/vmalloc.h>
 #include <asm/dma.h>
 #include <linux/aer.h>
-#ifdef CONFIG_MACH_LOONGSON64
-#include <linux/suspend.h>
+#ifndef  __GENKSYMS__
+#include <trace/hooks/pci.h>
 #endif
 #include "pci.h"
 
@@ -67,12 +67,16 @@ struct pci_pme_device {
 static void pci_dev_d3_sleep(struct pci_dev *dev)
 {
 	unsigned int delay = dev->d3hot_delay;
+	int err = -EOPNOTSUPP;
 
 	if (delay < pci_pm_d3hot_delay)
 		delay = pci_pm_d3hot_delay;
 
-	if (delay)
-		msleep(delay);
+	if (delay) {
+		trace_android_rvh_pci_d3_sleep(dev, delay, &err);
+		if (err == -EOPNOTSUPP)
+			msleep(delay);
+	}
 }
 
 #ifdef CONFIG_PCI_DOMAINS
@@ -149,15 +153,6 @@ EXPORT_SYMBOL_GPL(pci_ats_disabled);
 static bool pci_bridge_d3_disable;
 /* Force bridge_d3 for all PCIe ports */
 static bool pci_bridge_d3_force;
-
-#ifdef CONFIG_MACH_LOONGSON64
-
-#ifndef CONFIG_PM_SLEEP
-suspend_state_t pm_suspend_target_state;
-#define pm_suspend_target_state (PM_SUSPEND_ON)
-#endif
-
-#endif
 
 static int __init pcie_port_pm_setup(char *str)
 {
@@ -277,7 +272,7 @@ static int pci_dev_str_match_path(struct pci_dev *dev, const char *path,
 
 	*endptr = strchrnul(path, ';');
 
-	wpath = kmemdup_nul(path, *endptr - path, GFP_ATOMIC);
+	wpath = kmemdup_nul(path, *endptr - path, GFP_KERNEL);
 	if (!wpath)
 		return -ENOMEM;
 
@@ -1565,9 +1560,6 @@ int pci_save_state(struct pci_dev *dev)
 		pci_dbg(dev, "saving config space at offset %#x (reading %#x)\n",
 			i * 4, dev->saved_config_space[i]);
 	}
-	if (dev->hdr_type == PCI_HEADER_TYPE_BRIDGE)
-		dev->saved_config_space[PCI_BRIDGE_CONTROL / 4] &=
-			~(PCI_BRIDGE_CTL_BUS_RESET << 16);
 	dev->state_saved = true;
 
 	i = pci_save_pcie_state(dev);
@@ -1895,7 +1887,11 @@ static int pci_enable_device_flags(struct pci_dev *dev, unsigned long flags)
 	 * so that things like MSI message writing will behave as expected
 	 * (e.g. if the device really is in D0 at enable time).
 	 */
-	pci_update_current_state(dev, dev->current_state);
+	if (dev->pm_cap) {
+		u16 pmcsr;
+		pci_read_config_word(dev, dev->pm_cap + PCI_PM_CTRL, &pmcsr);
+		dev->current_state = (pmcsr & PCI_PM_CTRL_STATE_MASK);
+	}
 
 	if (atomic_inc_return(&dev->enable_cnt) > 1)
 		return 0;		/* already enabled */
@@ -2845,18 +2841,6 @@ static const struct dmi_system_id bridge_d3_blacklist[] = {
 			DMI_MATCH(DMI_BOARD_NAME, "X299 DESIGNARE EX-CF"),
 		},
 	},
-	{
-		/*
-		 * Downstream device is not accessible after putting a root port
-		 * into D3cold and back into D0 on Elo i2.
-		 */
-		.ident = "Elo i2",
-		.matches = {
-			DMI_MATCH(DMI_SYS_VENDOR, "Elo Touch Solutions"),
-			DMI_MATCH(DMI_PRODUCT_NAME, "Elo i2"),
-			DMI_MATCH(DMI_PRODUCT_VERSION, "RevB"),
-		},
-	},
 #endif
 	{ }
 };
@@ -3686,14 +3670,6 @@ int pci_enable_atomic_ops_to_root(struct pci_dev *dev, u32 cap_mask)
 	struct pci_dev *bridge;
 	u32 cap, ctl2;
 
-	/*
-	 * Per PCIe r5.0, sec 9.3.5.10, the AtomicOp Requester Enable bit
-	 * in Device Control 2 is reserved in VFs and the PF value applies
-	 * to all associated VFs.
-	 */
-	if (dev->is_virtfn)
-		return -EINVAL;
-
 	if (!pci_is_pcie(dev))
 		return -EINVAL;
 
@@ -4074,7 +4050,6 @@ phys_addr_t pci_pio_to_address(unsigned long pio)
 
 	return address;
 }
-EXPORT_SYMBOL_GPL(pci_pio_to_address);
 
 unsigned long __weak pci_address_to_pio(phys_addr_t address)
 {
@@ -5000,18 +4975,18 @@ static int pci_dev_reset_slot_function(struct pci_dev *dev, int probe)
 
 static void pci_dev_lock(struct pci_dev *dev)
 {
+	pci_cfg_access_lock(dev);
 	/* block PM suspend, driver probe, etc. */
 	device_lock(&dev->dev);
-	pci_cfg_access_lock(dev);
 }
 
 /* Return 1 on successful lock, 0 on contention */
 static int pci_dev_trylock(struct pci_dev *dev)
 {
-	if (device_trylock(&dev->dev)) {
-		if (pci_cfg_access_trylock(dev))
+	if (pci_cfg_access_trylock(dev)) {
+		if (device_trylock(&dev->dev))
 			return 1;
-		device_unlock(&dev->dev);
+		pci_cfg_access_unlock(dev);
 	}
 
 	return 0;
@@ -5019,8 +4994,8 @@ static int pci_dev_trylock(struct pci_dev *dev)
 
 static void pci_dev_unlock(struct pci_dev *dev)
 {
-	pci_cfg_access_unlock(dev);
 	device_unlock(&dev->dev);
+	pci_cfg_access_unlock(dev);
 }
 
 static void pci_dev_save_and_disable(struct pci_dev *dev)
@@ -5762,9 +5737,7 @@ int pcie_set_readrq(struct pci_dev *dev, int rq)
 {
 	u16 v;
 	int ret;
-#ifdef CONFIG_MACH_LOONGSON64
-	struct pci_host_bridge *bridge = pci_find_host_bridge(dev->bus);
-#endif
+
 	if (rq < 128 || rq > 4096 || !is_power_of_2(rq))
 		return -EINVAL;
 
@@ -5781,13 +5754,6 @@ int pcie_set_readrq(struct pci_dev *dev, int rq)
 	}
 
 	v = (ffs(rq) - 8) << 12;
-#ifdef CONFIG_MACH_LOONGSON64
-	if (pm_suspend_target_state == PM_SUSPEND_ON &&
-		bridge->no_inc_mrrs) {
-		if (rq > pcie_get_readrq(dev))
-			return -EINVAL;
-	}
-#endif
 
 	ret = pcie_capability_clear_and_set_word(dev, PCI_EXP_DEVCTL,
 						  PCI_EXP_DEVCTL_READRQ, v);
@@ -6184,8 +6150,6 @@ bool pci_device_is_present(struct pci_dev *pdev)
 {
 	u32 v;
 
-	/* Check PF if pdev is a VF, since VF Vendor/Device IDs are 0xffff */
-	pdev = pci_physfn(pdev);
 	if (pci_dev_is_disconnected(pdev))
 		return false;
 	return pci_bus_read_dev_vendor_id(pdev->bus, pdev->devfn, &v, 0);

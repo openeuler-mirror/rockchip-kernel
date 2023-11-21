@@ -71,7 +71,7 @@ struct ffs_function {
 	struct ffs_data			*ffs;
 
 	struct ffs_ep			*eps;
-	u8				eps_revmap[16];
+	u8				eps_revmap[32];
 	short				*interfaces_nums;
 
 	struct usb_function		function;
@@ -568,7 +568,7 @@ static ssize_t ffs_ep0_read(struct file *file, char __user *buf,
 		spin_unlock_irq(&ffs->ev.waitq.lock);
 
 		if (likely(len)) {
-			data = kmalloc(len, GFP_KERNEL);
+			data = kmalloc(ALIGN(len, cache_line_size()), GFP_KERNEL);
 			if (unlikely(!data)) {
 				ret = -ENOMEM;
 				goto done_mutex;
@@ -799,7 +799,7 @@ static inline void *ffs_alloc_buffer(struct ffs_io_data *io_data,
 	if (io_data->use_sg)
 		return ffs_build_sg_list(&io_data->sgt, data_len);
 
-	return kmalloc(data_len, GFP_KERNEL);
+	return kmalloc(ALIGN(data_len, cache_line_size()), GFP_KERNEL);
 }
 
 static inline void ffs_free_buffer(struct ffs_io_data *io_data)
@@ -1710,24 +1710,16 @@ static void ffs_data_put(struct ffs_data *ffs)
 
 static void ffs_data_closed(struct ffs_data *ffs)
 {
-	struct ffs_epfile *epfiles;
-	unsigned long flags;
-
 	ENTER();
 
 	if (atomic_dec_and_test(&ffs->opened)) {
 		if (ffs->no_disconnect) {
 			ffs->state = FFS_DEACTIVATED;
-			spin_lock_irqsave(&ffs->eps_lock, flags);
-			epfiles = ffs->epfiles;
-			ffs->epfiles = NULL;
-			spin_unlock_irqrestore(&ffs->eps_lock,
-							flags);
-
-			if (epfiles)
-				ffs_epfiles_destroy(epfiles,
-						 ffs->eps_count);
-
+			if (ffs->epfiles) {
+				ffs_epfiles_destroy(ffs->epfiles,
+						   ffs->eps_count);
+				ffs->epfiles = NULL;
+			}
 			if (ffs->setup_state == FFS_SETUP_PENDING)
 				__ffs_ep0_stall(ffs);
 		} else {
@@ -1774,34 +1766,17 @@ static struct ffs_data *ffs_data_new(const char *dev_name)
 
 static void ffs_data_clear(struct ffs_data *ffs)
 {
-	struct ffs_epfile *epfiles;
-	unsigned long flags;
-
 	ENTER();
 
 	ffs_closed(ffs);
 
 	BUG_ON(ffs->gadget);
 
-	spin_lock_irqsave(&ffs->eps_lock, flags);
-	epfiles = ffs->epfiles;
-	ffs->epfiles = NULL;
-	spin_unlock_irqrestore(&ffs->eps_lock, flags);
+	if (ffs->epfiles)
+		ffs_epfiles_destroy(ffs->epfiles, ffs->eps_count);
 
-	/*
-	 * potential race possible between ffs_func_eps_disable
-	 * & ffs_epfile_release therefore maintaining a local
-	 * copy of epfile will save us from use-after-free.
-	 */
-	if (epfiles) {
-		ffs_epfiles_destroy(epfiles, ffs->eps_count);
-		ffs->epfiles = NULL;
-	}
-
-	if (ffs->ffs_eventfd) {
+	if (ffs->ffs_eventfd)
 		eventfd_ctx_put(ffs->ffs_eventfd);
-		ffs->ffs_eventfd = NULL;
-	}
 
 	kfree(ffs->raw_descs_data);
 	kfree(ffs->raw_strings);
@@ -1814,6 +1789,7 @@ static void ffs_data_reset(struct ffs_data *ffs)
 
 	ffs_data_clear(ffs);
 
+	ffs->epfiles = NULL;
 	ffs->raw_descs_data = NULL;
 	ffs->raw_descs = NULL;
 	ffs->raw_strings = NULL;
@@ -1942,15 +1918,12 @@ static void ffs_epfiles_destroy(struct ffs_epfile *epfiles, unsigned count)
 
 static void ffs_func_eps_disable(struct ffs_function *func)
 {
-	struct ffs_ep *ep;
-	struct ffs_epfile *epfile;
-	unsigned short count;
+	struct ffs_ep *ep         = func->eps;
+	struct ffs_epfile *epfile = func->ffs->epfiles;
+	unsigned count            = func->ffs->eps_count;
 	unsigned long flags;
 
 	spin_lock_irqsave(&func->ffs->eps_lock, flags);
-	count = func->ffs->eps_count;
-	epfile = func->ffs->epfiles;
-	ep = func->eps;
 	while (count--) {
 		/* pending requests get nuked */
 		if (likely(ep->ep))
@@ -1968,18 +1941,14 @@ static void ffs_func_eps_disable(struct ffs_function *func)
 
 static int ffs_func_eps_enable(struct ffs_function *func)
 {
-	struct ffs_data *ffs;
-	struct ffs_ep *ep;
-	struct ffs_epfile *epfile;
-	unsigned short count;
+	struct ffs_data *ffs      = func->ffs;
+	struct ffs_ep *ep         = func->eps;
+	struct ffs_epfile *epfile = ffs->epfiles;
+	unsigned count            = ffs->eps_count;
 	unsigned long flags;
 	int ret = 0;
 
 	spin_lock_irqsave(&func->ffs->eps_lock, flags);
-	ffs = func->ffs;
-	ep = func->eps;
-	epfile = ffs->epfiles;
-	count = ffs->eps_count;
 	while(count--) {
 		ep->ep->driver_data = ep;
 
@@ -2827,7 +2796,7 @@ static int __ffs_func_bind_do_descs(enum ffs_entity_type type, u8 *valuep,
 	struct ffs_function *func = priv;
 	struct ffs_ep *ffs_ep;
 	unsigned ep_desc_id;
-	int idx;
+	int idx, ep_num;
 	static const char *speed_names[] = { "full", "high", "super" };
 
 	if (type != FFS_DESCRIPTOR)
@@ -2900,8 +2869,9 @@ static int __ffs_func_bind_do_descs(enum ffs_entity_type type, u8 *valuep,
 
 		ffs_ep->ep  = ep;
 		ffs_ep->req = req;
-		func->eps_revmap[ds->bEndpointAddress &
-				 USB_ENDPOINT_NUMBER_MASK] = idx + 1;
+		ep_num = ((ds->bEndpointAddress & USB_ENDPOINT_DIR_MASK) >> 3) |
+			 (ds->bEndpointAddress & USB_ENDPOINT_NUMBER_MASK);
+		func->eps_revmap[ep_num] = idx + 1;
 		/*
 		 * If we use virtual address mapping, we restore
 		 * original bEndpointAddress value.
@@ -3436,7 +3406,10 @@ static void ffs_func_resume(struct usb_function *f)
 
 static int ffs_func_revmap_ep(struct ffs_function *func, u8 num)
 {
-	num = func->eps_revmap[num & USB_ENDPOINT_NUMBER_MASK];
+	int ep_num = ((num & USB_ENDPOINT_DIR_MASK) >> 3) |
+		     (num & USB_ENDPOINT_NUMBER_MASK);
+
+	num = func->eps_revmap[ep_num];
 	return num ? num : -EDOM;
 }
 

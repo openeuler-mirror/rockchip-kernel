@@ -1305,6 +1305,14 @@ err:
 	return -ENOMEM;
 }
 
+int i40e_alloc_rx_bi(struct i40e_ring *rx_ring)
+{
+	unsigned long sz = sizeof(*rx_ring->rx_bi) * rx_ring->count;
+
+	rx_ring->rx_bi = kzalloc(sz, GFP_KERNEL);
+	return rx_ring->rx_bi ? 0 : -ENOMEM;
+}
+
 static void i40e_clear_rx_bi(struct i40e_ring *rx_ring)
 {
 	memset(rx_ring->rx_bi, 0, sizeof(*rx_ring->rx_bi) * rx_ring->count);
@@ -1434,11 +1442,6 @@ int i40e_setup_rx_descriptors(struct i40e_ring *rx_ring)
 	}
 
 	rx_ring->xdp_prog = rx_ring->vsi->xdp_prog;
-
-	rx_ring->rx_bi =
-		kcalloc(rx_ring->count, sizeof(*rx_ring->rx_bi), GFP_KERNEL);
-	if (!rx_ring->rx_bi)
-		return -ENOMEM;
 
 	return 0;
 }
@@ -1826,6 +1829,19 @@ static bool i40e_cleanup_headers(struct i40e_ring *rx_ring, struct sk_buff *skb,
 }
 
 /**
+ * i40e_page_is_reusable - check if any reuse is possible
+ * @page: page struct to check
+ *
+ * A page is not reusable if it was allocated under low memory
+ * conditions, or it's not in the same NUMA node as this CPU.
+ */
+static inline bool i40e_page_is_reusable(struct page *page)
+{
+	return (page_to_nid(page) == numa_mem_id()) &&
+		!page_is_pfmemalloc(page);
+}
+
+/**
  * i40e_can_reuse_rx_page - Determine if this page can be reused by
  * the adapter for another receive
  *
@@ -1860,7 +1876,7 @@ static bool i40e_can_reuse_rx_page(struct i40e_rx_buffer *rx_buffer,
 	struct page *page = rx_buffer->page;
 
 	/* Is any reuse possible? */
-	if (!dev_page_is_reusable(page))
+	if (unlikely(!i40e_page_is_reusable(page)))
 		return false;
 
 #if (PAGE_SIZE < 8192)

@@ -542,7 +542,7 @@ static int flock64_to_posix_lock(struct file *filp, struct file_lock *fl,
 	if (l->l_len > 0) {
 		if (l->l_len - 1 > OFFSET_MAX - fl->fl_start)
 			return -EOVERFLOW;
-		fl->fl_end = fl->fl_start + (l->l_len - 1);
+		fl->fl_end = fl->fl_start + l->l_len - 1;
 
 	} else if (l->l_len < 0) {
 		if (fl->fl_start + l->l_len < 0)
@@ -2812,29 +2812,6 @@ int vfs_cancel_lock(struct file *filp, struct file_lock *fl)
 	return 0;
 }
 EXPORT_SYMBOL_GPL(vfs_cancel_lock);
-
-/**
- * vfs_inode_has_locks - are any file locks held on @inode?
- * @inode: inode to check for locks
- *
- * Return true if there are any FL_POSIX or FL_FLOCK locks currently
- * set on @inode.
- */
-bool vfs_inode_has_locks(struct inode *inode)
-{
-	struct file_lock_context *ctx;
-	bool ret;
-
-	ctx = smp_load_acquire(&inode->i_flctx);
-	if (!ctx)
-		return false;
-
-	spin_lock(&ctx->flc_lock);
-	ret = !list_empty(&ctx->flc_posix) || !list_empty(&ctx->flc_flock);
-	spin_unlock(&ctx->flc_lock);
-	return ret;
-}
-EXPORT_SYMBOL_GPL(vfs_inode_has_locks);
 
 #ifdef CONFIG_PROC_FS
 #include <linux/proc_fs.h>

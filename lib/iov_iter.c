@@ -467,6 +467,20 @@ void iov_iter_init(struct iov_iter *i, unsigned int direction,
 }
 EXPORT_SYMBOL(iov_iter_init);
 
+static void memcpy_from_page(char *to, struct page *page, size_t offset, size_t len)
+{
+	char *from = kmap_atomic(page);
+	memcpy(to, from + offset, len);
+	kunmap_atomic(from);
+}
+
+static void memcpy_to_page(struct page *page, size_t offset, const char *from, size_t len)
+{
+	char *to = kmap_atomic(page);
+	memcpy(to + offset, from, len);
+	kunmap_atomic(to);
+}
+
 static void memzero_page(struct page *page, size_t offset, size_t len)
 {
 	char *addr = kmap_atomic(page);
@@ -750,14 +764,6 @@ size_t _copy_mc_to_iter(const void *addr, size_t bytes, struct iov_iter *i)
 EXPORT_SYMBOL_GPL(_copy_mc_to_iter);
 #endif /* CONFIG_ARCH_HAS_COPY_MC */
 
-static void *memcpy_iter(void *to, const void *from, __kernel_size_t size)
-{
-	if (IS_ENABLED(CONFIG_ARCH_HAS_COPY_MC) && current->flags & PF_COREDUMP_MCS)
-		return (void *)copy_mc_to_kernel(to, from, size);
-	else
-		return memcpy(to, from, size);
-}
-
 size_t _copy_from_iter(void *addr, size_t bytes, struct iov_iter *i)
 {
 	char *to = addr;
@@ -771,7 +777,7 @@ size_t _copy_from_iter(void *addr, size_t bytes, struct iov_iter *i)
 		copyin((to += v.iov_len) - v.iov_len, v.iov_base, v.iov_len),
 		memcpy_from_page((to += v.bv_len) - v.bv_len, v.bv_page,
 				 v.bv_offset, v.bv_len),
-		memcpy_iter((to += v.iov_len) - v.iov_len, v.iov_base, v.iov_len)
+		memcpy((to += v.iov_len) - v.iov_len, v.iov_base, v.iov_len)
 	)
 
 	return bytes;
@@ -1007,7 +1013,7 @@ size_t iov_iter_copy_from_user_atomic(struct page *page,
 		copyin((p += v.iov_len) - v.iov_len, v.iov_base, v.iov_len),
 		memcpy_from_page((p += v.bv_len) - v.bv_len, v.bv_page,
 				 v.bv_offset, v.bv_len),
-		memcpy_iter((p += v.iov_len) - v.iov_len, v.iov_base, v.iov_len)
+		memcpy((p += v.iov_len) - v.iov_len, v.iov_base, v.iov_len)
 	)
 	kunmap_atomic(kaddr);
 	return bytes;
@@ -1339,7 +1345,7 @@ ssize_t iov_iter_get_pages(struct iov_iter *i,
 		res = get_user_pages_fast(addr, n,
 				iov_iter_rw(i) != WRITE ?  FOLL_WRITE : 0,
 				pages);
-		if (unlikely(res <= 0))
+		if (unlikely(res < 0))
 			return res;
 		return (res == n ? len : res * PAGE_SIZE) - *start;
 	0;}),({
@@ -1420,9 +1426,8 @@ ssize_t iov_iter_get_pages_alloc(struct iov_iter *i,
 			return -ENOMEM;
 		res = get_user_pages_fast(addr, n,
 				iov_iter_rw(i) != WRITE ?  FOLL_WRITE : 0, p);
-		if (unlikely(res <= 0)) {
+		if (unlikely(res < 0)) {
 			kvfree(p);
-			*pages = NULL;
 			return res;
 		}
 		*pages = p;
@@ -1830,38 +1835,24 @@ int import_single_range(int rw, void __user *buf, size_t len,
 }
 EXPORT_SYMBOL(import_single_range);
 
-/**
- * iov_iter_restore() - Restore a &struct iov_iter to the same state as when
- *     iov_iter_save_state() was called.
- *
- * @i: &struct iov_iter to restore
- * @state: state to restore from
- *
- * Used after iov_iter_save_state() to bring restore @i, if operations may
- * have advanced it.
- *
- * Note: only works on ITER_IOVEC, ITER_BVEC, and ITER_KVEC
- */
-void iov_iter_restore(struct iov_iter *i, struct iov_iter_state *state)
+int iov_iter_for_each_range(struct iov_iter *i, size_t bytes,
+			    int (*f)(struct kvec *vec, void *context),
+			    void *context)
 {
-	if (WARN_ON_ONCE(!iov_iter_is_bvec(i) && !iter_is_iovec(i)) &&
-			 !iov_iter_is_kvec(i))
-		return;
-	i->iov_offset = state->iov_offset;
-	i->count = state->count;
-	/*
-	 * For the *vec iters, nr_segs + iov is constant - if we increment
-	 * the vec, then we also decrement the nr_segs count. Hence we don't
-	 * need to track both of these, just one is enough and we can deduct
-	 * the other from that. ITER_KVEC and ITER_IOVEC are the same struct
-	 * size, so we can just increment the iov pointer as they are unionzed.
-	 * ITER_BVEC _may_ be the same size on some archs, but on others it is
-	 * not. Be safe and handle it separately.
-	 */
-	BUILD_BUG_ON(sizeof(struct iovec) != sizeof(struct kvec));
-	if (iov_iter_is_bvec(i))
-		i->bvec -= state->nr_segs - i->nr_segs;
-	else
-		i->iov -= state->nr_segs - i->nr_segs;
-	i->nr_segs = state->nr_segs;
+	struct kvec w;
+	int err = -EINVAL;
+	if (!bytes)
+		return 0;
+
+	iterate_all_kinds(i, bytes, v, -EINVAL, ({
+		w.iov_base = kmap(v.bv_page) + v.bv_offset;
+		w.iov_len = v.bv_len;
+		err = f(&w, context);
+		kunmap(v.bv_page);
+		err;}), ({
+		w = v;
+		err = f(&w, context);})
+	)
+	return err;
 }
+EXPORT_SYMBOL(iov_iter_for_each_range);

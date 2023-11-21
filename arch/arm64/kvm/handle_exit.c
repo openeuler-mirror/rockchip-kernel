@@ -14,7 +14,6 @@
 #include <asm/esr.h>
 #include <asm/exception.h>
 #include <asm/kvm_asm.h>
-#include <asm/kvm_coproc.h>
 #include <asm/kvm_emulate.h>
 #include <asm/kvm_mmu.h>
 #include <asm/debug-monitors.h>
@@ -61,8 +60,7 @@ static int handle_smc(struct kvm_vcpu *vcpu)
 	 * otherwise return to the same address...
 	 */
 	vcpu_set_reg(vcpu, 0, ~0UL);
-	kvm_skip_instr(vcpu, kvm_vcpu_trap_il_is32bit(vcpu));
-	vcpu->stat.smc_exit_stat++;
+	kvm_incr_pc(vcpu);
 	return 1;
 }
 
@@ -82,55 +80,26 @@ static int handle_no_fpsimd(struct kvm_vcpu *vcpu)
  *
  * @vcpu:	the vcpu pointer
  *
- * WFE[T]: Yield the CPU and come back to this vcpu when the scheduler
+ * WFE: Yield the CPU and come back to this vcpu when the scheduler
  * decides to.
  * WFI: Simply call kvm_vcpu_block(), which will halt execution of
  * world-switches and schedule other host processes until there is an
  * incoming IRQ or FIQ to the VM.
- * WFIT: Same as WFI, with a timed wakeup implemented as a background timer
- *
- * WF{I,E}T can immediately return if the deadline has already expired.
  */
 static int kvm_handle_wfx(struct kvm_vcpu *vcpu)
 {
-	u64 esr = kvm_vcpu_get_esr(vcpu);
-
-	if (esr & ESR_ELx_WFx_ISS_WFE) {
+	if (kvm_vcpu_get_esr(vcpu) & ESR_ELx_WFx_ISS_WFE) {
 		trace_kvm_wfx_arm64(*vcpu_pc(vcpu), true);
 		vcpu->stat.wfe_exit_stat++;
+		kvm_vcpu_on_spin(vcpu, vcpu_mode_priv(vcpu));
 	} else {
 		trace_kvm_wfx_arm64(*vcpu_pc(vcpu), false);
 		vcpu->stat.wfi_exit_stat++;
-	}
-
-	if (esr & ESR_ELx_WFx_ISS_WFxT) {
-		if (esr & ESR_ELx_WFx_ISS_RV) {
-			u64 val, now;
-
-			now = kvm_arm_timer_get_reg(vcpu, KVM_REG_ARM_TIMER_CNT);
-			val = vcpu_get_reg(vcpu, kvm_vcpu_sys_get_rt(vcpu));
-
-			if (now >= val)
-				goto out;
-		} else {
-			/* Treat WFxT as WFx if RN is invalid */
-			esr &= ~ESR_ELx_WFx_ISS_WFxT;
-		}
-	}
-
-	if (esr & ESR_ELx_WFx_ISS_WFE) {
-		kvm_vcpu_on_spin(vcpu, vcpu_mode_priv(vcpu));
-	} else {
-		vcpu->arch.pvsched.pv_unhalted = false;
-		if (esr & ESR_ELx_WFx_ISS_WFxT)
-			vcpu->arch.flags |= KVM_ARM64_WFIT;
 		kvm_vcpu_block(vcpu);
-		vcpu->arch.flags &= ~KVM_ARM64_WFIT;
 		kvm_clear_request(KVM_REQ_UNHALT, vcpu);
 	}
 
-out:
-	kvm_skip_instr(vcpu, kvm_vcpu_trap_il_is32bit(vcpu));
+	kvm_incr_pc(vcpu);
 
 	return 1;
 }
@@ -154,7 +123,6 @@ static int kvm_handle_guest_debug(struct kvm_vcpu *vcpu)
 
 	run->exit_reason = KVM_EXIT_DEBUG;
 	run->debug.arch.hsr = esr;
-	vcpu->stat.debug_exit_stat++;
 
 	switch (ESR_ELx_EC(esr)) {
 	case ESR_ELx_EC_WATCHPT_LOW:
@@ -183,7 +151,6 @@ static int kvm_handle_unknown_ec(struct kvm_vcpu *vcpu)
 		      esr, esr_get_class_string(esr));
 
 	kvm_inject_undefined(vcpu);
-	vcpu->stat.unknown_ec_exit_stat++;
 	return 1;
 }
 
@@ -191,7 +158,6 @@ static int handle_sve(struct kvm_vcpu *vcpu)
 {
 	/* Until SVE is supported for guests: */
 	kvm_inject_undefined(vcpu);
-	vcpu->stat.sve_exit_stat++;
 	return 1;
 }
 
@@ -254,16 +220,13 @@ static int handle_trap_exceptions(struct kvm_vcpu *vcpu)
 	 * that fail their condition code check"
 	 */
 	if (!kvm_condition_valid(vcpu)) {
-		kvm_skip_instr(vcpu, kvm_vcpu_trap_il_is32bit(vcpu));
+		kvm_incr_pc(vcpu);
 		handled = 1;
 	} else {
 		exit_handle_fn exit_handler;
 
 		exit_handler = kvm_get_exit_handler(vcpu);
-		trace_kvm_trap_enter(vcpu->vcpu_id,
-				     kvm_vcpu_trap_get_class(vcpu));
 		handled = exit_handler(vcpu);
-		trace_kvm_trap_exit(vcpu->vcpu_id);
 	}
 
 	return handled;
@@ -277,28 +240,10 @@ int handle_exit(struct kvm_vcpu *vcpu, int exception_index)
 {
 	struct kvm_run *run = vcpu->run;
 
-	if (ARM_SERROR_PENDING(exception_index)) {
-		u8 esr_ec = ESR_ELx_EC(kvm_vcpu_get_esr(vcpu));
-
-		/*
-		 * HVC/SMC already have an adjusted PC, which we need
-		 * to correct in order to return to after having
-		 * injected the SError.
-		 */
-		if (esr_ec == ESR_ELx_EC_HVC32 || esr_ec == ESR_ELx_EC_HVC64 ||
-		    esr_ec == ESR_ELx_EC_SMC32 || esr_ec == ESR_ELx_EC_SMC64) {
-			u32 adj =  kvm_vcpu_trap_il_is32bit(vcpu) ? 4 : 2;
-			*vcpu_pc(vcpu) -= adj;
-		}
-
-		return 1;
-	}
-
 	exception_index = ARM_EXCEPTION_CODE(exception_index);
 
 	switch (exception_index) {
 	case ARM_EXCEPTION_IRQ:
-		vcpu->stat.irq_exit_stat++;
 		return 1;
 	case ARM_EXCEPTION_EL1_SERROR:
 		return 1;
@@ -310,7 +255,6 @@ int handle_exit(struct kvm_vcpu *vcpu, int exception_index)
 		 * is pre-empted by kvm_reboot()'s shutdown call.
 		 */
 		run->exit_reason = KVM_EXIT_FAIL_ENTRY;
-		vcpu->stat.fail_entry_exit_stat++;
 		return 0;
 	case ARM_EXCEPTION_IL:
 		/*
@@ -318,13 +262,11 @@ int handle_exit(struct kvm_vcpu *vcpu, int exception_index)
 		 * have been corrupted somehow.  Give up.
 		 */
 		run->exit_reason = KVM_EXIT_FAIL_ENTRY;
-		vcpu->stat.fail_entry_exit_stat++;
 		return -EINVAL;
 	default:
 		kvm_pr_unimpl("Unsupported exception type: %d",
 			      exception_index);
 		run->exit_reason = KVM_EXIT_INTERNAL_ERROR;
-		vcpu->stat.internal_error_exit_stat++;
 		return 0;
 	}
 }

@@ -38,12 +38,6 @@
 #define R_AARCH64_ABS64	257
 #endif
 
-#ifndef EM_SW64
-#define EM_SW64			0x9916
-#define R_SW64_NONE		0
-#define R_SW64_REFQUAD		2       /* Direct 64 bit */
-#endif
-
 #define R_ARM_PC24		1
 #define R_ARM_THM_CALL		10
 #define R_ARM_CALL		28
@@ -320,16 +314,6 @@ static int make_nop_arm64(void *map, size_t const offset)
 	return 0;
 }
 
-static unsigned char ideal_nop4_sw64[4] = {0x5f, 0x07, 0xff, 0x43};
-
-static int make_nop_sw64(void *map, size_t const offset)
-{
-	/* Convert to nop */
-	ulseek(offset, SEEK_SET);
-	uwrite(ideal_nop, 4);
-	return 0;
-}
-
 static int write_file(const char *fname)
 {
 	char tmp_file[strlen(fname) + 4];
@@ -457,21 +441,6 @@ static int arm64_is_fake_mcount(Elf64_Rel const *rp)
 	return ELF64_R_TYPE(w8(rp->r_info)) != R_AARCH64_CALL26;
 }
 
-#define SW64_FAKEMCOUNT_OFFSET	4
-
-static int sw64_is_fake_mcount(Elf64_Rel const *rp)
-{
-	static Elf64_Addr old_r_offset = ~(Elf64_Addr)0;
-	Elf64_Addr current_r_offset = _w(rp->r_offset);
-	int is_fake;
-
-	is_fake = (old_r_offset != ~(Elf64_Addr)0) &&
-		(current_r_offset - old_r_offset == SW64_FAKEMCOUNT_OFFSET);
-	old_r_offset = current_r_offset;
-
-	return is_fake;
-}
-
 /* 64-bit EM_MIPS has weird ELF64_Rela.r_info.
  * http://techpubs.sgi.com/library/manuals/4000/007-4658-001/pdf/007-4658-001.pdf
  * We interpret Table 29 Relocation Operation (Elf64_Rel, Elf64_Rela) [p.40]
@@ -586,14 +555,6 @@ static int do_file(char const *const fname)
 		rel_type_nop = R_AARCH64_NONE;
 		ideal_nop = ideal_nop4_arm64;
 		is_fake_mcount64 = arm64_is_fake_mcount;
-		break;
-	case EM_SW64:
-		reltype = R_SW64_REFQUAD;
-		make_nop = make_nop_sw64;
-		rel_type_nop = R_SW64_NONE;
-		ideal_nop = ideal_nop4_sw64;
-		mcount_adjust_64 = -12;
-		is_fake_mcount64 = sw64_is_fake_mcount;
 		break;
 	case EM_IA_64:	reltype = R_IA64_IMM64; break;
 	case EM_MIPS:	/* reltype: e_class    */ break;

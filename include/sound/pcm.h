@@ -106,24 +106,24 @@ struct snd_pcm_ops {
 #define SNDRV_PCM_POS_XRUN		((snd_pcm_uframes_t)-1)
 
 /* If you change this don't forget to change rates[] table in pcm_native.c */
-#define SNDRV_PCM_RATE_5512		(1U<<0)		/* 5512Hz */
-#define SNDRV_PCM_RATE_8000		(1U<<1)		/* 8000Hz */
-#define SNDRV_PCM_RATE_11025		(1U<<2)		/* 11025Hz */
-#define SNDRV_PCM_RATE_16000		(1U<<3)		/* 16000Hz */
-#define SNDRV_PCM_RATE_22050		(1U<<4)		/* 22050Hz */
-#define SNDRV_PCM_RATE_32000		(1U<<5)		/* 32000Hz */
-#define SNDRV_PCM_RATE_44100		(1U<<6)		/* 44100Hz */
-#define SNDRV_PCM_RATE_48000		(1U<<7)		/* 48000Hz */
-#define SNDRV_PCM_RATE_64000		(1U<<8)		/* 64000Hz */
-#define SNDRV_PCM_RATE_88200		(1U<<9)		/* 88200Hz */
-#define SNDRV_PCM_RATE_96000		(1U<<10)	/* 96000Hz */
-#define SNDRV_PCM_RATE_176400		(1U<<11)	/* 176400Hz */
-#define SNDRV_PCM_RATE_192000		(1U<<12)	/* 192000Hz */
-#define SNDRV_PCM_RATE_352800		(1U<<13)	/* 352800Hz */
-#define SNDRV_PCM_RATE_384000		(1U<<14)	/* 384000Hz */
+#define SNDRV_PCM_RATE_5512		(1<<0)		/* 5512Hz */
+#define SNDRV_PCM_RATE_8000		(1<<1)		/* 8000Hz */
+#define SNDRV_PCM_RATE_11025		(1<<2)		/* 11025Hz */
+#define SNDRV_PCM_RATE_16000		(1<<3)		/* 16000Hz */
+#define SNDRV_PCM_RATE_22050		(1<<4)		/* 22050Hz */
+#define SNDRV_PCM_RATE_32000		(1<<5)		/* 32000Hz */
+#define SNDRV_PCM_RATE_44100		(1<<6)		/* 44100Hz */
+#define SNDRV_PCM_RATE_48000		(1<<7)		/* 48000Hz */
+#define SNDRV_PCM_RATE_64000		(1<<8)		/* 64000Hz */
+#define SNDRV_PCM_RATE_88200		(1<<9)		/* 88200Hz */
+#define SNDRV_PCM_RATE_96000		(1<<10)		/* 96000Hz */
+#define SNDRV_PCM_RATE_176400		(1<<11)		/* 176400Hz */
+#define SNDRV_PCM_RATE_192000		(1<<12)		/* 192000Hz */
+#define SNDRV_PCM_RATE_352800		(1<<13)		/* 352800Hz */
+#define SNDRV_PCM_RATE_384000		(1<<14)		/* 384000Hz */
 
-#define SNDRV_PCM_RATE_CONTINUOUS	(1U<<30)	/* continuous range */
-#define SNDRV_PCM_RATE_KNOT		(1U<<31)	/* supports more non-continuos rates */
+#define SNDRV_PCM_RATE_CONTINUOUS	(1<<30)		/* continuous range */
+#define SNDRV_PCM_RATE_KNOT		(1<<31)		/* supports more non-continuos rates */
 
 #define SNDRV_PCM_RATE_8000_44100	(SNDRV_PCM_RATE_8000|SNDRV_PCM_RATE_11025|\
 					 SNDRV_PCM_RATE_16000|SNDRV_PCM_RATE_22050|\
@@ -398,8 +398,6 @@ struct snd_pcm_runtime {
 	wait_queue_head_t tsleep;	/* transfer sleep */
 	struct fasync_struct *fasync;
 	bool stop_operating;		/* sync_stop will be called */
-	struct mutex buffer_mutex;	/* protect for buffer changes */
-	atomic_t buffer_accessing;	/* >0: in r/w operation, <0: blocked */
 
 	/* -- private section -- */
 	void *private_data;
@@ -1437,6 +1435,52 @@ static inline u64 pcm_format_to_bits(snd_pcm_format_t pcm_format)
 	for ((f) = SNDRV_PCM_FORMAT_FIRST;				\
 	     (__force int)(f) <= (__force int)SNDRV_PCM_FORMAT_LAST;	\
 	     (f) = (__force snd_pcm_format_t)((__force int)(f) + 1))
+
+#if IS_ENABLED(CONFIG_SND_SOC_ROCKCHIP_VAD)
+/**
+ * snd_pcm_vad_read - Read raw pcm data from vad buffer
+ * @substream: PCM substream instance
+ * @buf: dst buf
+ * @frames: size in frame
+ *
+ * Result is read frames for success or errno for fail
+ */
+snd_pcm_sframes_t snd_pcm_vad_read(struct snd_pcm_substream *substream,
+				   void __user *buf, snd_pcm_uframes_t frames);
+/**
+ * snd_pcm_vad_avail - Get the available (readable) space for vad
+ * @substream: PCM substream instance
+ *
+ * Result is between 0 ... (boundary - 1)
+ */
+snd_pcm_uframes_t snd_pcm_vad_avail(struct snd_pcm_substream *substream);
+/**
+ * snd_pcm_vad_attached - Check whether vad is attached to substream or not
+ * @substream: PCM substream instance
+ *
+ * Result is true for attached or false for detached
+ */
+bool snd_pcm_vad_attached(struct snd_pcm_substream *substream);
+/**
+ * snd_pcm_vad_preprocess - Pre process vad data
+ * @substream: PCM substream instance
+ * @size: size in frame
+ *
+ * Result is zero for success or errno for fail
+ */
+int snd_pcm_vad_preprocess(struct snd_pcm_substream *substream,
+			   void *buf, snd_pcm_uframes_t size);
+/**
+ * snd_pcm_vad_memcpy - Copy vad data to dst
+ * @substream: PCM substream instance
+ * @buf: dst buf
+ * @frames:  size in frame
+ *
+ * Result is copied frames for success or errno for fail
+ */
+snd_pcm_sframes_t snd_pcm_vad_memcpy(struct snd_pcm_substream *substream,
+				     void *buf, snd_pcm_uframes_t frames);
+#endif
 
 /* printk helpers */
 #define pcm_err(pcm, fmt, args...) \

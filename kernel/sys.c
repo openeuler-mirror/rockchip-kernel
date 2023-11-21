@@ -14,7 +14,6 @@
 #include <linux/highuid.h>
 #include <linux/fs.h>
 #include <linux/kmod.h>
-#include <linux/ksm.h>
 #include <linux/perf_event.h>
 #include <linux/resource.h>
 #include <linux/kernel.h>
@@ -43,6 +42,8 @@
 #include <linux/syscore_ops.h>
 #include <linux/version.h>
 #include <linux/ctype.h>
+#include <linux/mm.h>
+#include <linux/mempolicy.h>
 
 #include <linux/compat.h>
 #include <linux/syscalls.h>
@@ -74,6 +75,8 @@
 #include <asm/unistd.h>
 
 #include "uid16.h"
+
+#include <trace/hooks/sys.h>
 
 #ifndef SET_UNALIGN_CTL
 # define SET_UNALIGN_CTL(a, b)	(-EINVAL)
@@ -119,6 +122,12 @@
 #endif
 #ifndef PAC_RESET_KEYS
 # define PAC_RESET_KEYS(a, b)	(-EINVAL)
+#endif
+#ifndef PAC_SET_ENABLED_KEYS
+# define PAC_SET_ENABLED_KEYS(a, b, c)	(-EINVAL)
+#endif
+#ifndef PAC_GET_ENABLED_KEYS
+# define PAC_GET_ENABLED_KEYS(a)	(-EINVAL)
 #endif
 #ifndef SET_TAGGED_ADDR_CTRL
 # define SET_TAGGED_ADDR_CTRL(a)	(-EINVAL)
@@ -1549,8 +1558,6 @@ int do_prlimit(struct task_struct *tsk, unsigned int resource,
 
 	if (resource >= RLIM_NLIMITS)
 		return -EINVAL;
-	resource = array_index_nospec(resource, RLIM_NLIMITS);
-
 	if (new_rlim) {
 		if (new_rlim->rlim_cur > new_rlim->rlim_max)
 			return -EINVAL;
@@ -1945,6 +1952,13 @@ static int validate_prctl_map_addr(struct prctl_mm_map *prctl_map)
 	error = -EINVAL;
 
 	/*
+	 * @brk should be after @end_data in traditional maps.
+	 */
+	if (prctl_map->start_brk <= prctl_map->end_data ||
+	    prctl_map->brk <= prctl_map->end_data)
+		goto out;
+
+	/*
 	 * Neither we should allow to override limits if they set.
 	 */
 	if (check_data_rlimit(rlimit(RLIMIT_DATA), prctl_map->brk,
@@ -1965,7 +1979,7 @@ static int prctl_set_mm_map(int opt, const void __user *addr, unsigned long data
 	struct mm_struct *mm = current->mm;
 	int error;
 
-	BUILD_BUG_ON(sizeof(user_auxv) != sizeof(MM_SAVED_AUXV(mm)));
+	BUILD_BUG_ON(sizeof(user_auxv) != sizeof(mm->saved_auxv));
 	BUILD_BUG_ON(sizeof(struct prctl_mm_map) > 256);
 
 	if (opt == PR_SET_MM_MAP_SIZE)
@@ -1987,7 +2001,7 @@ static int prctl_set_mm_map(int opt, const void __user *addr, unsigned long data
 		 * Someone is trying to cheat the auxv vector.
 		 */
 		if (!prctl_map.auxv ||
-				prctl_map.auxv_size > sizeof(MM_SAVED_AUXV(mm)))
+				prctl_map.auxv_size > sizeof(mm->saved_auxv))
 			return -EINVAL;
 
 		memset(user_auxv, 0, sizeof(user_auxv));
@@ -2059,7 +2073,7 @@ static int prctl_set_mm_map(int opt, const void __user *addr, unsigned long data
 	 * more complex.
 	 */
 	if (prctl_map.auxv_size)
-		memcpy(MM_SAVED_AUXV(mm), user_auxv, sizeof(user_auxv));
+		memcpy(mm->saved_auxv, user_auxv, sizeof(user_auxv));
 
 	mmap_read_unlock(mm);
 	return 0;
@@ -2087,10 +2101,10 @@ static int prctl_set_auxv(struct mm_struct *mm, unsigned long addr,
 	user_auxv[AT_VECTOR_SIZE - 2] = 0;
 	user_auxv[AT_VECTOR_SIZE - 1] = 0;
 
-	BUILD_BUG_ON(sizeof(user_auxv) != sizeof(MM_SAVED_AUXV(mm)));
+	BUILD_BUG_ON(sizeof(user_auxv) != sizeof(mm->saved_auxv));
 
 	task_lock(current);
-	memcpy(MM_SAVED_AUXV(mm), user_auxv, len);
+	memcpy(mm->saved_auxv, user_auxv, len);
 	task_unlock(current);
 
 	return 0;
@@ -2273,6 +2287,153 @@ int __weak arch_prctl_spec_ctrl_set(struct task_struct *t, unsigned long which,
 {
 	return -EINVAL;
 }
+
+#ifdef CONFIG_MMU
+static int prctl_update_vma_anon_name(struct vm_area_struct *vma,
+		struct vm_area_struct **prev,
+		unsigned long start, unsigned long end,
+		const char __user *name_addr)
+{
+	struct mm_struct *mm = vma->vm_mm;
+	int error = 0;
+	pgoff_t pgoff;
+
+	if (name_addr == vma_get_anon_name(vma)) {
+		*prev = vma;
+		goto out;
+	}
+
+	pgoff = vma->vm_pgoff + ((start - vma->vm_start) >> PAGE_SHIFT);
+	*prev = vma_merge(mm, *prev, start, end, vma->vm_flags, vma->anon_vma,
+				vma->vm_file, pgoff, vma_policy(vma),
+				vma->vm_userfaultfd_ctx, name_addr);
+	if (*prev) {
+		vma = *prev;
+		goto success;
+	}
+
+	*prev = vma;
+
+	if (start != vma->vm_start) {
+		error = split_vma(mm, vma, start, 1);
+		if (error)
+			goto out;
+	}
+
+	if (end != vma->vm_end) {
+		error = split_vma(mm, vma, end, 0);
+		if (error)
+			goto out;
+	}
+
+success:
+	if (!vma->vm_file)
+		vma->anon_name = name_addr;
+
+out:
+	if (error == -ENOMEM)
+		error = -EAGAIN;
+	return error;
+}
+
+static int prctl_set_vma_anon_name(unsigned long start, unsigned long end,
+			unsigned long arg)
+{
+	unsigned long tmp;
+	struct vm_area_struct *vma, *prev;
+	int unmapped_error = 0;
+	int error = -EINVAL;
+
+	/*
+	 * If the interval [start,end) covers some unmapped address
+	 * ranges, just ignore them, but return -ENOMEM at the end.
+	 * - this matches the handling in madvise.
+	 */
+	vma = find_vma_prev(current->mm, start, &prev);
+	if (vma && start > vma->vm_start)
+		prev = vma;
+
+	for (;;) {
+		/* Still start < end. */
+		error = -ENOMEM;
+		if (!vma)
+			return error;
+
+		/* Here start < (end|vma->vm_end). */
+		if (start < vma->vm_start) {
+			unmapped_error = -ENOMEM;
+			start = vma->vm_start;
+			if (start >= end)
+				return error;
+		}
+
+		/* Here vma->vm_start <= start < (end|vma->vm_end) */
+		tmp = vma->vm_end;
+		if (end < tmp)
+			tmp = end;
+
+		/* Here vma->vm_start <= start < tmp <= (end|vma->vm_end). */
+		error = prctl_update_vma_anon_name(vma, &prev, start, tmp,
+				(const char __user *)arg);
+		if (error)
+			return error;
+		start = tmp;
+		if (prev && start < prev->vm_end)
+			start = prev->vm_end;
+		error = unmapped_error;
+		if (start >= end)
+			return error;
+		if (prev)
+			vma = prev->vm_next;
+		else	/* madvise_remove dropped mmap_lock */
+			vma = find_vma(current->mm, start);
+	}
+}
+
+static int prctl_set_vma(unsigned long opt, unsigned long start,
+		unsigned long len_in, unsigned long arg)
+{
+	struct mm_struct *mm = current->mm;
+	int error;
+	unsigned long len;
+	unsigned long end;
+
+	if (start & ~PAGE_MASK)
+		return -EINVAL;
+	len = (len_in + ~PAGE_MASK) & PAGE_MASK;
+
+	/* Check to see whether len was rounded up from small -ve to zero */
+	if (len_in && !len)
+		return -EINVAL;
+
+	end = start + len;
+	if (end < start)
+		return -EINVAL;
+
+	if (end == start)
+		return 0;
+
+	mmap_write_lock(mm);
+
+	switch (opt) {
+	case PR_SET_VMA_ANON_NAME:
+		error = prctl_set_vma_anon_name(start, end, arg);
+		break;
+	default:
+		error = -EINVAL;
+	}
+
+	mmap_write_unlock(mm);
+
+	return error;
+}
+#else /* CONFIG_MMU */
+static int prctl_set_vma(unsigned long opt, unsigned long start,
+		unsigned long len_in, unsigned long arg)
+{
+	return -EINVAL;
+}
+#endif
 
 #define PR_IO_FLUSHER (PF_MEMALLOC_NOIO | PF_LOCAL_THROTTLE)
 
@@ -2488,10 +2649,23 @@ SYSCALL_DEFINE5(prctl, int, option, unsigned long, arg2, unsigned long, arg3,
 			return -EINVAL;
 		error = arch_prctl_spec_ctrl_set(me, arg2, arg3);
 		break;
+	case PR_SET_VMA:
+		error = prctl_set_vma(arg2, arg3, arg4, arg5);
+		break;
 	case PR_PAC_RESET_KEYS:
 		if (arg3 || arg4 || arg5)
 			return -EINVAL;
 		error = PAC_RESET_KEYS(me, arg2);
+		break;
+	case PR_PAC_SET_ENABLED_KEYS:
+		if (arg4 || arg5)
+			return -EINVAL;
+		error = PAC_SET_ENABLED_KEYS(me, arg2, arg3);
+		break;
+	case PR_PAC_GET_ENABLED_KEYS:
+		if (arg2 || arg3 || arg4 || arg5)
+			return -EINVAL;
+		error = PAC_GET_ENABLED_KEYS(me);
 		break;
 	case PR_SET_TAGGED_ADDR_CTRL:
 		if (arg3 || arg4 || arg5)
@@ -2526,35 +2700,11 @@ SYSCALL_DEFINE5(prctl, int, option, unsigned long, arg2, unsigned long, arg3,
 
 		error = (current->flags & PR_IO_FLUSHER) == PR_IO_FLUSHER;
 		break;
-#ifdef CONFIG_SCHED_CORE
-	case PR_SCHED_CORE:
-		error = sched_core_share_pid(arg2, arg3, arg4, arg5);
-		break;
-#endif
-#ifdef CONFIG_KSM
-	case PR_SET_MEMORY_MERGE:
-		if (arg3 || arg4 || arg5)
-			return -EINVAL;
-		if (mmap_write_lock_killable(me->mm))
-			return -EINTR;
-
-		if (arg2)
-			error = ksm_enable_merge_any(me->mm);
-		else
-			error = ksm_disable_merge_any(me->mm);
-		mmap_write_unlock(me->mm);
-		break;
-	case PR_GET_MEMORY_MERGE:
-		if (arg2 || arg3 || arg4 || arg5)
-			return -EINVAL;
-
-		error = !!test_bit(MMF_VM_MERGE_ANY, &me->mm->flags);
-		break;
-#endif
 	default:
 		error = -EINVAL;
 		break;
 	}
+	trace_android_vh_syscall_prctl_finished(option, me);
 	return error;
 }
 

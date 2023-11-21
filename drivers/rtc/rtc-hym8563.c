@@ -97,12 +97,6 @@ static int hym8563_rtc_read_time(struct device *dev, struct rtc_time *tm)
 	if (ret < 0)
 		return ret;
 
-	if (buf[0] & HYM8563_SEC_VL) {
-		dev_warn(&client->dev,
-			 "no valid clock/calendar values available\n");
-		return -EINVAL;
-	}
-
 	tm->tm_sec = bcd2bin(buf[0] & HYM8563_SEC_MASK);
 	tm->tm_min = bcd2bin(buf[1] & HYM8563_MIN_MASK);
 	tm->tm_hour = bcd2bin(buf[2] & HYM8563_HOUR_MASK);
@@ -220,6 +214,10 @@ static int hym8563_rtc_set_alarm(struct device *dev, struct rtc_wkalrm *alm)
 	u8 buf[4];
 	int ret;
 
+	printk("jp %4d-%02d-%02d(%d) %02d:%02d enabled %d\n",
+            1900 + alm_tm->tm_year, alm_tm->tm_mon + 1, alm_tm->tm_mday, alm_tm->tm_wday,
+            alm_tm->tm_hour, alm_tm->tm_min, alm->enabled);
+
 	/*
 	 * The alarm has no seconds so deal with it
 	 */
@@ -232,12 +230,39 @@ static int hym8563_rtc_set_alarm(struct device *dev, struct rtc_wkalrm *alm)
 			if (alm_tm->tm_hour >= 24) {
 				alm_tm->tm_hour = 0;
 				alm_tm->tm_mday++;
-				if (alm_tm->tm_mday > 31)
-					alm_tm->tm_mday = 0;
+				alm_tm->tm_wday++;
+				if (alm_tm->tm_wday > 6)
+					alm_tm->tm_wday = 0;
+				switch (alm_tm->tm_mon + 1) {
+				case 1:
+				case 3:
+				case 5:
+				case 7:
+				case 8:
+				case 10:
+				case 12:
+					if (alm_tm->tm_mday > 31)
+						alm_tm->tm_mday = 1;
+					break;
+				case 4:
+				case 6:
+				case 9:
+				case 11:
+					if (alm_tm->tm_mday > 30)
+						alm_tm->tm_mday = 1;
+					break;
+				case 2:
+					if (alm_tm->tm_year / 4 == 0) {
+						if (alm_tm->tm_mday > 29)
+							alm_tm->tm_mday = 1;
+					} else if (alm_tm->tm_mday > 28) {
+						alm_tm->tm_mday = 1;
+					}
+					break;
+				}
 			}
 		}
 	}
-
 	ret = i2c_smbus_read_byte_data(client, HYM8563_CTL2);
 	if (ret < 0)
 		return ret;
@@ -434,7 +459,7 @@ static irqreturn_t hym8563_irq(int irq, void *dev_id)
 	mutex_lock(lock);
 
 	/* Clear the alarm flag */
-
+	printk("hym8563_irq ------ \r\n");
 	data = i2c_smbus_read_byte_data(client, HYM8563_CTL2);
 	if (data < 0) {
 		dev_err(&client->dev, "%s: error reading i2c data %d\n",
@@ -519,6 +544,19 @@ static int hym8563_probe(struct i2c_client *client,
 {
 	struct hym8563 *hym8563;
 	int ret;
+	/*
+	 * hym8563 initial time(2021_1_1_12:00:00),
+	 * avoid hym8563 read time error
+	 */
+	struct rtc_time tm_read, tm = {
+		.tm_wday = 0,
+		.tm_year = 121,
+		.tm_mon = 0,
+		.tm_mday = 1,
+		.tm_hour = 12,
+		.tm_min = 0,
+		.tm_sec = 0,
+	};
 
 	hym8563 = devm_kzalloc(&client->dev, sizeof(*hym8563), GFP_KERNEL);
 	if (!hym8563)
@@ -527,8 +565,7 @@ static int hym8563_probe(struct i2c_client *client,
 	hym8563->client = client;
 	i2c_set_clientdata(client, hym8563);
 
-	device_set_wakeup_capable(&client->dev, true);
-
+	hym8563_rtc_alarm_irq_enable(&client->dev, 0);
 	ret = hym8563_init_device(client);
 	if (ret) {
 		dev_err(&client->dev, "could not init device, %d\n", ret);
@@ -547,13 +584,23 @@ static int hym8563_probe(struct i2c_client *client,
 		}
 	}
 
+	if (client->irq > 0 ||
+	    device_property_read_bool(&client->dev, "wakeup-source")) {
+		device_init_wakeup(&client->dev, true);
+	}
+
 	/* check state of calendar information */
 	ret = i2c_smbus_read_byte_data(client, HYM8563_SEC);
 	if (ret < 0)
 		return ret;
 
-	dev_dbg(&client->dev, "rtc information is %s\n",
+	dev_info(&client->dev, "rtc information is %s\n",
 		(ret & HYM8563_SEC_VL) ? "invalid" : "valid");
+
+	hym8563_rtc_read_time(&client->dev, &tm_read);
+	if ((ret & HYM8563_SEC_VL) || (tm_read.tm_year < 70) || (tm_read.tm_year > 200) ||
+	    (tm_read.tm_mon == -1) || (rtc_valid_tm(&tm_read) != 0))
+		hym8563_rtc_set_time(&client->dev, &tm);
 
 	hym8563->rtc = devm_rtc_device_register(&client->dev, client->name,
 						&hym8563_rtc_ops, THIS_MODULE);
@@ -566,6 +613,7 @@ static int hym8563_probe(struct i2c_client *client,
 #ifdef CONFIG_COMMON_CLK
 	hym8563_clkout_register_clk(hym8563);
 #endif
+	hym8563_rtc_alarm_irq_enable(&client->dev, 1);
 
 	return 0;
 }

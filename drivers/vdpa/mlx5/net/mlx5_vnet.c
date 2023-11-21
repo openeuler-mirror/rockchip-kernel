@@ -812,6 +812,8 @@ static int create_virtqueue(struct mlx5_vdpa_net *ndev, struct mlx5_vdpa_virtque
 	MLX5_SET(virtio_q, vq_ctx, umem_3_id, mvq->umem3.id);
 	MLX5_SET(virtio_q, vq_ctx, umem_3_size, mvq->umem3.size);
 	MLX5_SET(virtio_q, vq_ctx, pd, ndev->mvdev.res.pdn);
+	if (MLX5_CAP_DEV_VDPA_EMULATION(ndev->mvdev.mdev, eth_frame_offload_type))
+		MLX5_SET(virtio_q, vq_ctx, virtio_version_1_0, 1);
 
 	err = mlx5_cmd_exec(ndev->mvdev.mdev, in, inlen, out, sizeof(out));
 	if (err)
@@ -1405,8 +1407,8 @@ static int mlx5_vdpa_set_vq_state(struct vdpa_device *vdev, u16 idx,
 		return -EINVAL;
 	}
 
-	mvq->used_idx = state->split.avail_index;
-	mvq->avail_idx = state->split.avail_index;
+	mvq->used_idx = state->avail_index;
+	mvq->avail_idx = state->avail_index;
 	return 0;
 }
 
@@ -1427,7 +1429,7 @@ static int mlx5_vdpa_get_vq_state(struct vdpa_device *vdev, u16 idx, struct vdpa
 		 * Since both values should be identical, we take the value of
 		 * used_idx which is reported correctly.
 		 */
-		state->split.avail_index = mvq->used_idx;
+		state->avail_index = mvq->used_idx;
 		return 0;
 	}
 
@@ -1436,7 +1438,7 @@ static int mlx5_vdpa_get_vq_state(struct vdpa_device *vdev, u16 idx, struct vdpa
 		mlx5_vdpa_warn(mvdev, "failed to query virtqueue\n");
 		return err;
 	}
-	state->split.avail_index = attr.used_index;
+	state->avail_index = attr.used_index;
 	return 0;
 }
 
@@ -1467,7 +1469,7 @@ static u64 mlx_to_vritio_features(u16 dev_features)
 	return result;
 }
 
-static u64 mlx5_vdpa_get_device_features(struct vdpa_device *vdev)
+static u64 mlx5_vdpa_get_features(struct vdpa_device *vdev)
 {
 	struct mlx5_vdpa_dev *mvdev = to_mvdev(vdev);
 	struct mlx5_vdpa_net *ndev = to_mlx5_vdpa_ndev(mvdev);
@@ -1482,24 +1484,10 @@ static u64 mlx5_vdpa_get_device_features(struct vdpa_device *vdev)
 	return ndev->mvdev.mlx_features;
 }
 
-static int verify_driver_features(struct mlx5_vdpa_dev *mvdev, u64 features)
+static int verify_min_features(struct mlx5_vdpa_dev *mvdev, u64 features)
 {
-	/* Minimum features to expect */
 	if (!(features & BIT_ULL(VIRTIO_F_ACCESS_PLATFORM)))
 		return -EOPNOTSUPP;
-
-	/* Double check features combination sent down by the driver.
-	 * Fail invalid features due to absence of the depended feature.
-	 *
-	 * Per VIRTIO v1.1 specification, section 5.1.3.1 Feature bit
-	 * requirements: "VIRTIO_NET_F_MQ Requires VIRTIO_NET_F_CTRL_VQ".
-	 * By failing the invalid features sent down by untrusted drivers,
-	 * we're assured the assumption made upon is_index_valid() and
-	 * is_ctrl_vq_idx() will not be compromised.
-	 */
-	if ((features & (BIT_ULL(VIRTIO_NET_F_MQ) | BIT_ULL(VIRTIO_NET_F_CTRL_VQ))) ==
-            BIT_ULL(VIRTIO_NET_F_MQ))
-		return -EINVAL;
 
 	return 0;
 }
@@ -1550,7 +1538,7 @@ static __virtio16 cpu_to_mlx5vdpa16(struct mlx5_vdpa_dev *mvdev, u16 val)
 	return __cpu_to_virtio16(mlx5_vdpa_is_little_endian(mvdev), val);
 }
 
-static int mlx5_vdpa_set_driver_features(struct vdpa_device *vdev, u64 features)
+static int mlx5_vdpa_set_features(struct vdpa_device *vdev, u64 features)
 {
 	struct mlx5_vdpa_dev *mvdev = to_mvdev(vdev);
 	struct mlx5_vdpa_net *ndev = to_mlx5_vdpa_ndev(mvdev);
@@ -1558,7 +1546,7 @@ static int mlx5_vdpa_set_driver_features(struct vdpa_device *vdev, u64 features)
 
 	print_features(mvdev, features, true);
 
-	err = verify_driver_features(mvdev, features);
+	err = verify_min_features(mvdev, features);
 	if (err)
 		return err;
 
@@ -1778,6 +1766,16 @@ static void mlx5_vdpa_set_status(struct vdpa_device *vdev, u8 status)
 	int err;
 
 	print_status(mvdev, status, true);
+	if (!status) {
+		mlx5_vdpa_info(mvdev, "performing device reset\n");
+		teardown_driver(ndev);
+		clear_vqs_ready(ndev);
+		mlx5_vdpa_destroy_mr(&ndev->mvdev);
+		ndev->mvdev.status = 0;
+		ndev->mvdev.mlx_features = 0;
+		++mvdev->generation;
+		return;
+	}
 
 	if ((status ^ ndev->mvdev.status) & VIRTIO_CONFIG_S_DRIVER_OK) {
 		if (status & VIRTIO_CONFIG_S_DRIVER_OK) {
@@ -1798,26 +1796,6 @@ static void mlx5_vdpa_set_status(struct vdpa_device *vdev, u8 status)
 err_setup:
 	mlx5_vdpa_destroy_mr(&ndev->mvdev);
 	ndev->mvdev.status |= VIRTIO_CONFIG_S_FAILED;
-}
-
-static int mlx5_vdpa_reset(struct vdpa_device *vdev)
-{
-	struct mlx5_vdpa_dev *mvdev = to_mvdev(vdev);
-	struct mlx5_vdpa_net *ndev = to_mlx5_vdpa_ndev(mvdev);
-
-	print_status(mvdev, 0, true);
-	mlx5_vdpa_info(mvdev, "performing device reset\n");
-	teardown_driver(ndev);
-	clear_vqs_ready(ndev);
-	mlx5_vdpa_destroy_mr(&ndev->mvdev);
-	ndev->mvdev.status = 0;
-	++mvdev->generation;
-	return 0;
-}
-
-static size_t mlx5_vdpa_get_config_size(struct vdpa_device *vdev)
-{
-	return sizeof(struct virtio_net_config);
 }
 
 static void mlx5_vdpa_get_config(struct vdpa_device *vdev, unsigned int offset, void *buf,
@@ -1843,8 +1821,7 @@ static u32 mlx5_vdpa_get_generation(struct vdpa_device *vdev)
 	return mvdev->generation;
 }
 
-static int mlx5_vdpa_set_map(struct vdpa_device *vdev, unsigned int asid,
-                            struct vhost_iotlb *iotlb)
+static int mlx5_vdpa_set_map(struct vdpa_device *vdev, struct vhost_iotlb *iotlb)
 {
 	struct mlx5_vdpa_dev *mvdev = to_mvdev(vdev);
 	struct mlx5_vdpa_net *ndev = to_mlx5_vdpa_ndev(mvdev);
@@ -1892,13 +1869,6 @@ static int mlx5_get_vq_irq(struct vdpa_device *vdv, u16 idx)
 	return -EOPNOTSUPP;
 }
 
-static u64 mlx5_vdpa_get_driver_features(struct vdpa_device *vdev)
-{
-	struct mlx5_vdpa_dev *mvdev = to_mvdev(vdev);
-
-	return mvdev->actual_features;
-}
-
 static const struct vdpa_config_ops mlx5_vdpa_ops = {
 	.set_vq_address = mlx5_vdpa_set_vq_address,
 	.set_vq_num = mlx5_vdpa_set_vq_num,
@@ -1911,17 +1881,14 @@ static const struct vdpa_config_ops mlx5_vdpa_ops = {
 	.get_vq_notification = mlx5_get_vq_notification,
 	.get_vq_irq = mlx5_get_vq_irq,
 	.get_vq_align = mlx5_vdpa_get_vq_align,
-	.get_device_features = mlx5_vdpa_get_device_features,
-	.set_driver_features = mlx5_vdpa_set_driver_features,
-	.get_driver_features = mlx5_vdpa_get_driver_features,
+	.get_features = mlx5_vdpa_get_features,
+	.set_features = mlx5_vdpa_set_features,
 	.set_config_cb = mlx5_vdpa_set_config_cb,
 	.get_vq_num_max = mlx5_vdpa_get_vq_num_max,
 	.get_device_id = mlx5_vdpa_get_device_id,
 	.get_vendor_id = mlx5_vdpa_get_vendor_id,
 	.get_status = mlx5_vdpa_get_status,
 	.set_status = mlx5_vdpa_set_status,
-	.reset = mlx5_vdpa_reset,
-	.get_config_size = mlx5_vdpa_get_config_size,
 	.get_config = mlx5_vdpa_get_config,
 	.set_config = mlx5_vdpa_set_config,
 	.get_generation = mlx5_vdpa_get_generation,
@@ -2015,7 +1982,7 @@ void *mlx5_vdpa_add_dev(struct mlx5_core_dev *mdev)
 	max_vqs = min_t(u32, max_vqs, MLX5_MAX_SUPPORTED_VQS);
 
 	ndev = vdpa_alloc_device(struct mlx5_vdpa_net, mvdev.vdev, mdev->device, &mlx5_vdpa_ops,
-				 1, 1, NULL, false);
+				 2 * mlx5_vdpa_max_qps(max_vqs));
 	if (IS_ERR(ndev))
 		return ndev;
 
@@ -2049,7 +2016,7 @@ void *mlx5_vdpa_add_dev(struct mlx5_core_dev *mdev)
 	if (err)
 		goto err_res;
 
-	err = vdpa_register_device(&mvdev->vdev, 2 * mlx5_vdpa_max_qps(max_vqs));
+	err = vdpa_register_device(&mvdev->vdev);
 	if (err)
 		goto err_reg;
 

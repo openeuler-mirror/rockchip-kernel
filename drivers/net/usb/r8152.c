@@ -22,6 +22,7 @@
 #include <linux/mdio.h>
 #include <linux/usb/cdc.h>
 #include <linux/suspend.h>
+#include <asm/system_info.h>
 #include <linux/atomic.h>
 #include <linux/acpi.h>
 #include <linux/firmware.h>
@@ -37,6 +38,11 @@
 #define DRIVER_AUTHOR "Realtek linux nic maintainers <nic_swsd@realtek.com>"
 #define DRIVER_DESC "Realtek RTL8152/RTL8153 Based USB Ethernet Adapters"
 #define MODULENAME "r8152"
+
+/* LED0: Activity, LED1: Link */
+static int ledsel = 0x3C28;
+module_param(ledsel, int, 0);
+MODULE_PARM_DESC(ledsel, "Override default LED configuration");
 
 #define R8152_PHY_ID		32
 
@@ -1497,6 +1503,24 @@ amacout:
 	return ret;
 }
 
+static int eth_mac_from_system_serial(struct r8152 *tp, u8 *addr)
+{
+	struct net_device *dev = tp->netdev;
+
+	if (system_serial_low != 0 && system_serial_high != 0) {
+		addr[0] = (system_serial_high >> 24) & 0xfe;/* clear multicast bit */
+		addr[1] = (system_serial_high >> 16) | 0x02;/* set local assignment bit (IEEE802) */
+		addr[2] = system_serial_low >> 24;
+		addr[3] = system_serial_low >> 16;
+		addr[4] = system_serial_low >> 8;
+		addr[5] = system_serial_low;
+		netif_info(tp, probe, dev, "Create an ether addr [%x:%x:%x:%x:%x:%x] from system serial number\n",
+			   addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]);
+
+	}
+	return 0;
+}
+
 static int determine_ethernet_addr(struct r8152 *tp, struct sockaddr *sa)
 {
 	struct net_device *dev = tp->netdev;
@@ -1525,6 +1549,7 @@ static int determine_ethernet_addr(struct r8152 *tp, struct sockaddr *sa)
 		netif_err(tp, probe, dev, "Invalid ether addr %pM\n",
 			  sa->sa_data);
 		eth_hw_addr_random(dev);
+		eth_mac_from_system_serial(tp, dev->dev_addr);
 		ether_addr_copy(sa->sa_data, dev->dev_addr);
 		netif_info(tp, probe, dev, "Random ether addr %pM\n",
 			   sa->sa_data);
@@ -1689,9 +1714,7 @@ static void intr_callback(struct urb *urb)
 			   "Stop submitting intr, status %d\n", status);
 		return;
 	case -EOVERFLOW:
-		if (net_ratelimit())
-			netif_info(tp, intr, tp->netdev,
-				   "intr status -EOVERFLOW\n");
+		netif_info(tp, intr, tp->netdev, "intr status -EOVERFLOW\n");
 		goto resubmit;
 	/* -EPIPE:  should clear the halt */
 	default:
@@ -5337,7 +5360,8 @@ static void r8152b_init(struct r8152 *tp)
 	ocp_data = GPHY_STS_MSK | SPEED_DOWN_MSK |
 		   SPDWN_RXDV_MSK | SPDWN_LINKCHG_MSK;
 	ocp_write_word(tp, MCU_TYPE_PLA, PLA_GPHY_INTR_IMR, ocp_data);
-
+    /* set customized led */
+    ocp_write_word(tp, MCU_TYPE_PLA, PLA_LEDSEL, ledsel);
 	rtl_tally_reset(tp);
 
 	/* enable rx aggregation */
@@ -6188,9 +6212,7 @@ out:
 }
 
 static int rtl8152_get_coalesce(struct net_device *netdev,
-				struct ethtool_coalesce *coalesce,
-				struct kernel_ethtool_coalesce *kernel_coal,
-				struct netlink_ext_ack *extack)
+				struct ethtool_coalesce *coalesce)
 {
 	struct r8152 *tp = netdev_priv(netdev);
 
@@ -6209,9 +6231,7 @@ static int rtl8152_get_coalesce(struct net_device *netdev,
 }
 
 static int rtl8152_set_coalesce(struct net_device *netdev,
-				struct ethtool_coalesce *coalesce,
-				struct kernel_ethtool_coalesce *kernel_coal,
-				struct netlink_ext_ack *extack)
+				struct ethtool_coalesce *coalesce)
 {
 	struct r8152 *tp = netdev_priv(netdev);
 	int ret;
@@ -6309,9 +6329,7 @@ static int rtl8152_set_tunable(struct net_device *netdev,
 }
 
 static void rtl8152_get_ringparam(struct net_device *netdev,
-				  struct ethtool_ringparam *ring,
-				  struct kernel_ethtool_ringparam *kernel_ring,
-				  struct netlink_ext_ack *extack)
+				  struct ethtool_ringparam *ring)
 {
 	struct r8152 *tp = netdev_priv(netdev);
 
@@ -6320,9 +6338,7 @@ static void rtl8152_get_ringparam(struct net_device *netdev,
 }
 
 static int rtl8152_set_ringparam(struct net_device *netdev,
-				 struct ethtool_ringparam *ring,
-				 struct kernel_ethtool_ringparam *kernel_ring,
-				 struct netlink_ext_ack *extack)
+				 struct ethtool_ringparam *ring)
 {
 	struct r8152 *tp = netdev_priv(netdev);
 
@@ -6823,7 +6839,7 @@ static int rtl8152_probe(struct usb_interface *intf,
 	else
 		device_set_wakeup_enable(&udev->dev, false);
 
-	netif_info(tp, probe, netdev, "%s\n", DRIVER_VERSION);
+/*	netif_info(tp, probe, netdev, "%s\n", DRIVER_VERSION);*/
 
 	return 0;
 
@@ -6878,7 +6894,6 @@ static const struct usb_device_id rtl8152_table[] = {
 	{REALTEK_USB_DEVICE(VENDOR_ID_MICROSOFT, 0x0927)},
 	{REALTEK_USB_DEVICE(VENDOR_ID_SAMSUNG, 0xa101)},
 	{REALTEK_USB_DEVICE(VENDOR_ID_LENOVO,  0x304f)},
-	{REALTEK_USB_DEVICE(VENDOR_ID_LENOVO,  0x3054)},
 	{REALTEK_USB_DEVICE(VENDOR_ID_LENOVO,  0x3062)},
 	{REALTEK_USB_DEVICE(VENDOR_ID_LENOVO,  0x3069)},
 	{REALTEK_USB_DEVICE(VENDOR_ID_LENOVO,  0x3082)},

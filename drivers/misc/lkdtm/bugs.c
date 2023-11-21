@@ -134,23 +134,6 @@ noinline void lkdtm_CORRUPT_STACK_STRONG(void)
 	__lkdtm_CORRUPT_STACK((void *)&data);
 }
 
-static pid_t stack_pid;
-static unsigned long stack_addr;
-
-void lkdtm_REPORT_STACK(void)
-{
-	volatile uintptr_t magic;
-	pid_t pid = task_pid_nr(current);
-
-	if (pid != stack_pid) {
-		pr_info("Starting stack offset tracking for pid %d\n", pid);
-		stack_pid = pid;
-		stack_addr = (uintptr_t)&magic;
-	}
-
-	pr_info("Stack offset: %d\n", (int)(stack_addr - (uintptr_t)&magic));
-}
-
 void lkdtm_UNALIGNED_LOAD_STORE_WRITE(void)
 {
 	static u8 data[5] __attribute__((aligned(4))) = {1, 2, 3, 4, 5};
@@ -248,11 +231,6 @@ void lkdtm_ARRAY_BOUNDS(void)
 
 	not_checked = kmalloc(sizeof(*not_checked) * 2, GFP_KERNEL);
 	checked = kmalloc(sizeof(*checked) * 2, GFP_KERNEL);
-	if (!not_checked || !checked) {
-		kfree(not_checked);
-		kfree(checked);
-		return;
-	}
 
 	pr_info("Array access within bounds ...\n");
 	/* For both, touch all bytes in the actual member size. */

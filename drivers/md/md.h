@@ -50,7 +50,7 @@ struct md_rdev {
 
 	sector_t sectors;		/* Device size (in 512bytes sectors) */
 	struct mddev *mddev;		/* RAID array if running */
-	long long last_events;		/* IO event timestamp */
+	int last_events;		/* IO event timestamp */
 
 	/*
 	 * If meta_bdev is non-NULL, it means that a separate device is
@@ -213,10 +213,6 @@ enum flag_bits {
 				 * check if there is collision between raid1
 				 * serial bios.
 				 */
-	WantRemove,		/* Before set conf->mirrors[i] as NULL,
-				 * we set the bit first, avoiding access the
-				 * conf->mirrors[i] after it set NULL.
-				 */
 };
 
 static inline int is_badblock(struct md_rdev *rdev, sector_t s, int sectors,
@@ -282,21 +278,6 @@ struct serial_info {
 	sector_t start;		/* start sector of rb node */
 	sector_t last;		/* end sector of rb node */
 	sector_t _subtree_last; /* highest sector in subtree of rb node */
-};
-
-/*
- * mddev->curr_resync stores the current sector of the resync but
- * also has some overloaded values.
- */
-enum {
-	/* No resync in progress */
-	MD_RESYNC_NONE = 0,
-	/* Yielded to allow another conflicting resync to commence */
-	MD_RESYNC_YIELDED = 1,
-	/* Delayed to check that there is no conflict with another sync */
-	MD_RESYNC_DELAYED = 2,
-	/* Any value greater than or equal to this is in an active resync */
-	MD_RESYNC_ACTIVE = 3,
 };
 
 struct mddev {
@@ -506,7 +487,7 @@ struct mddev {
 	struct bio_set			sync_set; /* for sync operations like
 						   * metadata and bitmap writes
 						   */
-	struct bio_set			io_acct_set; /* for raid0 and raid5 io accounting */
+	mempool_t			md_io_pool;
 
 	/* Generic flush handling.
 	 * The last to finish preflush schedules a worker to submit
@@ -528,11 +509,6 @@ struct mddev {
 	bool	has_superblocks:1;
 	bool	fail_last_dev:1;
 	bool	serialize_policy:1;
-
-	/* Used to synchronize idle and frozen for action_store() */
-	KABI_EXTEND(struct mutex sync_mutex)
-	/* The sequence number for sync thread */
-	KABI_EXTEND(atomic_t sync_seq)
 };
 
 enum recovery_flags {
@@ -575,12 +551,12 @@ extern void mddev_unlock(struct mddev *mddev);
 
 static inline void md_sync_acct(struct block_device *bdev, unsigned long nr_sectors)
 {
-	atomic64_add(nr_sectors, &bdev->bd_disk->sync_io_sectors);
+	atomic_add(nr_sectors, &bdev->bd_disk->sync_io);
 }
 
 static inline void md_sync_acct_bio(struct bio *bio, unsigned long nr_sectors)
 {
-	atomic64_add(nr_sectors, &bio->bi_disk->sync_io_sectors);
+	atomic_add(nr_sectors, &bio->bi_disk->sync_io);
 }
 
 struct md_personality
@@ -708,12 +684,6 @@ struct md_thread {
 	void			*private;
 };
 
-struct md_io_acct {
-	struct bio *orig_bio;
-	unsigned long start_time;
-	struct bio bio_clone;
-};
-
 #define THREAD_WAKEUP  0
 
 static inline void safe_put_page(struct page *p)
@@ -743,7 +713,6 @@ extern void md_write_end(struct mddev *mddev);
 extern void md_done_sync(struct mddev *mddev, int blocks, int ok);
 extern void md_error(struct mddev *mddev, struct md_rdev *rdev);
 extern void md_finish_reshape(struct mddev *mddev);
-void md_account_bio(struct mddev *mddev, struct bio **bio);
 
 extern bool __must_check md_flush_request(struct mddev *mddev, struct bio *bio);
 extern void md_super_write(struct mddev *mddev, struct md_rdev *rdev,

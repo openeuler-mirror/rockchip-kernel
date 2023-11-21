@@ -71,7 +71,7 @@ int ghes_register_vendor_record_notifier(struct notifier_block *nb);
 void ghes_unregister_vendor_record_notifier(struct notifier_block *nb);
 #endif
 
-int ghes_estatus_pool_init(unsigned int num_ghes);
+int ghes_estatus_pool_init(int num_ghes);
 
 /* From drivers/edac/ghes_edac.c */
 
@@ -143,10 +143,6 @@ static inline void *acpi_hest_get_next(struct acpi_hest_generic_data *gdata)
 int ghes_notify_sea(void);
 #else
 static inline int ghes_notify_sea(void) { return -ENOENT; }
-#endif
-
-#ifdef CONFIG_ACPI_APEI_GHES_TS_CORE
-extern struct blocking_notifier_head ghes_ts_err_chain;
 #endif
 
 #endif /* GHES_H */

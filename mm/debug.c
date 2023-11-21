@@ -13,6 +13,7 @@
 #include <trace/events/mmflags.h>
 #include <linux/migrate.h>
 #include <linux/page_owner.h>
+#include <linux/page_pinner.h>
 #include <linux/ctype.h>
 
 #include "internal.h"
@@ -182,8 +183,8 @@ hex_only:
 		pr_warn("page dumped because: %s\n", reason);
 
 #ifdef CONFIG_MEMCG
-	if (!page_poisoned && page->memcg_data)
-		pr_warn("pages's memcg:%lx\n", page->memcg_data);
+	if (!page_poisoned && page->mem_cgroup)
+		pr_warn("page->mem_cgroup:%px\n", page->mem_cgroup);
 #endif
 }
 
@@ -191,6 +192,7 @@ void dump_page(struct page *page, const char *reason)
 {
 	__dump_page(page, reason);
 	dump_page_owner(page);
+	dump_page_pinner(page);
 }
 EXPORT_SYMBOL(dump_page);
 

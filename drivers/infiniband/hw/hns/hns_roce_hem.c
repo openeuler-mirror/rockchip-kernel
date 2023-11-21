@@ -455,7 +455,7 @@ static int alloc_mhop_hem(struct hns_roce_dev *hr_dev,
 	 * alloc bt space chunk for MTT/CQE.
 	 */
 	size = table->type < HEM_TYPE_MTT ? mhop->buf_chunk_size : bt_size;
-	flag = GFP_KERNEL | __GFP_NOWARN;
+	flag = (table->lowmem ? GFP_KERNEL : GFP_HIGHUSER) | __GFP_NOWARN;
 	table->hem[index->buf] = hns_roce_alloc_hem(hr_dev, size >> PAGE_SHIFT,
 						    size, flag);
 	if (!table->hem[index->buf]) {
@@ -588,19 +588,19 @@ int hns_roce_table_get(struct hns_roce_dev *hr_dev,
 	table->hem[i] = hns_roce_alloc_hem(hr_dev,
 				       table->table_chunk_size >> PAGE_SHIFT,
 				       table->table_chunk_size,
-				       GFP_KERNEL | __GFP_NOWARN);
+				       (table->lowmem ? GFP_KERNEL :
+					GFP_HIGHUSER) | __GFP_NOWARN);
 	if (!table->hem[i]) {
 		ret = -ENOMEM;
 		goto out;
 	}
 
 	/* Set HEM base address(128K/page, pa) to Hardware */
-	ret = hr_dev->hw->set_hem(hr_dev, table, obj, HEM_HOP_STEP_DIRECT);
-	if (ret) {
+	if (hr_dev->hw->set_hem(hr_dev, table, obj, HEM_HOP_STEP_DIRECT)) {
 		hns_roce_free_hem(hr_dev, table->hem[i]);
 		table->hem[i] = NULL;
-		dev_err(dev, "set HEM base address to HW failed, ret = %d.\n",
-			ret);
+		ret = -ENODEV;
+		dev_err(dev, "set HEM base address to HW failed.\n");
 		goto out;
 	}
 
@@ -619,7 +619,6 @@ static void clear_mhop_hem(struct hns_roce_dev *hr_dev,
 	u32 hop_num = mhop->hop_num;
 	u32 chunk_ba_num;
 	u32 step_idx;
-	int ret;
 
 	index->inited = HEM_INDEX_BUF;
 	chunk_ba_num = mhop->bt_chunk_size / BA_BYTE_LEN;
@@ -643,24 +642,16 @@ static void clear_mhop_hem(struct hns_roce_dev *hr_dev,
 		else
 			step_idx = hop_num;
 
-		ret = hr_dev->hw->clear_hem(hr_dev, table, obj, step_idx);
-		if (ret)
-			ibdev_warn(ibdev, "failed to clear hop%u HEM, ret = %d.\n",
-				   hop_num, ret);
+		if (hr_dev->hw->clear_hem(hr_dev, table, obj, step_idx))
+			ibdev_warn(ibdev, "failed to clear hop%u HEM.\n", hop_num);
 
-		if (index->inited & HEM_INDEX_L1) {
-			ret = hr_dev->hw->clear_hem(hr_dev, table, obj, 1);
-			if (ret)
-				ibdev_warn(ibdev, "failed to clear HEM step 1, ret = %d.\n",
-					   ret);
-		}
+		if (index->inited & HEM_INDEX_L1)
+			if (hr_dev->hw->clear_hem(hr_dev, table, obj, 1))
+				ibdev_warn(ibdev, "failed to clear HEM step 1.\n");
 
-		if (index->inited & HEM_INDEX_L0) {
-			ret = hr_dev->hw->clear_hem(hr_dev, table, obj, 0);
-			if (ret)
-				ibdev_warn(ibdev, "failed to clear HEM step 0, ret = %d.\n",
-					   ret);
-		}
+		if (index->inited & HEM_INDEX_L0)
+			if (hr_dev->hw->clear_hem(hr_dev, table, obj, 0))
+				ibdev_warn(ibdev, "failed to clear HEM step 0.\n");
 	}
 }
 
@@ -697,7 +688,6 @@ void hns_roce_table_put(struct hns_roce_dev *hr_dev,
 {
 	struct device *dev = hr_dev->dev;
 	unsigned long i;
-	int ret;
 
 	if (hns_roce_check_whether_mhop(hr_dev, table->type)) {
 		hns_roce_table_mhop_put(hr_dev, table, obj, 1);
@@ -710,10 +700,8 @@ void hns_roce_table_put(struct hns_roce_dev *hr_dev,
 					 &table->mutex))
 		return;
 
-	ret = hr_dev->hw->clear_hem(hr_dev, table, obj, HEM_HOP_STEP_DIRECT);
-	if (ret)
-		dev_warn(dev, "failed to clear HEM base address, ret = %d.\n",
-			 ret);
+	if (hr_dev->hw->clear_hem(hr_dev, table, obj, HEM_HOP_STEP_DIRECT))
+		dev_warn(dev, "failed to clear HEM base address.\n");
 
 	hns_roce_free_hem(hr_dev, table->hem[i]);
 	table->hem[i] = NULL;
@@ -736,6 +724,9 @@ void *hns_roce_table_find(struct hns_roce_dev *hr_dev,
 	u32 hem_idx = 0;
 	int length;
 	int i, j;
+
+	if (!table->lowmem)
+		return NULL;
 
 	mutex_lock(&table->mutex);
 
@@ -792,7 +783,8 @@ out:
 
 int hns_roce_init_hem_table(struct hns_roce_dev *hr_dev,
 			    struct hns_roce_hem_table *table, u32 type,
-			    unsigned long obj_size, unsigned long nobj)
+			    unsigned long obj_size, unsigned long nobj,
+			    int use_lowmem)
 {
 	unsigned long obj_per_chunk;
 	unsigned long num_hem;
@@ -869,6 +861,7 @@ int hns_roce_init_hem_table(struct hns_roce_dev *hr_dev,
 	table->type = type;
 	table->num_hem = num_hem;
 	table->obj_size = obj_size;
+	table->lowmem = use_lowmem;
 	mutex_init(&table->mutex);
 
 	return 0;
@@ -929,8 +922,6 @@ void hns_roce_cleanup_hem_table(struct hns_roce_dev *hr_dev,
 {
 	struct device *dev = hr_dev->dev;
 	unsigned long i;
-	int obj;
-	int ret;
 
 	if (hns_roce_check_whether_mhop(hr_dev, table->type)) {
 		hns_roce_cleanup_mhop_hem_table(hr_dev, table);
@@ -939,11 +930,9 @@ void hns_roce_cleanup_hem_table(struct hns_roce_dev *hr_dev,
 
 	for (i = 0; i < table->num_hem; ++i)
 		if (table->hem[i]) {
-			obj = i * table->table_chunk_size / table->obj_size;
-			ret = hr_dev->hw->clear_hem(hr_dev, table, obj, 0);
-			if (ret)
-				dev_err(dev, "Clear HEM base address failed, ret = %d.\n",
-					ret);
+			if (hr_dev->hw->clear_hem(hr_dev, table,
+			    i * table->table_chunk_size / table->obj_size, 0))
+				dev_err(dev, "Clear HEM base address failed.\n");
 
 			hns_roce_free_hem(hr_dev, table->hem[i]);
 		}

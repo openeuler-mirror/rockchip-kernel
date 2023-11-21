@@ -549,11 +549,8 @@ static int igc_ethtool_set_eeprom(struct net_device *netdev,
 	return ret_val;
 }
 
-static void
-igc_ethtool_get_ringparam(struct net_device *netdev,
-			  struct ethtool_ringparam *ring,
-			  struct kernel_ethtool_ringparam *kernel_ering,
-			  struct netlink_ext_ack *extack)
+static void igc_ethtool_get_ringparam(struct net_device *netdev,
+				      struct ethtool_ringparam *ring)
 {
 	struct igc_adapter *adapter = netdev_priv(netdev);
 
@@ -563,11 +560,8 @@ igc_ethtool_get_ringparam(struct net_device *netdev,
 	ring->tx_pending = adapter->tx_ring_count;
 }
 
-static int
-igc_ethtool_set_ringparam(struct net_device *netdev,
-			  struct ethtool_ringparam *ring,
-			  struct kernel_ethtool_ringparam *kernel_ering,
-			  struct netlink_ext_ack *extack)
+static int igc_ethtool_set_ringparam(struct net_device *netdev,
+				     struct ethtool_ringparam *ring)
 {
 	struct igc_adapter *adapter = netdev_priv(netdev);
 	struct igc_ring *temp_ring;
@@ -863,9 +857,7 @@ static void igc_ethtool_get_stats(struct net_device *netdev,
 }
 
 static int igc_ethtool_get_coalesce(struct net_device *netdev,
-				    struct ethtool_coalesce *ec,
-				    struct kernel_ethtool_coalesce *kernel_coal,
-				    struct netlink_ext_ack *extack)
+				    struct ethtool_coalesce *ec)
 {
 	struct igc_adapter *adapter = netdev_priv(netdev);
 
@@ -885,9 +877,7 @@ static int igc_ethtool_get_coalesce(struct net_device *netdev,
 }
 
 static int igc_ethtool_set_coalesce(struct net_device *netdev,
-				    struct ethtool_coalesce *ec,
-				    struct kernel_ethtool_coalesce *kernel_coal,
-				    struct netlink_ext_ack *extack)
+				    struct ethtool_coalesce *ec)
 {
 	struct igc_adapter *adapter = netdev_priv(netdev);
 	int i;

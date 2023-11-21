@@ -36,7 +36,6 @@
 #include <linux/magic.h>
 #include <linux/migrate.h>
 #include <linux/uio.h>
-#include <linux/dynamic_hugetlb.h>
 
 #include <linux/uaccess.h>
 #include <linux/sched/mm.h>
@@ -120,45 +119,6 @@ static void huge_pagevec_release(struct pagevec *pvec)
 }
 
 /*
- * Check current numa node has enough free huge pages to mmap hugetlb.
- * resv_huge_pages_node: mmap hugepages but haven't used in current
- * numa node.
- */
-static int hugetlb_checknode(struct vm_area_struct *vma, long nr)
-{
-	int nid;
-	int ret = 0;
-	struct hstate *h = &default_hstate;
-
-	spin_lock(&hugetlb_lock);
-
-	nid = vma->vm_flags >> CHECKNODE_BITS;
-
-	if (nid >= MAX_NUMNODES) {
-		ret = -EINVAL;
-		goto err;
-	}
-
-	if (h->free_huge_pages_node[nid] < nr) {
-		ret = -ENOMEM;
-		goto err;
-	} else {
-		if (h->resv_huge_pages_node[nid] + nr >
-				h->free_huge_pages_node[nid]) {
-			ret = -ENOMEM;
-			goto err;
-		} else {
-			h->resv_huge_pages_node[nid] += nr;
-			ret = 0;
-		}
-	}
-
-err:
-	spin_unlock(&hugetlb_lock);
-	return ret;
-}
-
-/*
  * Mask used when checking the page offset value passed in via system
  * calls.  This value will be converted to a loff_t which is signed.
  * Therefore, we want to check the upper PAGE_SHIFT + 1 bits of the
@@ -215,12 +175,6 @@ static int hugetlbfs_file_mmap(struct file *file, struct vm_area_struct *vma)
 	inode_lock(inode);
 	file_accessed(file);
 
-	if (is_set_cdmmask() && (vma->vm_flags & VM_CHECKNODE)) {
-		ret = hugetlb_checknode(vma, len >> huge_page_shift(h));
-		if (ret < 0)
-			goto out;
-	}
-
 	ret = -ENOMEM;
 	if (hugetlb_reserve_pages(inode,
 				vma->vm_pgoff >> huge_page_order(h),
@@ -252,13 +206,9 @@ hugetlb_get_unmapped_area_bottomup(struct file *file, unsigned long addr,
 	info.flags = 0;
 	info.length = len;
 	info.low_limit = current->mm->mmap_base;
-	info.high_limit = arch_get_mmap_end(addr);
+	info.high_limit = TASK_SIZE;
 	info.align_mask = PAGE_MASK & ~huge_page_mask(h);
 	info.align_offset = 0;
-
-	if (enable_mmap_dvpp)
-		dvpp_mmap_get_area(&info, flags);
-
 	return vm_unmapped_area(&info);
 }
 
@@ -272,13 +222,9 @@ hugetlb_get_unmapped_area_topdown(struct file *file, unsigned long addr,
 	info.flags = VM_UNMAPPED_AREA_TOPDOWN;
 	info.length = len;
 	info.low_limit = max(PAGE_SIZE, mmap_min_addr);
-	info.high_limit = arch_get_mmap_base(addr, current->mm->mmap_base);
+	info.high_limit = current->mm->mmap_base;
 	info.align_mask = PAGE_MASK & ~huge_page_mask(h);
 	info.align_offset = 0;
-
-	if (enable_mmap_dvpp)
-		dvpp_mmap_get_area(&info, flags);
-
 	addr = vm_unmapped_area(&info);
 
 	/*
@@ -291,11 +237,7 @@ hugetlb_get_unmapped_area_topdown(struct file *file, unsigned long addr,
 		VM_BUG_ON(addr != -ENOMEM);
 		info.flags = 0;
 		info.low_limit = current->mm->mmap_base;
-		info.high_limit = arch_get_mmap_end(addr);
-
-		if (enable_mmap_dvpp)
-			dvpp_mmap_get_area(&info, flags);
-
+		info.high_limit = TASK_SIZE;
 		addr = vm_unmapped_area(&info);
 	}
 
@@ -309,7 +251,6 @@ hugetlb_get_unmapped_area(struct file *file, unsigned long addr,
 	struct mm_struct *mm = current->mm;
 	struct vm_area_struct *vma;
 	struct hstate *h = hstate_file(file);
-	const unsigned long mmap_end = arch_get_mmap_end(addr);
 
 	if (len & ~huge_page_mask(h))
 		return -EINVAL;
@@ -324,12 +265,8 @@ hugetlb_get_unmapped_area(struct file *file, unsigned long addr,
 
 	if (addr) {
 		addr = ALIGN(addr, huge_page_size(h));
-
-		if (dvpp_mmap_check(addr, len, flags))
-			return -ENOMEM;
-
 		vma = find_vma(mm, addr);
-		if (mmap_end - len >= addr &&
+		if (TASK_SIZE - len >= addr &&
 		    (!vma || addr + len <= vm_start_gap(vma)))
 			return addr;
 	}
@@ -472,11 +409,10 @@ hugetlb_vmdelete_list(struct rb_root_cached *root, pgoff_t start, pgoff_t end)
 	struct vm_area_struct *vma;
 
 	/*
-	 * end == 0 indicates that the entire range after start should be
-	 * unmapped.  Note, end is exclusive, whereas the interval tree takes
-	 * an inclusive "last".
+	 * end == 0 indicates that the entire range after
+	 * start should be unmapped.
 	 */
-	vma_interval_tree_foreach(vma, root, start, end ? end - 1 : ULONG_MAX) {
+	vma_interval_tree_foreach(vma, root, start, end ? end : ULONG_MAX) {
 		unsigned long v_offset;
 		unsigned long v_end;
 
@@ -596,25 +532,12 @@ static void remove_inode_hugepages(struct inode *inode, loff_t lstart,
 			 * the subpool and global reserve usage count can need
 			 * to be adjusted.
 			 */
-			VM_BUG_ON(HPageRestoreReserve(page));
+			VM_BUG_ON(PagePrivate(page));
 			remove_huge_page(page);
-			/*
-			 * if the page is from buddy system, do not add to freed.
-			 * because freed is used for hugetlbfs reservation accounting.
-			 */
-
-#ifdef CONFIG_ASCEND_SHARE_POOL
-			if (HPageTemporary(page) != 0) {
-				unlock_page(page);
-				if (!truncate_op)
-					mutex_unlock(&hugetlb_fault_mutex_table[hash]);
-				continue;
-			}
-#endif
 			freed++;
 			if (!truncate_op) {
 				if (unlikely(hugetlb_unreserve_pages(inode,
-									index, index + 1, 1)))
+							index, index + 1, 1)))
 					hugetlb_fix_reserve_counts(inode);
 			}
 
@@ -732,7 +655,7 @@ static long hugetlbfs_fallocate(struct file *file, int mode, loff_t offset,
 	 * as well as being converted to page offsets.
 	 */
 	start = offset >> hpage_shift;
-	end = DIV_ROUND_UP_ULL(offset + len, hpage_size);
+	end = (offset + len + hpage_size - 1) >> hpage_shift;
 
 	inode_lock(inode);
 
@@ -817,7 +740,7 @@ static long hugetlbfs_fallocate(struct file *file, int mode, loff_t offset,
 
 		mutex_unlock(&hugetlb_fault_mutex_table[hash]);
 
-		SetHPageMigratable(page);
+		set_page_huge_active(page);
 		/*
 		 * unlock_page because locked by add_to_page_cache()
 		 * put_page() due to reference from alloc_huge_page()
@@ -1048,9 +971,15 @@ static int hugetlbfs_migrate_page(struct address_space *mapping,
 	if (rc != MIGRATEPAGE_SUCCESS)
 		return rc;
 
-	if (hugetlb_page_subpool(page)) {
-		hugetlb_set_page_subpool(newpage, hugetlb_page_subpool(page));
-		hugetlb_set_page_subpool(page, NULL);
+	/*
+	 * page_private is subpool pointer in hugetlb pages.  Transfer to
+	 * new page.  PagePrivate is not associated with page_private for
+	 * hugetlb pages and can not be set here as only page_huge_active
+	 * pages can be migrated.
+	 */
+	if (page_private(page)) {
+		set_page_private(newpage, page_private(page));
+		set_page_private(page, 0);
 	}
 
 	if (mode != MIGRATE_SYNC_NO_COPY)
@@ -1068,12 +997,7 @@ static int hugetlbfs_error_remove_page(struct address_space *mapping,
 	pgoff_t index = page->index;
 
 	remove_huge_page(page);
-#ifdef CONFIG_ASCEND_SHARE_POOL
-	if (!HPageTemporary(page) &&
-			unlikely(hugetlb_unreserve_pages(inode, index, index + 1, 1)))
-#else
 	if (unlikely(hugetlb_unreserve_pages(inode, index, index + 1, 1)))
-#endif
 		hugetlb_fix_reserve_counts(inode);
 
 	return 0;
@@ -1212,8 +1136,6 @@ static struct inode *hugetlbfs_alloc_inode(struct super_block *sb)
 	 * private inode.  This simplifies hugetlbfs_destroy_inode.
 	 */
 	mpol_shared_policy_init(&p->policy, NULL);
-	/* Initialize hpool here in case of a quick call to destroy */
-	link_hpool(p, sbinfo->hstate);
 
 	return &p->vfs_inode;
 }
@@ -1227,7 +1149,6 @@ static void hugetlbfs_destroy_inode(struct inode *inode)
 {
 	hugetlbfs_inc_free_inodes(HUGETLBFS_SB(inode->i_sb));
 	mpol_free_shared_policy(&HUGETLBFS_I(inode)->policy);
-	unlink_hpool(HUGETLBFS_I(inode));
 }
 
 static const struct address_space_operations hugetlbfs_aops = {
@@ -1339,7 +1260,7 @@ static int hugetlbfs_parse_param(struct fs_context *fc, struct fs_parameter *par
 
 	case Opt_size:
 		/* memparse() will accept a K/M/G without a digit */
-		if (!param->string || !isdigit(param->string[0]))
+		if (!isdigit(param->string[0]))
 			goto bad_val;
 		ctx->max_size_opt = memparse(param->string, &rest);
 		ctx->max_val_type = SIZE_STD;
@@ -1349,7 +1270,7 @@ static int hugetlbfs_parse_param(struct fs_context *fc, struct fs_parameter *par
 
 	case Opt_nr_inodes:
 		/* memparse() will accept a K/M/G without a digit */
-		if (!param->string || !isdigit(param->string[0]))
+		if (!isdigit(param->string[0]))
 			goto bad_val;
 		ctx->nr_inodes = memparse(param->string, &rest);
 		return 0;
@@ -1365,7 +1286,7 @@ static int hugetlbfs_parse_param(struct fs_context *fc, struct fs_parameter *par
 
 	case Opt_min_size:
 		/* memparse() will accept a K/M/G without a digit */
-		if (!param->string || !isdigit(param->string[0]))
+		if (!isdigit(param->string[0]))
 			goto bad_val;
 		ctx->min_size_opt = memparse(param->string, &rest);
 		ctx->min_val_type = SIZE_STD;

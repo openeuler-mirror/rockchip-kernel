@@ -1080,9 +1080,6 @@ static int fl_set_geneve_opt(const struct nlattr *nla, struct fl_flow_key *key,
 	if (option_len > sizeof(struct geneve_opt))
 		data_len = option_len - sizeof(struct geneve_opt);
 
-	if (key->enc_opts.len > FLOW_DIS_TUN_OPTS_MAX - 4)
-		return -ERANGE;
-
 	opt = (struct geneve_opt *)&key->enc_opts.data[key->enc_opts.len];
 	memset(opt, 0xff, option_len);
 	opt->length = data_len / 4;
@@ -2172,24 +2169,18 @@ static void fl_walk(struct tcf_proto *tp, struct tcf_walker *arg,
 
 	arg->count = arg->skip;
 
-	rcu_read_lock();
 	idr_for_each_entry_continue_ul(&head->handle_idr, f, tmp, id) {
 		/* don't return filters that are being deleted */
 		if (!refcount_inc_not_zero(&f->refcnt))
 			continue;
-		rcu_read_unlock();
-
 		if (arg->fn(tp, f, arg) < 0) {
 			__fl_put(f);
 			arg->stop = 1;
-			rcu_read_lock();
 			break;
 		}
 		__fl_put(f);
 		arg->count++;
-		rcu_read_lock();
 	}
-	rcu_read_unlock();
 	arg->cookie = id;
 }
 

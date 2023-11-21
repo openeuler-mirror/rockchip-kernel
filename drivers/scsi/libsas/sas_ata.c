@@ -122,10 +122,9 @@ static void sas_ata_task_done(struct sas_task *task)
 		}
 	}
 
-	if (stat->stat == SAS_PROTO_RESPONSE ||
-	    stat->stat == SAS_SAM_STAT_GOOD ||
-	    (stat->stat == SAS_SAM_STAT_CHECK_CONDITION &&
-	      dev->sata_dev.class == ATA_DEV_ATAPI)) {
+	if (stat->stat == SAS_PROTO_RESPONSE || stat->stat == SAM_STAT_GOOD ||
+	    ((stat->stat == SAM_STAT_CHECK_CONDITION &&
+	      dev->sata_dev.class == ATA_DEV_ATAPI))) {
 		memcpy(dev->sata_dev.fis, resp->ending_fis, ATA_RESP_FIS_SIZE);
 
 		if (!link->sactive) {
@@ -147,8 +146,8 @@ static void sas_ata_task_done(struct sas_task *task)
 				qc->flags |= ATA_QCFLAG_FAILED;
 			}
 
-			dev->sata_dev.fis[2] = ATA_ERR | ATA_DRDY; /* tf status */
-			dev->sata_dev.fis[3] = ATA_ABORTED; /* tf error */
+			dev->sata_dev.fis[3] = 0x04; /* status err */
+			dev->sata_dev.fis[2] = ATA_ERR;
 		}
 	}
 
@@ -203,7 +202,7 @@ static unsigned int sas_ata_qc_issue(struct ata_queued_cmd *qc)
 		task->total_xfer_len = qc->nbytes;
 		task->num_scatter = qc->n_elem;
 		task->data_dir = qc->dma_dir;
-	} else if (!ata_is_data(qc->tf.protocol)) {
+	} else if (qc->tf.protocol == ATA_PROT_NODATA) {
 		task->data_dir = DMA_NONE;
 	} else {
 		for_each_sg(qc->sg, sg, qc->n_elem, si)
@@ -301,31 +300,6 @@ static int sas_ata_clear_pending(struct domain_device *dev, struct ex_phy *phy)
 		return 1;
 }
 
-int smp_ata_check_ready_type(struct ata_link *link)
-{
-	struct domain_device *dev = link->ap->private_data;
-	struct sas_phy *phy = sas_get_local_phy(dev);
-	struct domain_device *ex_dev = dev->parent;
-	enum sas_device_type type = SAS_PHY_UNUSED;
-	u8 sas_addr[SAS_ADDR_SIZE];
-	int res;
-
-	res = sas_get_phy_attached_dev(ex_dev, phy->number, sas_addr, &type);
-	sas_put_local_phy(phy);
-	if (res)
-		return res;
-
-	switch (type) {
-	case SAS_SATA_PENDING:
-		return 0;
-	case SAS_END_DEVICE:
-		return 1;
-	default:
-		return -ENODEV;
-	}
-}
-EXPORT_SYMBOL_GPL(smp_ata_check_ready_type);
-
 static int smp_ata_check_ready(struct ata_link *link)
 {
 	int res;
@@ -397,14 +371,22 @@ static int sas_ata_printk(const char *level, const struct domain_device *ddev,
 	return r;
 }
 
-static int sas_ata_wait_after_reset(struct domain_device *dev, unsigned long deadline)
+static int sas_ata_hard_reset(struct ata_link *link, unsigned int *class,
+			      unsigned long deadline)
 {
-	struct sata_device *sata_dev = &dev->sata_dev;
-	int (*check_ready)(struct ata_link *link);
-	struct ata_port *ap = sata_dev->ap;
-	struct ata_link *link = &ap->link;
+	int ret = 0, res;
 	struct sas_phy *phy;
-	int ret;
+	struct ata_port *ap = link->ap;
+	int (*check_ready)(struct ata_link *link);
+	struct domain_device *dev = ap->private_data;
+	struct sas_internal *i = dev_to_sas_internal(dev);
+
+	res = i->dft->lldd_I_T_nexus_reset(dev);
+	if (res == -ENODEV)
+		return res;
+
+	if (res != TMF_RESP_FUNC_COMPLETE)
+		sas_ata_printk(KERN_DEBUG, dev, "Unable to reset ata device?\n");
 
 	phy = sas_get_local_phy(dev);
 	if (scsi_is_sas_phy_local(phy))
@@ -416,26 +398,6 @@ static int sas_ata_wait_after_reset(struct domain_device *dev, unsigned long dea
 	ret = ata_wait_after_reset(link, deadline, check_ready);
 	if (ret && ret != -EAGAIN)
 		sas_ata_printk(KERN_ERR, dev, "reset failed (errno=%d)\n", ret);
-
-	return ret;
-}
-
-static int sas_ata_hard_reset(struct ata_link *link, unsigned int *class,
-			      unsigned long deadline)
-{
-	struct ata_port *ap = link->ap;
-	struct domain_device *dev = ap->private_data;
-	struct sas_internal *i = dev_to_sas_internal(dev);
-	int ret;
-
-	ret = i->dft->lldd_I_T_nexus_reset(dev);
-	if (ret == -ENODEV)
-		return ret;
-
-	if (ret != TMF_RESP_FUNC_COMPLETE)
-		sas_ata_printk(KERN_DEBUG, dev, "Unable to reset ata device?\n");
-
-	ret = sas_ata_wait_after_reset(dev, deadline);
 
 	*class = dev->sata_dev.class;
 
@@ -899,21 +861,3 @@ void sas_ata_wait_eh(struct domain_device *dev)
 	ap = dev->sata_dev.ap;
 	ata_port_wait_eh(ap);
 }
-
-void sas_ata_device_link_abort(struct domain_device *device, bool force_reset)
-{
-	struct ata_port *ap = device->sata_dev.ap;
-	struct ata_link *link = &ap->link;
-	unsigned long flags;
-
-	spin_lock_irqsave(ap->lock, flags);
-	device->sata_dev.fis[2] = ATA_ERR | ATA_DRDY; /* tf status */
-	device->sata_dev.fis[3] = ATA_ABORTED; /* tf error */
-
-	link->eh_info.err_mask |= AC_ERR_DEV;
-	if (force_reset)
-		link->eh_info.action |= ATA_EH_RESET;
-	ata_link_abort(link);
-	spin_unlock_irqrestore(ap->lock, flags);
-}
-EXPORT_SYMBOL_GPL(sas_ata_device_link_abort);

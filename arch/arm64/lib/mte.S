@@ -37,6 +37,26 @@ SYM_FUNC_START(mte_clear_page_tags)
 SYM_FUNC_END(mte_clear_page_tags)
 
 /*
+ * Zero the page and tags at the same time
+ *
+ * Parameters:
+ *	x0 - address to the beginning of the page
+ */
+SYM_FUNC_START(mte_zero_clear_page_tags)
+	mrs	x1, dczid_el0
+	and	w1, w1, #0xf
+	mov	x2, #4
+	lsl	x1, x2, x1
+	and	x0, x0, #(1 << MTE_TAG_SHIFT) - 1	// clear the tag
+
+1:	dc	gzva, x0
+	add	x0, x0, x1
+	tst	x0, #(PAGE_SIZE - 1)
+	b.ne	1b
+	ret
+SYM_FUNC_END(mte_zero_clear_page_tags)
+
+/*
  * Copy the tags from the source page to the destination one
  *   x0 - address of the destination page
  *   x1 - address of the source page
@@ -55,25 +75,6 @@ SYM_FUNC_START(mte_copy_page_tags)
 SYM_FUNC_END(mte_copy_page_tags)
 
 /*
- * Copy the tags from the source page to the destination one wiht machine check safe
- *   x0 - address of the destination page
- *   x1 - address of the source page
- */
-SYM_FUNC_START(mte_copy_page_tags_mc)
-	mov	x2, x0
-	mov	x3, x1
-	multitag_transfer_size x5, x6
-1:
-CPY_MC(2f, ldgm	x4, [x3])
-	stgm	x4, [x2]
-	add	x2, x2, x5
-	add	x3, x3, x5
-	tst	x2, #(PAGE_SIZE - 1)
-	b.ne	1b
-2:	ret
-SYM_FUNC_END(mte_copy_page_tags_mc)
-
-/*
  * Read tags from a user buffer (one tag per byte) and set the corresponding
  * tags at the given kernel address. Used by PTRACE_POKEMTETAGS.
  *   x0 - kernel address (to)
@@ -86,7 +87,7 @@ SYM_FUNC_START(mte_copy_tags_from_user)
 	mov	x3, x1
 	cbz	x2, 2f
 1:
-	user_ldst 2f, ldtrb, w4, x1, 0
+	uao_user_alternative 2f, ldrb, ldtrb, w4, x1, 0
 	lsl	x4, x4, #MTE_TAG_SHIFT
 	stg	x4, [x0], #MTE_GRANULE_SIZE
 	add	x1, x1, #1
@@ -113,7 +114,7 @@ SYM_FUNC_START(mte_copy_tags_to_user)
 1:
 	ldg	x4, [x1]
 	ubfx	x4, x4, #MTE_TAG_SHIFT, #MTE_TAG_SIZE
-	user_ldst 2f, sttrb, w4, x0, 0
+	uao_user_alternative 2f, strb, sttrb, w4, x0, 0
 	add	x0, x0, #1
 	add	x1, x1, #MTE_GRANULE_SIZE
 	subs	x2, x2, #1

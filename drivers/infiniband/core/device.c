@@ -2759,18 +2759,10 @@ static int __init ib_core_init(void)
 
 	nldev_init();
 	rdma_nl_register(RDMA_NL_LS, ibnl_ls_cb_table);
-	ret = roce_gid_mgmt_init();
-	if (ret) {
-		pr_warn("Couldn't init RoCE GID management\n");
-		goto err_parent;
-	}
+	roce_gid_mgmt_init();
 
 	return 0;
 
-err_parent:
-	rdma_nl_unregister(RDMA_NL_LS);
-	nldev_exit();
-	unregister_pernet_device(&rdma_dev_net_ops);
 err_compat:
 	unregister_blocking_lsm_notifier(&ibdev_lsm_nb);
 err_sa:
@@ -2793,8 +2785,8 @@ err:
 static void __exit ib_core_cleanup(void)
 {
 	roce_gid_mgmt_cleanup();
-	rdma_nl_unregister(RDMA_NL_LS);
 	nldev_exit();
+	rdma_nl_unregister(RDMA_NL_LS);
 	unregister_pernet_device(&rdma_dev_net_ops);
 	unregister_blocking_lsm_notifier(&ibdev_lsm_nb);
 	ib_sa_cleanup();

@@ -423,7 +423,7 @@ static void flexrm_enqueue_desc(u32 nhpos, u32 nhcnt, u32 reqid,
 	 *
 	 * In general use, number of non-HEADER descriptors can easily go
 	 * beyond 31. To tackle this situation, we have packet (or request)
-	 * extension bits (STARTPKT and ENDPKT) in the HEADER descriptor.
+	 * extenstion bits (STARTPKT and ENDPKT) in the HEADER descriptor.
 	 *
 	 * To use packet extension, the first HEADER descriptor of request
 	 * (or packet) will have STARTPKT=1 and ENDPKT=0. The intermediate
@@ -632,15 +632,15 @@ static int flexrm_spu_dma_map(struct device *dev, struct brcm_message *msg)
 
 	rc = dma_map_sg(dev, msg->spu.src, sg_nents(msg->spu.src),
 			DMA_TO_DEVICE);
-	if (!rc)
-		return -EIO;
+	if (rc < 0)
+		return rc;
 
 	rc = dma_map_sg(dev, msg->spu.dst, sg_nents(msg->spu.dst),
 			DMA_FROM_DEVICE);
-	if (!rc) {
+	if (rc < 0) {
 		dma_unmap_sg(dev, msg->spu.src, sg_nents(msg->spu.src),
 			     DMA_TO_DEVICE);
-		return -EIO;
+		return rc;
 	}
 
 	return 0;
@@ -1095,7 +1095,7 @@ static int flexrm_process_completions(struct flexrm_ring *ring)
 	/*
 	 * Get current completion read and write offset
 	 *
-	 * Note: We should read completion write pointer at least once
+	 * Note: We should read completion write pointer atleast once
 	 * after we get a MSI interrupt because HW maintains internal
 	 * MSI status which will allow next MSI interrupt only after
 	 * completion write pointer is read.

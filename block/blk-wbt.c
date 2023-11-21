@@ -419,14 +419,6 @@ static void wbt_update_limits(struct rq_wb *rwb)
 	rwb_wake_all(rwb);
 }
 
-bool wbt_disabled(struct request_queue *q)
-{
-	struct rq_qos *rqos = wbt_rq_qos(q);
-
-	return !rqos || RQWB(rqos)->enable_state == WBT_STATE_OFF_DEFAULT ||
-	       RQWB(rqos)->enable_state == WBT_STATE_OFF_MANUAL;
-}
-
 u64 wbt_get_min_lat(struct request_queue *q)
 {
 	struct rq_qos *rqos = wbt_rq_qos(q);
@@ -440,13 +432,8 @@ void wbt_set_min_lat(struct request_queue *q, u64 val)
 	struct rq_qos *rqos = wbt_rq_qos(q);
 	if (!rqos)
 		return;
-
 	RQWB(rqos)->min_lat_nsec = val;
-	if (val)
-		RQWB(rqos)->enable_state = WBT_STATE_ON_MANUAL;
-	else
-		RQWB(rqos)->enable_state = WBT_STATE_OFF_MANUAL;
-
+	RQWB(rqos)->enable_state = WBT_STATE_ON_MANUAL;
 	wbt_update_limits(RQWB(rqos));
 }
 
@@ -831,7 +818,6 @@ int wbt_init(struct request_queue *q)
 {
 	struct rq_wb *rwb;
 	int i;
-	int ret;
 
 	rwb = kzalloc(sizeof(*rwb), GFP_KERNEL);
 	if (!rwb)
@@ -852,26 +838,20 @@ int wbt_init(struct request_queue *q)
 	rwb->last_comp = rwb->last_issue = jiffies;
 	rwb->win_nsec = RWB_WINDOW_NSEC;
 	rwb->enable_state = WBT_STATE_ON_DEFAULT;
-	rwb->wc = test_bit(QUEUE_FLAG_WC, &q->queue_flags);
+	rwb->wc = 1;
 	rwb->rq_depth.default_depth = RWB_DEF_DEPTH;
-	rwb->min_lat_nsec = wbt_default_latency_nsec(q);
-
-	wbt_queue_depth_changed(&rwb->rqos);
+	wbt_update_limits(rwb);
 
 	/*
 	 * Assign rwb and add the stats callback.
 	 */
-	ret = rq_qos_add(q, &rwb->rqos);
-	if (ret)
-		goto err_free;
-
+	rq_qos_add(q, &rwb->rqos);
 	blk_stat_add_callback(q, rwb->cb);
 
+	rwb->min_lat_nsec = wbt_default_latency_nsec(q);
+
+	wbt_queue_depth_changed(&rwb->rqos);
+	wbt_set_write_cache(q, test_bit(QUEUE_FLAG_WC, &q->queue_flags));
+
 	return 0;
-
-err_free:
-	blk_stat_free_callback(rwb->cb);
-	kfree(rwb);
-	return ret;
-
 }

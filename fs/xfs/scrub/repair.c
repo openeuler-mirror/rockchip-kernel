@@ -244,19 +244,19 @@ xrep_calc_ag_resblks(
 	 * bnobt/cntbt or inobt/finobt as pairs.
 	 */
 	bnobt_sz = 2 * xfs_allocbt_calc_size(mp, freelen);
-	if (xfs_has_sparseinodes(mp))
+	if (xfs_sb_version_hassparseinodes(&mp->m_sb))
 		inobt_sz = xfs_iallocbt_calc_size(mp, icount /
 				XFS_INODES_PER_HOLEMASK_BIT);
 	else
 		inobt_sz = xfs_iallocbt_calc_size(mp, icount /
 				XFS_INODES_PER_CHUNK);
-	if (xfs_has_finobt(mp))
+	if (xfs_sb_version_hasfinobt(&mp->m_sb))
 		inobt_sz *= 2;
-	if (xfs_has_reflink(mp))
+	if (xfs_sb_version_hasreflink(&mp->m_sb))
 		refcbt_sz = xfs_refcountbt_calc_size(mp, usedlen);
 	else
 		refcbt_sz = 0;
-	if (xfs_has_rmapbt(mp)) {
+	if (xfs_sb_version_hasrmapbt(&mp->m_sb)) {
 		/*
 		 * Guess how many blocks we need to rebuild the rmapbt.
 		 * For non-reflink filesystems we can't have more records than
@@ -265,7 +265,7 @@ xrep_calc_ag_resblks(
 		 * many rmaps there could be in the AG, so we start off with
 		 * what we hope is an generous over-estimation.
 		 */
-		if (xfs_has_reflink(mp))
+		if (xfs_sb_version_hasreflink(&mp->m_sb))
 			rmapbt_sz = xfs_rmapbt_calc_size(mp,
 					(unsigned long long)aglen * 2);
 		else
@@ -606,7 +606,7 @@ xrep_reap_extents(
 	xfs_fsblock_t			fsbno;
 	int				error = 0;
 
-	ASSERT(xfs_has_rmapbt(sc->mp));
+	ASSERT(xfs_sb_version_hasrmapbt(&sc->mp->m_sb));
 
 	for_each_xbitmap_block(fsbno, bmr, n, bitmap) {
 		ASSERT(sc->ip != NULL ||
@@ -944,7 +944,7 @@ xrep_ino_dqattach(
 			xrep_force_quotacheck(sc, XFS_DQTYPE_GROUP);
 		if (XFS_IS_PQUOTA_ON(sc->mp) && !sc->ip->i_pdquot)
 			xrep_force_quotacheck(sc, XFS_DQTYPE_PROJ);
-		fallthrough;
+		/* fall through */
 	case -ESRCH:
 		error = 0;
 		break;

@@ -1197,7 +1197,6 @@ static ssize_t store_no_turbo(struct kobject *a, struct kobj_attribute *b,
 	mutex_unlock(&intel_pstate_limits_lock);
 
 	intel_pstate_update_policies();
-	arch_set_max_freq_ratio(global.no_turbo);
 
 	mutex_unlock(&intel_pstate_driver_lock);
 
@@ -2101,8 +2100,6 @@ static const struct x86_cpu_id intel_pstate_cpu_ids[] = {
 	X86_MATCH(ATOM_GOLDMONT,	core_funcs),
 	X86_MATCH(ATOM_GOLDMONT_PLUS,	core_funcs),
 	X86_MATCH(SKYLAKE_X,		core_funcs),
-	X86_MATCH(ICELAKE_X,		core_funcs),
-	X86_MATCH(SAPPHIRERAPIDS_X,	core_funcs),
 	{}
 };
 MODULE_DEVICE_TABLE(x86cpu, intel_pstate_cpu_ids);
@@ -2111,13 +2108,17 @@ static const struct x86_cpu_id intel_pstate_cpu_oob_ids[] __initconst = {
 	X86_MATCH(BROADWELL_D,		core_funcs),
 	X86_MATCH(BROADWELL_X,		core_funcs),
 	X86_MATCH(SKYLAKE_X,		core_funcs),
-	X86_MATCH(ICELAKE_X,		core_funcs),
-	X86_MATCH(SAPPHIRERAPIDS_X,	core_funcs),
 	{}
 };
 
 static const struct x86_cpu_id intel_pstate_cpu_ee_disable_ids[] = {
 	X86_MATCH(KABYLAKE,		core_funcs),
+	{}
+};
+
+static const struct x86_cpu_id intel_pstate_hwp_boost_ids[] = {
+	X86_MATCH(SKYLAKE_X,		core_funcs),
+	X86_MATCH(SKYLAKE,		core_funcs),
 	{}
 };
 
@@ -2139,9 +2140,12 @@ static int intel_pstate_init_cpu(unsigned int cpunum)
 		cpu->epp_default = -EINVAL;
 
 		if (hwp_active) {
+			const struct x86_cpu_id *id;
+
 			intel_pstate_hwp_enable(cpu);
 
-			if (intel_pstate_acpi_pm_profile_server())
+			id = x86_match_cpu(intel_pstate_hwp_boost_ids);
+			if (id && intel_pstate_acpi_pm_profile_server())
 				hwp_boost = true;
 		}
 	} else if (hwp_active) {
@@ -3031,15 +3035,11 @@ static int __init intel_pstate_init(void)
 	if (boot_cpu_data.x86_vendor != X86_VENDOR_INTEL)
 		return -ENODEV;
 
+	if (no_load)
+		return -ENODEV;
+
 	id = x86_match_cpu(hwp_support_ids);
 	if (id) {
-		bool hwp_forced = intel_pstate_hwp_is_enabled();
-
-		if (hwp_forced)
-			pr_info("HWP enabled by BIOS\n");
-		else if (no_load)
-			return -ENODEV;
-
 		copy_cpu_funcs(&core_funcs);
 		/*
 		 * Avoid enabling HWP for processors without EPP support,
@@ -3049,7 +3049,8 @@ static int __init intel_pstate_init(void)
 		 * If HWP is enabled already, though, there is no choice but to
 		 * deal with it.
 		 */
-		if ((!no_hwp && boot_cpu_has(X86_FEATURE_HWP_EPP)) || hwp_forced) {
+		if ((!no_hwp && boot_cpu_has(X86_FEATURE_HWP_EPP)) ||
+		    intel_pstate_hwp_is_enabled()) {
 			hwp_active++;
 			hwp_mode_bdw = id->driver_data;
 			intel_pstate.attr = hwp_cpufreq_attrs;
@@ -3060,11 +3061,7 @@ static int __init intel_pstate_init(void)
 
 			goto hwp_cpu_matched;
 		}
-		pr_info("HWP not enabled\n");
 	} else {
-		if (no_load)
-			return -ENODEV;
-
 		id = x86_match_cpu(intel_pstate_cpu_ids);
 		if (!id) {
 			pr_info("CPU model not supported\n");
@@ -3141,9 +3138,10 @@ static int __init intel_pstate_setup(char *str)
 	else if (!strcmp(str, "passive"))
 		default_driver = &intel_cpufreq;
 
-	if (!strcmp(str, "no_hwp"))
+	if (!strcmp(str, "no_hwp")) {
+		pr_info("HWP disabled\n");
 		no_hwp = 1;
-
+	}
 	if (!strcmp(str, "force"))
 		force_load = 1;
 	if (!strcmp(str, "hwp_only"))

@@ -307,10 +307,8 @@ bnad_get_wol(struct net_device *netdev, struct ethtool_wolinfo *wolinfo)
 	wolinfo->wolopts = 0;
 }
 
-static int bnad_get_coalesce(struct net_device *netdev,
-			     struct ethtool_coalesce *coalesce,
-			     struct kernel_ethtool_coalesce *kernel_coal,
-			     struct netlink_ext_ack *extack)
+static int
+bnad_get_coalesce(struct net_device *netdev, struct ethtool_coalesce *coalesce)
 {
 	struct bnad *bnad = netdev_priv(netdev);
 	unsigned long flags;
@@ -330,10 +328,8 @@ static int bnad_get_coalesce(struct net_device *netdev,
 	return 0;
 }
 
-static int bnad_set_coalesce(struct net_device *netdev,
-			     struct ethtool_coalesce *coalesce,
-			     struct kernel_ethtool_coalesce *kernel_coal,
-			     struct netlink_ext_ack *extack)
+static int
+bnad_set_coalesce(struct net_device *netdev, struct ethtool_coalesce *coalesce)
 {
 	struct bnad *bnad = netdev_priv(netdev);
 	unsigned long flags;
@@ -405,9 +401,7 @@ static int bnad_set_coalesce(struct net_device *netdev,
 
 static void
 bnad_get_ringparam(struct net_device *netdev,
-		   struct ethtool_ringparam *ringparam,
-		   struct kernel_ethtool_ringparam *kernel_ringparam,
-		   struct netlink_ext_ack *extack)
+		   struct ethtool_ringparam *ringparam)
 {
 	struct bnad *bnad = netdev_priv(netdev);
 
@@ -420,9 +414,7 @@ bnad_get_ringparam(struct net_device *netdev,
 
 static int
 bnad_set_ringparam(struct net_device *netdev,
-		   struct ethtool_ringparam *ringparam,
-		   struct kernel_ethtool_ringparam *kernel_ringparam,
-		   struct netlink_ext_ack *extack)
+		   struct ethtool_ringparam *ringparam)
 {
 	int i, current_err, err = 0;
 	struct bnad *bnad = netdev_priv(netdev);

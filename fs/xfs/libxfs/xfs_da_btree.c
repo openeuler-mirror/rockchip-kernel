@@ -129,7 +129,7 @@ xfs_da3_node_hdr_from_disk(
 	struct xfs_da3_icnode_hdr	*to,
 	struct xfs_da_intnode		*from)
 {
-	if (xfs_has_crc(mp)) {
+	if (xfs_sb_version_hascrc(&mp->m_sb)) {
 		struct xfs_da3_intnode	*from3 = (struct xfs_da3_intnode *)from;
 
 		to->forw = be32_to_cpu(from3->hdr.info.hdr.forw);
@@ -156,7 +156,7 @@ xfs_da3_node_hdr_to_disk(
 	struct xfs_da_intnode		*to,
 	struct xfs_da3_icnode_hdr	*from)
 {
-	if (xfs_has_crc(mp)) {
+	if (xfs_sb_version_hascrc(&mp->m_sb)) {
 		struct xfs_da3_intnode	*to3 = (struct xfs_da3_intnode *)to;
 
 		ASSERT(from->magic == XFS_DA3_NODE_MAGIC);
@@ -191,7 +191,7 @@ xfs_da3_blkinfo_verify(
 	if (!xfs_verify_magic16(bp, hdr->magic))
 		return __this_address;
 
-	if (xfs_has_crc(mp)) {
+	if (xfs_sb_version_hascrc(&mp->m_sb)) {
 		if (!uuid_equal(&hdr3->uuid, &mp->m_sb.sb_meta_uuid))
 			return __this_address;
 		if (be64_to_cpu(hdr3->blkno) != bp->b_bn)
@@ -253,7 +253,7 @@ xfs_da3_node_write_verify(
 		return;
 	}
 
-	if (!xfs_has_crc(mp))
+	if (!xfs_sb_version_hascrc(&mp->m_sb))
 		return;
 
 	if (bip)
@@ -282,7 +282,7 @@ xfs_da3_node_read_verify(
 						__this_address);
 				break;
 			}
-			fallthrough;
+			/* fall through */
 		case XFS_DA_NODE_MAGIC:
 			fa = xfs_da3_node_verify(bp);
 			if (fa)
@@ -366,17 +366,16 @@ xfs_da3_node_set_type(
 }
 
 int
-__xfs_da3_node_read(
+xfs_da3_node_read(
 	struct xfs_trans	*tp,
 	struct xfs_inode	*dp,
 	xfs_dablk_t		bno,
-	unsigned int		flags,
 	struct xfs_buf		**bpp,
 	int			whichfork)
 {
 	int			error;
 
-	error = xfs_da_read_buf(tp, dp, bno, flags, bpp, whichfork,
+	error = xfs_da_read_buf(tp, dp, bno, 0, bpp, whichfork,
 			&xfs_da3_node_buf_ops);
 	if (error || !*bpp || !tp)
 		return error;
@@ -443,7 +442,7 @@ xfs_da3_node_create(
 	xfs_trans_buf_set_type(tp, bp, XFS_BLFT_DA_NODE_BUF);
 	node = bp->b_addr;
 
-	if (xfs_has_crc(mp)) {
+	if (xfs_sb_version_hascrc(&mp->m_sb)) {
 		struct xfs_da3_node_hdr *hdr3 = bp->b_addr;
 
 		memset(hdr3, 0, sizeof(struct xfs_da3_node_hdr));
@@ -2181,8 +2180,8 @@ xfs_da_grow_inode_int(
 		 */
 		mapp = kmem_alloc(sizeof(*mapp) * count, 0);
 		for (b = *bno, mapi = 0; b < *bno + count; ) {
+			nmap = min(XFS_BMAP_MAX_NMAP, count);
 			c = (int)(*bno + count - b);
-			nmap = min(XFS_BMAP_MAX_NMAP, c);
 			error = xfs_bmapi_write(tp, dp, b, c,
 					xfs_bmapi_aflag(w)|XFS_BMAPI_METADATA,
 					args->total, &mapp[mapi], &nmap);

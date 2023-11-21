@@ -21,7 +21,6 @@
 #define TPS			0x4
 #define TRITSR			0x20	/* TMU immediate temp */
 
-#define TER_ADC_PD		BIT(30)
 #define TER_EN			BIT(31)
 #define TRITSR_TEMP0_VAL_MASK	0xff
 #define TRITSR_TEMP1_VAL_MASK	0xff0000
@@ -65,14 +64,8 @@ static int imx8mm_tmu_get_temp(void *data, int *temp)
 	u32 val;
 
 	val = readl_relaxed(tmu->base + TRITSR) & TRITSR_TEMP0_VAL_MASK;
-
-	/*
-	 * Do not validate against the V bit (bit 31) due to errata
-	 * ERR051272: TMU: Bit 31 of registers TMU_TSCR/TMU_TRITSR/TMU_TRATSR invalid
-	 */
-
 	*temp = val * 1000;
-	if (*temp < VER1_TEMP_LOW_LIMIT || *temp > VER2_TEMP_HIGH_LIMIT)
+	if (*temp < VER1_TEMP_LOW_LIMIT)
 		return -EAGAIN;
 
 	return 0;
@@ -120,8 +113,6 @@ static void imx8mm_tmu_enable(struct imx8mm_tmu *tmu, bool enable)
 
 	val = readl_relaxed(tmu->base + TER);
 	val = enable ? (val | TER_EN) : (val & ~TER_EN);
-	if (tmu->socdata->version == TMU_VER2)
-		val = enable ? (val & ~TER_ADC_PD) : (val | TER_ADC_PD);
 	writel_relaxed(val, tmu->base + TER);
 }
 

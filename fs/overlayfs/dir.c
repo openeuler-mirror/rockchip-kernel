@@ -137,7 +137,8 @@ kill_whiteout:
 	goto out;
 }
 
-int ovl_mkdir_real(struct inode *dir, struct dentry **newdentry, umode_t mode)
+static int ovl_mkdir_real(struct inode *dir, struct dentry **newdentry,
+			  umode_t mode)
 {
 	int err;
 	struct dentry *d, *dentry = *newdentry;
@@ -541,10 +542,8 @@ static int ovl_create_over_whiteout(struct dentry *dentry, struct inode *inode,
 			goto out_cleanup;
 	}
 	err = ovl_instantiate(dentry, inode, newdentry, hardlink);
-	if (err) {
-		ovl_cleanup(udir, newdentry);
-		dput(newdentry);
-	}
+	if (err)
+		goto out_cleanup;
 out_dput:
 	dput(upper);
 out_unlock:
@@ -566,7 +565,7 @@ static int ovl_create_or_link(struct dentry *dentry, struct inode *inode,
 			      struct ovl_cattr *attr, bool origin)
 {
 	int err;
-	const struct cred *old_cred;
+	const struct cred *old_cred, *hold_cred = NULL;
 	struct cred *override_cred;
 	struct dentry *parent = dentry->d_parent;
 
@@ -586,44 +585,33 @@ static int ovl_create_or_link(struct dentry *dentry, struct inode *inode,
 			goto out_revert_creds;
 	}
 
-	if (!attr->hardlink) {
-		err = -ENOMEM;
-		override_cred = prepare_creds();
-		if (!override_cred)
-			goto out_revert_creds;
-		/*
-		 * In the creation cases(create, mkdir, mknod, symlink),
-		 * ovl should transfer current's fs{u,g}id to underlying
-		 * fs. Because underlying fs want to initialize its new
-		 * inode owner using current's fs{u,g}id. And in this
-		 * case, the @inode is a new inode that is initialized
-		 * in inode_init_owner() to current's fs{u,g}id. So use
-		 * the inode's i_{u,g}id to override the cred's fs{u,g}id.
-		 *
-		 * But in the other hardlink case, ovl_link() does not
-		 * create a new inode, so just use the ovl mounter's
-		 * fs{u,g}id.
-		 */
+	err = -ENOMEM;
+	override_cred = prepare_creds();
+	if (override_cred) {
 		override_cred->fsuid = inode->i_uid;
 		override_cred->fsgid = inode->i_gid;
-		err = security_dentry_create_files_as(dentry,
-				attr->mode, &dentry->d_name, old_cred,
-				override_cred);
-		if (err) {
-			put_cred(override_cred);
-			goto out_revert_creds;
+		if (!attr->hardlink) {
+			err = security_dentry_create_files_as(dentry,
+					attr->mode, &dentry->d_name,
+					old_cred ? old_cred : current_cred(),
+					override_cred);
+			if (err) {
+				put_cred(override_cred);
+				goto out_revert_creds;
+			}
 		}
-		put_cred(override_creds(override_cred));
+		hold_cred = override_creds(override_cred);
 		put_cred(override_cred);
+
+		if (!ovl_dentry_is_whiteout(dentry))
+			err = ovl_create_upper(dentry, inode, attr);
+		else
+			err = ovl_create_over_whiteout(dentry, inode, attr);
 	}
-
-	if (!ovl_dentry_is_whiteout(dentry))
-		err = ovl_create_upper(dentry, inode, attr);
-	else
-		err = ovl_create_over_whiteout(dentry, inode, attr);
-
 out_revert_creds:
-	revert_creds(old_cred);
+	ovl_revert_creds(dentry->d_sb, old_cred ?: hold_cred);
+	if (old_cred && hold_cred)
+		put_cred(hold_cred);
 	return err;
 }
 
@@ -699,7 +687,7 @@ static int ovl_set_link_redirect(struct dentry *dentry)
 
 	old_cred = ovl_override_creds(dentry->d_sb);
 	err = ovl_set_redirect(dentry, false);
-	revert_creds(old_cred);
+	ovl_revert_creds(dentry->d_sb, old_cred);
 
 	return err;
 }
@@ -918,7 +906,7 @@ static int ovl_do_remove(struct dentry *dentry, bool is_dir)
 		err = ovl_remove_upper(dentry, is_dir, &list);
 	else
 		err = ovl_remove_and_whiteout(dentry, &list);
-	revert_creds(old_cred);
+	ovl_revert_creds(dentry->d_sb, old_cred);
 	if (!err) {
 		if (is_dir)
 			clear_nlink(dentry->d_inode);
@@ -1227,13 +1215,9 @@ static int ovl_rename(struct inode *olddir, struct dentry *old,
 				goto out_dput;
 		}
 	} else {
-		if (!d_is_negative(newdentry)) {
-			if (!new_opaque || !ovl_is_whiteout(newdentry))
-				goto out_dput;
-		} else {
-			if (flags & RENAME_EXCHANGE)
-				goto out_dput;
-		}
+		if (!d_is_negative(newdentry) &&
+		    (!new_opaque || !ovl_is_whiteout(newdentry)))
+			goto out_dput;
 	}
 
 	if (olddentry == trap)
@@ -1292,7 +1276,7 @@ out_dput_old:
 out_unlock:
 	unlock_rename(new_upperdir, old_upperdir);
 out_revert_creds:
-	revert_creds(old_cred);
+	ovl_revert_creds(old->d_sb, old_cred);
 	if (update_nlink)
 		ovl_nlink_end(new);
 out_drop_write:
@@ -1317,6 +1301,6 @@ const struct inode_operations ovl_dir_inode_operations = {
 	.permission	= ovl_permission,
 	.getattr	= ovl_getattr,
 	.listxattr	= ovl_listxattr,
-	.get_acl2	= ovl_get_acl,
+	.get_acl	= ovl_get_acl,
 	.update_time	= ovl_update_time,
 };

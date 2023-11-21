@@ -17,8 +17,6 @@
 #include <linux/tick.h>
 #include <linux/slab.h>
 #include <linux/acpi.h>
-#include <linux/perf_event.h>
-#include <linux/perf_event_lopwr.h>
 #include <asm/mwait.h>
 #include <xen/xen.h>
 
@@ -66,7 +64,6 @@ static void power_saving_mwait_init(void)
 	case X86_VENDOR_HYGON:
 	case X86_VENDOR_AMD:
 	case X86_VENDOR_INTEL:
-	case X86_VENDOR_CENTAUR:
 	case X86_VENDOR_ZHAOXIN:
 		/*
 		 * AMD Fam10h TSC will tick in all
@@ -166,9 +163,6 @@ static int power_saving_thread(void *data)
 				tsc_marked_unstable = 1;
 			}
 			local_irq_disable();
-
-			perf_lopwr_cb(true);
-
 			tick_broadcast_enable();
 			tick_broadcast_enter();
 			stop_critical_timings();
@@ -177,9 +171,6 @@ static int power_saving_thread(void *data)
 
 			start_critical_timings();
 			tick_broadcast_exit();
-
-			perf_lopwr_cb(false);
-
 			local_irq_enable();
 
 			if (time_before(expire_time, jiffies)) {

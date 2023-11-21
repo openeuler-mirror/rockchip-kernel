@@ -17,7 +17,6 @@
 #include <linux/dm-ioctl.h>
 #include <linux/hdreg.h>
 #include <linux/compat.h>
-#include <linux/nospec.h>
 
 #include <linux/uaccess.h>
 
@@ -272,9 +271,6 @@ static struct dm_table *__hash_remove(struct hash_cell *hc)
 	table = NULL;
 	if (hc->new_map)
 		table = hc->new_map;
-
-	DMINFO("%s[%i]: %s (%s) is removed successfully",
-		current->comm, current->pid, hc->md->disk->disk_name, hc->name);
 	dm_put(hc->md);
 	free_cell(hc);
 
@@ -576,7 +572,7 @@ static void list_version_get_needed(struct target_type *tt, void *needed_param)
     size_t *needed = needed_param;
 
     *needed += sizeof(struct dm_target_versions);
-    *needed += strlen(tt->name) + 1;
+    *needed += strlen(tt->name);
     *needed += ALIGN_MASK;
 }
 
@@ -641,7 +637,7 @@ static int __list_versions(struct dm_ioctl *param, size_t param_size, const char
 	iter_info.old_vers = NULL;
 	iter_info.vers = vers;
 	iter_info.flags = 0;
-	iter_info.end = (char *)vers + needed;
+	iter_info.end = (char *)vers+len;
 
 	/*
 	 * Now loop through filling out the names & versions.
@@ -776,7 +772,6 @@ static int dev_create(struct file *filp, struct dm_ioctl *param, size_t param_si
 {
 	int r, m = DM_ANY_MINOR;
 	struct mapped_device *md;
-	struct hash_cell *hc;
 
 	r = check_name(param->name);
 	if (r)
@@ -800,13 +795,6 @@ static int dev_create(struct file *filp, struct dm_ioctl *param, size_t param_si
 
 	__dev_status(md, param);
 
-	mutex_lock(&dm_hash_cells_mutex);
-	hc = dm_get_mdptr(md);
-	if (hc)
-		DMINFO("%s[%i]: %s (%s) is created successfully",
-			current->comm, current->pid, md->disk->disk_name, hc->name);
-
-	mutex_unlock(&dm_hash_cells_mutex);
 	dm_put(md);
 
 	return 0;
@@ -1446,12 +1434,11 @@ static int table_clear(struct file *filp, struct dm_ioctl *param, size_t param_s
 		hc->new_map = NULL;
 	}
 
+	param->flags &= ~DM_INACTIVE_PRESENT_FLAG;
+
+	__dev_status(hc->md, param);
 	md = hc->md;
 	up_write(&_hash_lock);
-
-	param->flags &= ~DM_INACTIVE_PRESENT_FLAG;
-	__dev_status(md, param);
-
 	if (old_map) {
 		dm_sync_table(md);
 		dm_table_destroy(old_map);
@@ -1709,7 +1696,6 @@ static ioctl_fn lookup_ioctl(unsigned int cmd, int *ioctl_flags)
 	if (unlikely(cmd >= ARRAY_SIZE(_ioctls)))
 		return NULL;
 
-	cmd = array_index_nospec(cmd, ARRAY_SIZE(_ioctls));
 	*ioctl_flags = _ioctls[cmd].flags;
 	return _ioctls[cmd].fn;
 }
@@ -2045,8 +2031,6 @@ int dm_copy_name_and_uuid(struct mapped_device *md, char *name, char *uuid)
 	mutex_lock(&dm_hash_cells_mutex);
 	hc = dm_get_mdptr(md);
 	if (!hc || hc->md != md) {
-		if (hc)
-			DMERR("hash cell and mapped device do not match!");
 		r = -ENXIO;
 		goto out;
 	}

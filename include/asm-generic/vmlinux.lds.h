@@ -76,9 +76,7 @@
  * alignment.
  */
 #ifdef RO_EXCEPTION_TABLE_ALIGN
-#define RO_EXCEPTION_TABLE					\
-	EXCEPTION_TABLE(RO_EXCEPTION_TABLE_ALIGN)		\
-	MC_EXCEPTION_TABLE(RO_EXCEPTION_TABLE_ALIGN)
+#define RO_EXCEPTION_TABLE	EXCEPTION_TABLE(RO_EXCEPTION_TABLE_ALIGN)
 #else
 #define RO_EXCEPTION_TABLE
 #endif
@@ -92,15 +90,18 @@
  * .data. We don't want to pull in .data..other sections, which Linux
  * has defined. Same for text and bss.
  *
+ * With LTO_CLANG, the linker also splits sections by default, so we need
+ * these macros to combine the sections during the final link.
+ *
  * RODATA_MAIN is not used because existing code already defines .rodata.x
  * sections to be brought in with rodata.
  */
-#ifdef CONFIG_LD_DEAD_CODE_DATA_ELIMINATION
+#if defined(CONFIG_LD_DEAD_CODE_DATA_ELIMINATION) || defined(CONFIG_LTO_CLANG)
 #define TEXT_MAIN .text .text.[0-9a-zA-Z_]*
-#define DATA_MAIN .data .data.[0-9a-zA-Z_]* .data..LPBX*
+#define DATA_MAIN .data .data.[0-9a-zA-Z_]* .data..L* .data..compoundliteral*
 #define SDATA_MAIN .sdata .sdata.[0-9a-zA-Z_]*
-#define RODATA_MAIN .rodata .rodata.[0-9a-zA-Z_]*
-#define BSS_MAIN .bss .bss.[0-9a-zA-Z_]*
+#define RODATA_MAIN .rodata .rodata.[0-9a-zA-Z_]* .rodata..L*
+#define BSS_MAIN .bss .bss.[0-9a-zA-Z_]* .bss..compoundliteral*
 #define SBSS_MAIN .sbss .sbss.[0-9a-zA-Z_]*
 #else
 #define TEXT_MAIN .text
@@ -318,6 +319,16 @@
 #define THERMAL_TABLE(name)
 #endif
 
+#ifdef CONFIG_DTPM
+#define DTPM_TABLE()							\
+	. = ALIGN(8);							\
+	__dtpm_table = .;						\
+	KEEP(*(__dtpm_table))						\
+	__dtpm_table_end = .;
+#else
+#define DTPM_TABLE()
+#endif
+
 #define KERNEL_DTB()							\
 	STRUCT_ALIGN();							\
 	__dtb_start = .;						\
@@ -330,7 +341,6 @@
 #define DATA_DATA							\
 	*(.xiptext)							\
 	*(DATA_MAIN)							\
-	*(.data..decrypted)						\
 	*(.ref.data)							\
 	*(.data..shared_aligned) /* percpu related */			\
 	MEM_KEEP(init.data*)						\
@@ -409,7 +419,7 @@
 #define RO_AFTER_INIT_DATA						\
 	. = ALIGN(8);							\
 	__start_ro_after_init = .;					\
-	*(.data..ro_after_init .data.rel.ro.*)				\
+	*(.data..ro_after_init)						\
 	JUMP_TABLE_DATA							\
 	STATIC_CALL_DATA						\
 	__end_ro_after_init = .;
@@ -576,6 +586,22 @@
 	. = ALIGN((align));						\
 	__end_rodata = .;
 
+
+/*
+ * .text..L.cfi.jumptable.* contain Control-Flow Integrity (CFI)
+ * jump table entries.
+ */
+#ifdef CONFIG_CFI_CLANG
+#define TEXT_CFI_JT							\
+		. = ALIGN(PMD_SIZE);					\
+		__cfi_jt_start = .;					\
+		*(.text..L.cfi.jumptable .text..L.cfi.jumptable.*)	\
+		. = ALIGN(PMD_SIZE);					\
+		__cfi_jt_end = .;
+#else
+#define TEXT_CFI_JT
+#endif
+
 /*
  * Non-instrumentable text section
  */
@@ -603,6 +629,7 @@
 		*(.text..refcount)					\
 		*(.ref.text)						\
 		*(.text.asan.* .text.tsan.*)				\
+		TEXT_CFI_JT						\
 	MEM_KEEP(init.text*)						\
 	MEM_KEEP(exit.text*)						\
 
@@ -678,21 +705,6 @@
 		__stop___ex_table = .;					\
 	}
 
-#ifdef CONFIG_ARCH_HAS_MC_EXTABLE
-/*
- * Machine Check Exception table
- */
-#define MC_EXCEPTION_TABLE(align)					\
-	. = ALIGN(align);						\
-	__mc_ex_table : AT(ADDR(__mc_ex_table) - LOAD_OFFSET) {		\
-		__start___mc_ex_table = .;				\
-		KEEP(*(__mc_ex_table))					\
-		__stop___mc_ex_table = .;				\
-	}
-#else
-#define MC_EXCEPTION_TABLE(align)
-#endif
-
 /*
  * .BTF
  */
@@ -755,6 +767,7 @@
 	ACPI_PROBE_TABLE(irqchip)					\
 	ACPI_PROBE_TABLE(timer)						\
 	THERMAL_TABLE(governor)						\
+	DTPM_TABLE()							\
 	EARLYCON_TABLE()						\
 	LSM_TABLE()							\
 	EARLY_LSM_TABLE()						\
@@ -813,11 +826,21 @@
 	}
 
 /*
+ * Keep .eh_frame with CFI.
+ */
+#ifdef CONFIG_CFI_CLANG
+#define EH_FRAME .eh_frame : { *(.eh_frame) }
+#else
+#define EH_FRAME
+#endif
+
+/*
  * DWARF debug sections.
  * Symbols in the DWARF debugging sections are relative to
  * the beginning of the section so we begin them at 0.
  */
 #define DWARF_DEBUG							\
+		EH_FRAME						\
 		/* DWARF 1 */						\
 		.debug          0 : { *(.debug) }			\
 		.line           0 : { *(.line) }			\
@@ -940,6 +963,7 @@
 #define INIT_CALLS_LEVEL(level)						\
 		__initcall##level##_start = .;				\
 		KEEP(*(.initcall##level##.init))			\
+		__initcall##level##s_start = .;				\
 		KEEP(*(.initcall##level##s.init))			\
 
 #define INIT_CALLS							\
@@ -990,6 +1014,7 @@
 #ifdef CONFIG_AMD_MEM_ENCRYPT
 #define PERCPU_DECRYPTED_SECTION					\
 	. = ALIGN(PAGE_SIZE);						\
+	*(.data..decrypted)						\
 	*(.data..percpu..decrypted)					\
 	. = ALIGN(PAGE_SIZE);
 #else

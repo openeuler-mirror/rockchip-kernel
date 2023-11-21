@@ -137,18 +137,20 @@ int rtc_set_time(struct rtc_device *rtc, struct rtc_time *tm)
 
 	rtc_subtract_offset(rtc, tm);
 
+#ifdef CONFIG_RTC_INTF_DEV_UIE_EMUL
+	uie = rtc->uie_rtctimer.enabled || rtc->uie_irq_active;
+#else
+	uie = rtc->uie_rtctimer.enabled;
+#endif
+	if (uie) {
+		err = rtc_update_irq_enable(rtc, 0);
+		if (err)
+			return err;
+	}
+
 	err = mutex_lock_interruptible(&rtc->ops_lock);
 	if (err)
 		return err;
-
-	uie = rtc->uie_rtctimer.enabled;
-	if (uie) {
-		err = __rtc_update_irq_enable(rtc, 0);
-		if (err) {
-			mutex_unlock(&rtc->ops_lock);
-			return err;
-		}
-	}
 
 	if (!rtc->ops)
 		err = -ENODEV;
@@ -158,13 +160,15 @@ int rtc_set_time(struct rtc_device *rtc, struct rtc_time *tm)
 		err = -EINVAL;
 
 	pm_stay_awake(rtc->dev.parent);
-
-	if (uie)
-		err = __rtc_update_irq_enable(rtc, 1);
-
 	mutex_unlock(&rtc->ops_lock);
 	/* A timer might have just expired */
 	schedule_work(&rtc->irqwork);
+
+	if (uie) {
+		err = rtc_update_irq_enable(rtc, 1);
+		if (err)
+			return err;
+	}
 
 	trace_rtc_set_time(rtc_tm_to_time64(tm), err);
 	return err;
@@ -539,10 +543,20 @@ int rtc_alarm_irq_enable(struct rtc_device *rtc, unsigned int enabled)
 }
 EXPORT_SYMBOL_GPL(rtc_alarm_irq_enable);
 
-int __rtc_update_irq_enable(struct rtc_device *rtc, unsigned int enabled)
+int rtc_update_irq_enable(struct rtc_device *rtc, unsigned int enabled)
 {
-	int rc = 0, err = 0;
+	int rc = 0, err;
 
+	err = mutex_lock_interruptible(&rtc->ops_lock);
+	if (err)
+		return err;
+
+#ifdef CONFIG_RTC_INTF_DEV_UIE_EMUL
+	if (enabled == 0 && rtc->uie_irq_active) {
+		mutex_unlock(&rtc->ops_lock);
+		return rtc_dev_update_irq_enable_emul(rtc, 0);
+	}
+#endif
 	/* make sure we're changing state */
 	if (rtc->uie_rtctimer.enabled == enabled)
 		goto out;
@@ -569,6 +583,8 @@ int __rtc_update_irq_enable(struct rtc_device *rtc, unsigned int enabled)
 	}
 
 out:
+	mutex_unlock(&rtc->ops_lock);
+
 	/*
 	 * __rtc_read_time() failed, this probably means that the RTC time has
 	 * never been set or less probably there is a transient error on the
@@ -577,24 +593,6 @@ out:
 	 */
 	if (rc)
 		return rc;
-
-	return err;
-}
-
-int rtc_update_irq_enable(struct rtc_device *rtc, unsigned int enabled)
-{
-	int err;
-
-#ifdef CONFIG_RTC_INTF_DEV_UIE_EMUL
-	if (enabled == 0 && rtc->uie_irq_active)
-		return rtc_dev_update_irq_enable_emul(rtc, 0);
-#endif
-
-	err = mutex_lock_interruptible(&rtc->ops_lock);
-	if (err)
-		return err;
-	err = __rtc_update_irq_enable(rtc, enabled);
-	mutex_unlock(&rtc->ops_lock);
 
 #ifdef CONFIG_RTC_INTF_DEV_UIE_EMUL
 	/*
@@ -809,13 +807,9 @@ static int rtc_timer_enqueue(struct rtc_device *rtc, struct rtc_timer *timer)
 	struct timerqueue_node *next = timerqueue_getnext(&rtc->timerqueue);
 	struct rtc_time tm;
 	ktime_t now;
-	int err;
-
-	err = __rtc_read_time(rtc, &tm);
-	if (err)
-		return err;
 
 	timer->enabled = 1;
+	__rtc_read_time(rtc, &tm);
 	now = rtc_tm_to_ktime(tm);
 
 	/* Skip over expired timers */
@@ -829,6 +823,7 @@ static int rtc_timer_enqueue(struct rtc_device *rtc, struct rtc_timer *timer)
 	trace_rtc_timer_enqueue(timer);
 	if (!next || ktime_before(timer->node.expires, next->expires)) {
 		struct rtc_wkalrm alarm;
+		int err;
 
 		alarm.time = rtc_ktime_to_tm(timer->node.expires);
 		alarm.enabled = 1;

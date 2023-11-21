@@ -288,25 +288,22 @@ static void irq_sysfs_add(int irq, struct irq_desc *desc)
 	if (irq_kobj_base) {
 		/*
 		 * Continue even in case of failure as this is nothing
-		 * crucial and failures in the late irq_sysfs_init()
-		 * cannot be rolled back.
+		 * crucial.
 		 */
 		if (kobject_add(&desc->kobj, irq_kobj_base, "%d", irq))
 			pr_warn("Failed to add kobject for irq %d\n", irq);
-		else
-			desc->istate |= IRQS_SYSFS;
 	}
 }
 
 static void irq_sysfs_del(struct irq_desc *desc)
 {
 	/*
-	 * Only invoke kobject_del() when kobject_add() was successfully
-	 * invoked for the descriptor. This covers both early boot, where
-	 * sysfs is not initialized yet, and the case of a failed
-	 * kobject_add() invocation.
+	 * If irq_sysfs_init() has not yet been invoked (early boot), then
+	 * irq_kobj_base is NULL and the descriptor was never added.
+	 * kobject_del() complains about a object with no parent, so make
+	 * it conditional.
 	 */
-	if (desc->istate & IRQS_SYSFS)
+	if (irq_kobj_base)
 		kobject_del(&desc->kobj);
 }
 
@@ -408,7 +405,6 @@ static struct irq_desc *alloc_desc(int irq, int node, unsigned int flags,
 	lockdep_set_class(&desc->lock, &irq_desc_lock_class);
 	mutex_init(&desc->request_mutex);
 	init_rcu_head(&desc->rcu);
-	init_waitqueue_head(&desc->wait_for_threads);
 
 	desc_set_defaults(irq, desc, node, affinity, owner);
 	irqd_set(&desc->irq_data, flags);
@@ -577,7 +573,6 @@ int __init early_irq_init(void)
 		raw_spin_lock_init(&desc[i].lock);
 		lockdep_set_class(&desc[i].lock, &irq_desc_lock_class);
 		mutex_init(&desc[i].request_mutex);
-		init_waitqueue_head(&desc[i].wait_for_threads);
 		desc_set_defaults(i, &desc[i], node, NULL, NULL);
 	}
 	return arch_early_irq_init();
@@ -672,9 +667,8 @@ int __handle_domain_irq(struct irq_domain *domain, unsigned int hwirq,
 {
 	struct pt_regs *old_regs = set_irq_regs(regs);
 	unsigned int irq = hwirq;
+	struct irq_desc *desc;
 	int ret = 0;
-
-	irq_enter();
 
 #ifdef CONFIG_IRQ_DOMAIN
 	if (lookup)
@@ -685,14 +679,22 @@ int __handle_domain_irq(struct irq_domain *domain, unsigned int hwirq,
 	 * Some hardware gives randomly wrong interrupts.  Rather
 	 * than crashing, do something sensible.
 	 */
-	if (unlikely(!irq || irq >= nr_irqs)) {
+	if (unlikely(!irq || irq >= nr_irqs || !(desc = irq_to_desc(irq)))) {
 		ack_bad_irq(irq);
 		ret = -EINVAL;
-	} else {
-		generic_handle_irq(irq);
+		goto out;
 	}
 
-	irq_exit();
+	if (IS_ENABLED(CONFIG_ARCH_WANTS_IRQ_RAW) &&
+	    unlikely(irq_settings_is_raw(desc))) {
+		generic_handle_irq_desc(desc);
+	} else {
+		irq_enter();
+		generic_handle_irq_desc(desc);
+		irq_exit();
+	}
+
+out:
 	set_irq_regs(old_regs);
 	return ret;
 }
@@ -974,6 +976,7 @@ unsigned int kstat_irqs_cpu(unsigned int irq, int cpu)
 	return desc && desc->kstat_irqs ?
 			*per_cpu_ptr(desc->kstat_irqs, cpu) : 0;
 }
+EXPORT_SYMBOL_GPL(kstat_irqs_cpu);
 
 static bool irq_is_nmi(struct irq_desc *desc)
 {
@@ -1024,3 +1027,4 @@ unsigned int kstat_irqs_usr(unsigned int irq)
 	rcu_read_unlock();
 	return sum;
 }
+EXPORT_SYMBOL_GPL(kstat_irqs_usr);

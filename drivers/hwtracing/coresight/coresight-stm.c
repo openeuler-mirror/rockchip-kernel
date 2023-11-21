@@ -258,7 +258,6 @@ static void stm_disable(struct coresight_device *csdev,
 			struct perf_event *event)
 {
 	struct stm_drvdata *drvdata = dev_get_drvdata(csdev->dev.parent);
-	struct csdev_access *csa = &csdev->access;
 
 	/*
 	 * For as long as the tracer isn't disabled another entity can't
@@ -271,7 +270,7 @@ static void stm_disable(struct coresight_device *csdev,
 		spin_unlock(&drvdata->spinlock);
 
 		/* Wait until the engine has completely stopped */
-		coresight_timeout(csa, STMTCSR, STMTCSR_BUSY_BIT, 0);
+		coresight_timeout(drvdata->base, STMTCSR, STMTCSR_BUSY_BIT, 0);
 
 		pm_runtime_put(csdev->dev.parent);
 
@@ -634,6 +633,22 @@ static ssize_t traceid_store(struct device *dev,
 }
 static DEVICE_ATTR_RW(traceid);
 
+#define coresight_stm_reg(name, offset)	\
+	coresight_simple_reg32(struct stm_drvdata, name, offset)
+
+coresight_stm_reg(tcsr, STMTCSR);
+coresight_stm_reg(tsfreqr, STMTSFREQR);
+coresight_stm_reg(syncr, STMSYNCR);
+coresight_stm_reg(sper, STMSPER);
+coresight_stm_reg(spter, STMSPTER);
+coresight_stm_reg(privmaskr, STMPRIVMASKR);
+coresight_stm_reg(spscr, STMSPSCR);
+coresight_stm_reg(spmscr, STMSPMSCR);
+coresight_stm_reg(spfeat1r, STMSPFEAT1R);
+coresight_stm_reg(spfeat2r, STMSPFEAT2R);
+coresight_stm_reg(spfeat3r, STMSPFEAT3R);
+coresight_stm_reg(devid, CORESIGHT_DEVID);
+
 static struct attribute *coresight_stm_attrs[] = {
 	&dev_attr_hwevent_enable.attr,
 	&dev_attr_hwevent_select.attr,
@@ -644,18 +659,18 @@ static struct attribute *coresight_stm_attrs[] = {
 };
 
 static struct attribute *coresight_stm_mgmt_attrs[] = {
-	coresight_simple_reg32(tcsr, STMTCSR),
-	coresight_simple_reg32(tsfreqr, STMTSFREQR),
-	coresight_simple_reg32(syncr, STMSYNCR),
-	coresight_simple_reg32(sper, STMSPER),
-	coresight_simple_reg32(spter, STMSPTER),
-	coresight_simple_reg32(privmaskr, STMPRIVMASKR),
-	coresight_simple_reg32(spscr, STMSPSCR),
-	coresight_simple_reg32(spmscr, STMSPMSCR),
-	coresight_simple_reg32(spfeat1r, STMSPFEAT1R),
-	coresight_simple_reg32(spfeat2r, STMSPFEAT2R),
-	coresight_simple_reg32(spfeat3r, STMSPFEAT3R),
-	coresight_simple_reg32(devid, CORESIGHT_DEVID),
+	&dev_attr_tcsr.attr,
+	&dev_attr_tsfreqr.attr,
+	&dev_attr_syncr.attr,
+	&dev_attr_sper.attr,
+	&dev_attr_spter.attr,
+	&dev_attr_privmaskr.attr,
+	&dev_attr_spscr.attr,
+	&dev_attr_spmscr.attr,
+	&dev_attr_spfeat1r.attr,
+	&dev_attr_spfeat2r.attr,
+	&dev_attr_spfeat3r.attr,
+	&dev_attr_devid.attr,
 	NULL,
 };
 
@@ -869,7 +884,6 @@ static int stm_probe(struct amba_device *adev, const struct amba_id *id)
 	if (IS_ERR(base))
 		return PTR_ERR(base);
 	drvdata->base = base;
-	desc.access = CSDEV_ACCESS_IOMEM(base);
 
 	ret = stm_get_stimulus_area(dev, &ch_res);
 	if (ret)

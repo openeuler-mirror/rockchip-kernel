@@ -55,7 +55,7 @@ static inline struct fwnode_handle *acpi_alloc_fwnode_static(void)
 	if (!fwnode)
 		return NULL;
 
-	fwnode->ops = &acpi_static_fwnode_ops;
+	fwnode_init(fwnode, &acpi_static_fwnode_ops);
 
 	return fwnode;
 }
@@ -105,7 +105,6 @@ enum acpi_irq_model_id {
 	ACPI_IRQ_MODEL_IOSAPIC,
 	ACPI_IRQ_MODEL_PLATFORM,
 	ACPI_IRQ_MODEL_GIC,
-	ACPI_IRQ_MODEL_LPIC,
 	ACPI_IRQ_MODEL_COUNT
 };
 
@@ -133,7 +132,6 @@ enum acpi_address_range_id {
 union acpi_subtable_headers {
 	struct acpi_subtable_header common;
 	struct acpi_hmat_structure hmat;
-	struct acpi_prmt_module_header prmt;
 };
 
 typedef int (*acpi_tbl_table_handler)(struct acpi_table_header *table);
@@ -250,7 +248,7 @@ void acpi_table_print_madt_entry (struct acpi_subtable_header *madt);
 /* the following numa functions are architecture-dependent */
 void acpi_numa_slit_init (struct acpi_table_slit *slit);
 
-#if defined(CONFIG_X86) || defined(CONFIG_IA64) || defined(CONFIG_LOONGARCH)
+#if defined(CONFIG_X86) || defined(CONFIG_IA64)
 void acpi_numa_processor_affinity_init (struct acpi_srat_cpu_affinity *pa);
 #else
 static inline void
@@ -334,8 +332,7 @@ int acpi_gsi_to_irq (u32 gsi, unsigned int *irq);
 int acpi_isa_irq_to_gsi (unsigned isa_irq, u32 *gsi);
 
 void acpi_set_irq_model(enum acpi_irq_model_id model,
-			struct fwnode_handle *(*)(u32));
-void acpi_set_gsi_to_irq_fallback(u32 (*)(u32));
+			struct fwnode_handle *fwnode);
 
 struct irq_domain *acpi_irq_create_hierarchy(unsigned int flags,
 					     unsigned int size,
@@ -553,7 +550,6 @@ acpi_status acpi_run_osc(acpi_handle handle, struct acpi_osc_context *context);
 #define OSC_SB_OSLPI_SUPPORT			0x00000100
 #define OSC_SB_CPC_DIVERSE_HIGH_SUPPORT		0x00001000
 #define OSC_SB_GENERIC_INITIATOR_SUPPORT	0x00002000
-#define OSC_SB_PRM_SUPPORT			0x00200000
 
 extern bool osc_sb_apei_support_acked;
 extern bool osc_pc_lpi_support_confirmed;
@@ -706,10 +702,6 @@ static inline u64 acpi_arch_get_root_pointer(void)
 	return 0;
 }
 #endif
-
-struct acpi_pptt_cache *
-acpi_pptt_validate_cache_node(struct acpi_table_header *table_hdr,
-						u32 offset);
 
 #else	/* !CONFIG_ACPI */
 
@@ -960,15 +952,6 @@ static inline struct acpi_device *acpi_resource_consumer(struct resource *res)
 {
 	return NULL;
 }
-
-static inline int acpi_register_wakeup_handler(int wake_irq,
-	bool (*wakeup)(void *context), void *context)
-{
-	return -ENXIO;
-}
-
-static inline void acpi_unregister_wakeup_handler(
-	bool (*wakeup)(void *context), void *context) { }
 
 #endif	/* !CONFIG_ACPI */
 
@@ -1360,24 +1343,17 @@ static inline int lpit_read_residency_count_address(u64 *address)
 #endif
 
 #ifdef CONFIG_ACPI_PPTT
-int acpi_pptt_init(void);
 int acpi_pptt_cpu_is_thread(unsigned int cpu);
 int find_acpi_cpu_topology(unsigned int cpu, int level);
-int find_acpi_cpu_topology_cluster(unsigned int cpu);
 int find_acpi_cpu_topology_package(unsigned int cpu);
 int find_acpi_cpu_topology_hetero_id(unsigned int cpu);
 int find_acpi_cpu_cache_topology(unsigned int cpu, int level);
-struct acpi_pptt_processor *find_acpi_processor_node_from_cache_id(u32 cache_id);
 #else
 static inline int acpi_pptt_cpu_is_thread(unsigned int cpu)
 {
 	return -EINVAL;
 }
 static inline int find_acpi_cpu_topology(unsigned int cpu, int level)
-{
-	return -EINVAL;
-}
-static inline int find_acpi_cpu_topology_cluster(unsigned int cpu)
 {
 	return -EINVAL;
 }
@@ -1393,10 +1369,6 @@ static inline int find_acpi_cpu_cache_topology(unsigned int cpu, int level)
 {
 	return -EINVAL;
 }
-static inline struct acpi_pptt_processor *find_acpi_processor_node_from_cache_id(u32 cache_id)
-{
-	return NULL;
-}
 #endif
 
 #ifdef CONFIG_ACPI
@@ -1408,10 +1380,5 @@ acpi_platform_notify(struct device *dev, enum kobject_action action)
 	return 0;
 }
 #endif
-
-struct acpi_pptt_processor *
-acpi_pptt_find_cache_backwards(struct acpi_table_header *table_hdr,
-			       struct acpi_pptt_cache *cache);
-acpi_status acpi_hotplug_schedule(struct acpi_device *adev, u32 src);
 
 #endif	/*_LINUX_ACPI_H*/

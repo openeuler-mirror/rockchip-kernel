@@ -301,7 +301,7 @@ struct Qdisc *qdisc_lookup(struct net_device *dev, u32 handle)
 
 	if (!handle)
 		return NULL;
-	q = qdisc_match_from_root(rtnl_dereference(dev->qdisc), handle);
+	q = qdisc_match_from_root(dev->qdisc, handle);
 	if (q)
 		goto out;
 
@@ -320,7 +320,7 @@ struct Qdisc *qdisc_lookup_rcu(struct net_device *dev, u32 handle)
 
 	if (!handle)
 		return NULL;
-	q = qdisc_match_from_root(rcu_dereference(dev->qdisc), handle);
+	q = qdisc_match_from_root(dev->qdisc, handle);
 	if (q)
 		goto out;
 
@@ -507,27 +507,20 @@ static struct qdisc_size_table *qdisc_get_stab(struct nlattr *opt,
 	list_for_each_entry(stab, &qdisc_stab_list, list) {
 		if (memcmp(&stab->szopts, s, sizeof(*s)))
 			continue;
-		if (tsize > 0 &&
-		    memcmp(stab->data, tab, flex_array_size(stab, data, tsize)))
+		if (tsize > 0 && memcmp(stab->data, tab, tsize * sizeof(u16)))
 			continue;
 		stab->refcnt++;
 		return stab;
 	}
 
-	if (s->size_log > STAB_SIZE_LOG_MAX ||
-	    s->cell_log > STAB_SIZE_LOG_MAX) {
-		NL_SET_ERR_MSG(extack, "Invalid logarithmic size of size table");
-		return ERR_PTR(-EINVAL);
-	}
-
-	stab = kmalloc(struct_size(stab, data, tsize), GFP_KERNEL);
+	stab = kmalloc(sizeof(*stab) + tsize * sizeof(u16), GFP_KERNEL);
 	if (!stab)
 		return ERR_PTR(-ENOMEM);
 
 	stab->refcnt = 1;
 	stab->szopts = *s;
 	if (tsize > 0)
-		memcpy(stab->data, tab, flex_array_size(stab, data, tsize));
+		memcpy(stab->data, tab, tsize * sizeof(u16));
 
 	list_add_tail(&stab->list, &qdisc_stab_list);
 
@@ -1082,12 +1075,11 @@ static int qdisc_graft(struct net_device *dev, struct Qdisc *parent,
 
 skip:
 		if (!ingress) {
-			old = rtnl_dereference(dev->qdisc);
+			notify_and_destroy(net, skb, n, classid,
+					   dev->qdisc, new);
 			if (new && !new->ops->attach)
 				qdisc_refcount_inc(new);
-			rcu_assign_pointer(dev->qdisc, new ? : &noop_qdisc);
-
-			notify_and_destroy(net, skb, n, classid, old, new);
+			dev->qdisc = new ? : &noop_qdisc;
 
 			if (new && new->ops->attach)
 				new->ops->attach(new);
@@ -1113,11 +1105,6 @@ skip:
 		if (!cl) {
 			NL_SET_ERR_MSG(extack, "Specified class not found");
 			return -ENOENT;
-		}
-
-		if (new && new->ops == &noqueue_qdisc_ops) {
-			NL_SET_ERR_MSG(extack, "Cannot assign noqueue to a class");
-			return -EINVAL;
 		}
 
 		err = cops->graft(parent, cl, new, &old, extack);
@@ -1211,7 +1198,7 @@ static struct Qdisc *qdisc_create(struct net_device *dev,
 
 	err = -ENOENT;
 	if (!ops) {
-		NL_SET_ERR_MSG(extack, "Specified qdisc kind is unknown");
+		NL_SET_ERR_MSG(extack, "Specified qdisc not found");
 		goto err_out;
 	}
 
@@ -1467,7 +1454,7 @@ static int tc_get_qdisc(struct sk_buff *skb, struct nlmsghdr *n,
 				q = dev_ingress_queue(dev)->qdisc_sleeping;
 			}
 		} else {
-			q = rtnl_dereference(dev->qdisc);
+			q = dev->qdisc;
 		}
 		if (!q) {
 			NL_SET_ERR_MSG(extack, "Cannot find specified qdisc on specified device");
@@ -1556,7 +1543,7 @@ replay:
 				q = dev_ingress_queue(dev)->qdisc_sleeping;
 			}
 		} else {
-			q = rtnl_dereference(dev->qdisc);
+			q = dev->qdisc;
 		}
 
 		/* It may be default qdisc, ignore it */
@@ -1778,8 +1765,7 @@ static int tc_dump_qdisc(struct sk_buff *skb, struct netlink_callback *cb)
 			s_q_idx = 0;
 		q_idx = 0;
 
-		if (tc_dump_qdisc_root(rtnl_dereference(dev->qdisc),
-				       skb, cb, &q_idx, s_q_idx,
+		if (tc_dump_qdisc_root(dev->qdisc, skb, cb, &q_idx, s_q_idx,
 				       true, tca[TCA_DUMP_INVISIBLE]) < 0)
 			goto done;
 
@@ -2055,7 +2041,7 @@ static int tc_ctl_tclass(struct sk_buff *skb, struct nlmsghdr *n,
 		} else if (qid1) {
 			qid = qid1;
 		} else if (qid == 0)
-			qid = rtnl_dereference(dev->qdisc)->handle;
+			qid = dev->qdisc->handle;
 
 		/* Now qid is genuine qdisc handle consistent
 		 * both with parent and child.
@@ -2066,7 +2052,7 @@ static int tc_ctl_tclass(struct sk_buff *skb, struct nlmsghdr *n,
 			portid = TC_H_MAKE(qid, portid);
 	} else {
 		if (qid == 0)
-			qid = rtnl_dereference(dev->qdisc)->handle;
+			qid = dev->qdisc->handle;
 	}
 
 	/* OK. Locate qdisc */
@@ -2227,8 +2213,7 @@ static int tc_dump_tclass(struct sk_buff *skb, struct netlink_callback *cb)
 	s_t = cb->args[0];
 	t = 0;
 
-	if (tc_dump_tclass_root(rtnl_dereference(dev->qdisc),
-				skb, tcm, cb, &t, s_t, true) < 0)
+	if (tc_dump_tclass_root(dev->qdisc, skb, tcm, cb, &t, s_t, true) < 0)
 		goto done;
 
 	dev_queue = dev_ingress_queue(dev);

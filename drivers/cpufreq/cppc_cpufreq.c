@@ -350,37 +350,23 @@ static int cppc_get_rate_from_fbctrs(struct cppc_cpudata *cpu,
 	return cppc_cpufreq_perf_to_khz(cpu, delivered_perf);
 }
 
-static int cppc_get_perf_ctrs_sample(void *val)
+static unsigned int cppc_cpufreq_get_rate(unsigned int cpunum)
 {
-	int cpunum = smp_processor_id();
-	struct cppc_perf_fb_ctrs *fb_ctrs = val;
+	struct cppc_perf_fb_ctrs fb_ctrs_t0 = {0}, fb_ctrs_t1 = {0};
+	struct cppc_cpudata *cpu = all_cpu_data[cpunum];
 	int ret;
 
-	ret = cppc_get_perf_ctrs(cpunum, fb_ctrs);
+	ret = cppc_get_perf_ctrs(cpunum, &fb_ctrs_t0);
 	if (ret)
 		return ret;
 
 	udelay(2); /* 2usec delay between sampling */
 
-	return cppc_get_perf_ctrs(cpunum, fb_ctrs + 1);
-}
-
-static unsigned int cppc_cpufreq_get_rate(unsigned int cpunum)
-{
-	struct cppc_perf_fb_ctrs fb_ctrs[2] = {0};
-	struct cppc_cpudata *cpu = all_cpu_data[cpunum];
-	int ret;
-
-	if (cpu_has_amu_feat(cpunum))
-		ret = smp_call_on_cpu(cpunum, cppc_get_perf_ctrs_sample,
-				      fb_ctrs, false);
-	else
-		ret = cppc_get_perf_ctrs_sample(fb_ctrs);
-
+	ret = cppc_get_perf_ctrs(cpunum, &fb_ctrs_t1);
 	if (ret)
 		return ret;
 
-	return cppc_get_rate_from_fbctrs(cpu, fb_ctrs[0], fb_ctrs[1]);
+	return cppc_get_rate_from_fbctrs(cpu, fb_ctrs_t0, fb_ctrs_t1);
 }
 
 static int cppc_cpufreq_set_boost(struct cpufreq_policy *policy, int state)

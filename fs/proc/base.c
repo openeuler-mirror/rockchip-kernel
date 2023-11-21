@@ -96,8 +96,7 @@
 #include <linux/posix-timers.h>
 #include <linux/time_namespace.h>
 #include <linux/resctrl.h>
-#include <linux/share_pool.h>
-#include <linux/ksm.h>
+#include <linux/cpufreq_times.h>
 #include <trace/events/oom.h>
 #include "internal.h"
 #include "fd.h"
@@ -903,34 +902,18 @@ static ssize_t mem_write(struct file *file, const char __user *buf,
 
 loff_t mem_lseek(struct file *file, loff_t offset, int orig)
 {
-	loff_t ret = 0;
-
-	spin_lock(&file->f_lock);
 	switch (orig) {
-	case SEEK_CUR:
-		offset += file->f_pos;
-		/* fall through */
-	case SEEK_SET:
-		/* to avoid userland mistaking f_pos=-9 as -EBADF=-9 */
-		if ((unsigned long long)offset >= -MAX_ERRNO)
-			ret = -EOVERFLOW;
+	case 0:
+		file->f_pos = offset;
+		break;
+	case 1:
+		file->f_pos += offset;
 		break;
 	default:
-		ret = -EINVAL;
+		return -EINVAL;
 	}
-
-	if (!ret) {
-		if (offset < 0 && !(unsigned_offsets(file))) {
-			ret = -EINVAL;
-		} else {
-			file->f_pos = offset;
-			ret = file->f_pos;
-			force_successful_syscall_return();
-		}
-	}
-
-	spin_unlock(&file->f_lock);
-	return ret;
+	force_successful_syscall_return();
+	return file->f_pos;
 }
 
 static int mem_release(struct inode *inode, struct file *file)
@@ -1039,9 +1022,9 @@ static ssize_t auxv_read(struct file *file, char __user *buf,
 		return 0;
 	do {
 		nwords += 2;
-	} while (MM_SAVED_AUXV(mm)[nwords - 2] != 0); /* AT_NULL */
-	return simple_read_from_buffer(buf, count, ppos, MM_SAVED_AUXV(mm),
-				       nwords * sizeof(MM_SAVED_AUXV(mm)[0]));
+	} while (mm->saved_auxv[nwords - 2] != 0); /* AT_NULL */
+	return simple_read_from_buffer(buf, count, ppos, mm->saved_auxv,
+				       nwords * sizeof(mm->saved_auxv[0]));
 }
 
 static const struct file_operations proc_auxv_operations = {
@@ -1260,96 +1243,6 @@ static const struct file_operations proc_oom_score_adj_operations = {
 	.write		= oom_score_adj_write,
 	.llseek		= default_llseek,
 };
-
-#ifdef CONFIG_MEMORY_RELIABLE
-static inline int reliable_check(struct task_struct *task, struct pid *pid)
-{
-	if (!mem_reliable_is_enabled())
-		return -EACCES;
-
-	if (is_global_init(task))
-		return -EINVAL;
-
-	if (!task->mm || (task->flags & PF_KTHREAD) ||
-	    (task->flags & PF_EXITING))
-		return -EINVAL;
-
-	return 0;
-}
-
-static ssize_t reliable_read(struct file *file, char __user *buf,
-		size_t count, loff_t *ppos)
-{
-	struct task_struct *task = get_proc_task(file_inode(file));
-	struct pid *pid = proc_pid(file_inode(file));
-	char buffer[PROC_NUMBUF];
-	size_t len;
-	short val;
-	int err;
-
-	if (!task)
-		return -ESRCH;
-
-	err = reliable_check(task, pid);
-	if (err) {
-		put_task_struct(task);
-		return err;
-	}
-
-	val = task->flags & PF_RELIABLE ? 1 : 0;
-	put_task_struct(task);
-	len = snprintf(buffer, sizeof(buffer), "%hd\n", val);
-	return simple_read_from_buffer(buf, count, ppos, buffer, len);
-}
-
-static ssize_t reliable_write(struct file *file, const char __user *buf,
-		size_t count, loff_t *ppos)
-{
-	struct task_struct *task = get_proc_task(file_inode(file));
-	struct pid *pid = proc_pid(file_inode(file));
-	char buffer[PROC_NUMBUF];
-	int val;
-	int err;
-
-	if (!task)
-		return -ESRCH;
-
-	err = reliable_check(task, pid);
-	if (err)
-		goto out;
-
-	memset(buffer, 0, sizeof(buffer));
-	if (count > sizeof(buffer) - 1)
-		count = sizeof(buffer) - 1;
-	if (copy_from_user(buffer, buf, count)) {
-		err = -EFAULT;
-		goto out;
-	}
-
-	err = kstrtoint(strstrip(buffer), 0, &val);
-	if (err)
-		goto out;
-	if (val != 0 && val != 1) {
-		err = -EINVAL;
-		goto out;
-	}
-
-	if (val == 1)
-		task->flags |= PF_RELIABLE;
-	else
-		task->flags &= ~PF_RELIABLE;
-
-out:
-	put_task_struct(task);
-	return err < 0 ? err : count;
-}
-
-static const struct file_operations proc_reliable_operations = {
-	.read       = reliable_read,
-	.write      = reliable_write,
-	.llseek     = generic_file_llseek,
-};
-#endif
 
 #ifdef CONFIG_AUDIT
 #define TMPBUFLEN 11
@@ -1989,7 +1882,7 @@ void proc_pid_evict_inode(struct proc_inode *ei)
 	put_pid(pid);
 }
 
-struct inode *proc_pid_make_inode(struct super_block *sb,
+struct inode *proc_pid_make_inode(struct super_block * sb,
 				  struct task_struct *task, umode_t mode)
 {
 	struct inode * inode;
@@ -2018,6 +1911,11 @@ struct inode *proc_pid_make_inode(struct super_block *sb,
 
 	/* Let the pid remember us for quick removal */
 	ei->pid = pid;
+	if (S_ISDIR(mode)) {
+		spin_lock(&pid->lock);
+		hlist_add_head_rcu(&ei->sibling_inodes, &pid->inodes);
+		spin_unlock(&pid->lock);
+	}
 
 	task_dump_owner(task, 0, &inode->i_uid, &inode->i_gid);
 	security_task_to_inode(task, inode);
@@ -2028,27 +1926,6 @@ out:
 out_unlock:
 	iput(inode);
 	return NULL;
-}
-
-static struct inode *proc_pid_make_base_inode(struct super_block *sb,
-				struct task_struct *task, umode_t mode)
-{
-	struct inode *inode;
-	struct proc_inode *ei;
-	struct pid *pid;
-
-	inode = proc_pid_make_inode(sb, task, mode);
-	if (!inode)
-		return NULL;
-
-	/* Let proc_flush_pid find this directory inode */
-	ei = PROC_I(inode);
-	pid = ei->pid;
-	spin_lock(&pid->lock);
-	hlist_add_head_rcu(&ei->sibling_inodes, &pid->inodes);
-	spin_unlock(&pid->lock);
-
-	return inode;
 }
 
 int pid_getattr(const struct path *path, struct kstat *stat,
@@ -2101,21 +1978,19 @@ static int pid_revalidate(struct dentry *dentry, unsigned int flags)
 {
 	struct inode *inode;
 	struct task_struct *task;
-	int ret = 0;
 
-	rcu_read_lock();
-	inode = d_inode_rcu(dentry);
-	if (!inode)
-		goto out;
-	task = pid_task(proc_pid(inode), PIDTYPE_PID);
+	if (flags & LOOKUP_RCU)
+		return -ECHILD;
+
+	inode = d_inode(dentry);
+	task = get_proc_task(inode);
 
 	if (task) {
 		pid_update_inode(task, inode);
-		ret = 1;
+		put_task_struct(task);
+		return 1;
 	}
-out:
-	rcu_read_unlock();
-	return ret;
+	return 0;
 }
 
 static inline bool proc_inode_is_dead(struct inode *inode)
@@ -3254,82 +3129,6 @@ static const struct file_operations proc_setgroups_operations = {
 };
 #endif /* CONFIG_USER_NS */
 
-#ifdef CONFIG_QOS_SCHED_DYNAMIC_AFFINITY
-
-static int preferred_cpuset_show(struct seq_file *m, void *v)
-{
-	struct inode *inode = m->private;
-	struct task_struct *p;
-
-	p = get_proc_task(inode);
-	if (!p)
-		return -ESRCH;
-
-	if (p->prefer_cpus)
-		seq_printf(m, "%*pbl\n", cpumask_pr_args(p->prefer_cpus));
-	else
-		seq_putc(m, '\n');
-
-	put_task_struct(p);
-
-	return 0;
-}
-
-static ssize_t preferred_cpuset_write(struct file *file, const char __user *buf,
-					size_t count, loff_t *offset)
-{
-	cpumask_var_t new_mask;
-	int retval;
-	struct inode *inode = file_inode(file);
-	struct task_struct *p;
-
-	p = get_proc_task(inode);
-	if (!p)
-		return -ESRCH;
-
-	if (!alloc_cpumask_var(&new_mask, GFP_KERNEL)) {
-		retval = -ENOMEM;
-		goto out_put_task;
-	}
-
-	retval = cpumask_parselist_user(buf, count, new_mask);
-	if (retval < 0)
-		goto out_free_cpumask;
-
-	retval = set_prefer_cpus_ptr(p, new_mask);
-	if (retval < 0)
-		goto out_free_cpumask;
-
-	if (!cpumask_empty(new_mask)) {
-		cpus_read_lock();
-		dynamic_affinity_enable();
-		cpus_read_unlock();
-	}
-
-	retval = count;
-
-out_free_cpumask:
-	free_cpumask_var(new_mask);
-out_put_task:
-	put_task_struct(p);
-
-	return retval;
-}
-
-static int preferred_cpuset_open(struct inode *inode, struct file *filp)
-{
-	return single_open(filp, preferred_cpuset_show, inode);
-}
-
-static const struct file_operations proc_preferred_cpuset_operations = {
-	.open		= preferred_cpuset_open,
-	.write		= preferred_cpuset_write,
-	.read		= seq_read,
-	.llseek		= seq_lseek,
-	.release	= single_release,
-};
-#endif
-
 static int proc_pid_personality(struct seq_file *m, struct pid_namespace *ns,
 				struct pid *pid, struct task_struct *task)
 {
@@ -3349,37 +3148,6 @@ static int proc_pid_patch_state(struct seq_file *m, struct pid_namespace *ns,
 	return 0;
 }
 #endif /* CONFIG_LIVEPATCH */
-
-#ifdef CONFIG_KSM
-static int proc_pid_ksm_merging_pages(struct seq_file *m, struct pid_namespace *ns,
-				struct pid *pid, struct task_struct *task)
-{
-	struct mm_struct *mm;
-
-	mm = get_task_mm(task);
-	if (mm) {
-		seq_printf(m, "%lu\n", mm->ksm_merging_pages);
-		mmput(mm);
-	}
-
-	return 0;
-}
-static int proc_pid_ksm_stat(struct seq_file *m, struct pid_namespace *ns,
-				struct pid *pid, struct task_struct *task)
-{
-	struct mm_struct *mm;
-
-	mm = get_task_mm(task);
-	if (mm) {
-		seq_printf(m, "ksm_rmap_items %lu\n", mm->ksm_rmap_items);
-		seq_printf(m, "ksm_merging_pages %lu\n", mm->ksm_merging_pages);
-		seq_printf(m, "ksm_process_profit %ld\n", ksm_process_profit(mm));
-		mmput(mm);
-	}
-
-	return 0;
-}
-#endif /* CONFIG_KSM */
 
 #ifdef CONFIG_STACKLEAK_METRICS
 static int proc_stack_depth(struct seq_file *m, struct pid_namespace *ns,
@@ -3406,7 +3174,7 @@ static const struct pid_entry tgid_base_stuff[] = {
 	DIR("task",       S_IRUGO|S_IXUGO, proc_task_inode_operations, proc_task_operations),
 	DIR("fd",         S_IRUSR|S_IXUSR, proc_fd_inode_operations, proc_fd_operations),
 	DIR("map_files",  S_IRUSR|S_IXUSR, proc_map_files_inode_operations, proc_map_files_operations),
-	DIR("fdinfo",     S_IRUSR|S_IXUSR, proc_fdinfo_inode_operations, proc_fdinfo_operations),
+	DIR("fdinfo",     S_IRUGO|S_IXUGO, proc_fdinfo_inode_operations, proc_fdinfo_operations),
 	DIR("ns",	  S_IRUSR|S_IXUGO, proc_ns_dir_inode_operations, proc_ns_dir_operations),
 #ifdef CONFIG_NET
 	DIR("net",        S_IRUGO|S_IXUGO, proc_net_inode_operations, proc_net_operations),
@@ -3449,10 +3217,6 @@ static const struct pid_entry tgid_base_stuff[] = {
 	REG("smaps_rollup", S_IRUGO, proc_pid_smaps_rollup_operations),
 	REG("pagemap",    S_IRUSR, proc_pagemap_operations),
 #endif
-#ifdef CONFIG_ETMEM
-	REG("idle_pages", S_IRUSR|S_IWUSR, proc_mm_idle_operations),
-	REG("swap_pages", S_IWUSR, proc_mm_swap_operations),
-#endif
 #ifdef CONFIG_SECURITY
 	DIR("attr",       S_IRUGO|S_IXUGO, proc_attr_dir_inode_operations, proc_attr_dir_operations),
 #endif
@@ -3480,9 +3244,6 @@ static const struct pid_entry tgid_base_stuff[] = {
 	ONE("oom_score",  S_IRUGO, proc_oom_score),
 	REG("oom_adj",    S_IRUGO|S_IWUSR, proc_oom_adj_operations),
 	REG("oom_score_adj", S_IRUGO|S_IWUSR, proc_oom_score_adj_operations),
-#ifdef CONFIG_MEMORY_RELIABLE
-	REG("reliable", S_IRUGO|S_IWUSR, proc_reliable_operations),
-#endif
 #ifdef CONFIG_AUDIT
 	REG("loginuid",   S_IWUSR|S_IRUGO, proc_loginuid_operations),
 	REG("sessionid",  S_IRUGO, proc_sessionid_operations),
@@ -3510,21 +3271,14 @@ static const struct pid_entry tgid_base_stuff[] = {
 #ifdef CONFIG_LIVEPATCH
 	ONE("patch_state",  S_IRUSR, proc_pid_patch_state),
 #endif
+#ifdef CONFIG_CPU_FREQ_TIMES
+	ONE("time_in_state", 0444, proc_time_in_state_show),
+#endif
 #ifdef CONFIG_STACKLEAK_METRICS
 	ONE("stack_depth", S_IRUGO, proc_stack_depth),
 #endif
 #ifdef CONFIG_PROC_PID_ARCH_STATUS
 	ONE("arch_status", S_IRUGO, proc_pid_arch_status),
-#endif
-#ifdef CONFIG_SECCOMP_CACHE_DEBUG
-	ONE("seccomp_cache", S_IRUSR, proc_pid_seccomp_cache),
-#endif
-#ifdef CONFIG_ASCEND_SHARE_POOL
-	ONE("sp_group", 0444, proc_sp_group_state),
-#endif
-#ifdef CONFIG_KSM
-	ONE("ksm_merging_pages",  S_IRUSR, proc_pid_ksm_merging_pages),
-	ONE("ksm_stat",  S_IRUSR, proc_pid_ksm_stat),
 #endif
 };
 
@@ -3591,8 +3345,7 @@ static struct dentry *proc_pid_instantiate(struct dentry * dentry,
 {
 	struct inode *inode;
 
-	inode = proc_pid_make_base_inode(dentry->d_sb, task,
-					 S_IFDIR | S_IRUGO | S_IXUGO);
+	inode = proc_pid_make_inode(dentry->d_sb, task, S_IFDIR | S_IRUGO | S_IXUGO);
 	if (!inode)
 		return ERR_PTR(-ENOENT);
 
@@ -3760,74 +3513,12 @@ static const struct inode_operations proc_tid_comm_inode_operations = {
 		.permission = proc_tid_comm_permission,
 };
 
-#ifdef CONFIG_BPF_SCHED
-static ssize_t pid_tag_write(struct file *file, const char __user *buf,
-				size_t count, loff_t *offset)
-{
-	struct inode *inode = file_inode(file);
-	struct task_struct *tsk;
-	char buffer[PROC_NUMBUF];
-	int err = 0, tag = 0;
-
-	tsk = get_proc_task(inode);
-	if (!tsk)
-		return -ESRCH;
-
-	memset(buffer, 0, sizeof(buffer));
-	if (count > sizeof(buffer) - 1)
-		count = sizeof(buffer) - 1;
-
-	if (copy_from_user(buffer, buf, count)) {
-		err = -EFAULT;
-		goto out;
-	}
-
-	err = kstrtoint(strstrip(buffer), 0, &tag);
-	if (err)
-		goto out;
-
-	sched_settag(tsk, tag);
-
-out:
-	put_task_struct(tsk);
-	return err < 0 ? err : count;
-}
-
-static int pid_tag_show(struct seq_file *m, void *v)
-{
-	struct inode *inode = m->private;
-	struct task_struct *tsk;
-
-	tsk = get_proc_task(inode);
-	if (!tsk)
-		return -ESRCH;
-
-	seq_printf(m, "%ld\n", tsk->tag);
-	put_task_struct(tsk);
-
-	return 0;
-}
-
-static int pid_tag_open(struct inode *inode, struct file *flip)
-{
-	return single_open(flip, pid_tag_show, inode);
-}
-
-static const struct file_operations proc_pid_tag_operations = {
-		.open		= pid_tag_open,
-		.read		= seq_read,
-		.write		= pid_tag_write,
-		.llseek		= seq_lseek,
-		.release	= single_release,
-};
-#endif
-
 /*
  * Tasks
  */
 static const struct pid_entry tid_base_stuff[] = {
 	DIR("fd",        S_IRUSR|S_IXUSR, proc_fd_inode_operations, proc_fd_operations),
-	DIR("fdinfo",    S_IRUSR|S_IXUSR, proc_fdinfo_inode_operations, proc_fdinfo_operations),
+	DIR("fdinfo",    S_IRUGO|S_IXUGO, proc_fdinfo_inode_operations, proc_fdinfo_operations),
 	DIR("ns",	 S_IRUSR|S_IXUGO, proc_ns_dir_inode_operations, proc_ns_dir_operations),
 #ifdef CONFIG_NET
 	DIR("net",        S_IRUGO|S_IXUGO, proc_net_inode_operations, proc_net_operations),
@@ -3868,10 +3559,6 @@ static const struct pid_entry tid_base_stuff[] = {
 	REG("smaps_rollup", S_IRUGO, proc_pid_smaps_rollup_operations),
 	REG("pagemap",    S_IRUSR, proc_pagemap_operations),
 #endif
-#ifdef CONFIG_ETMEM
-	REG("idle_pages", S_IRUSR|S_IWUSR, proc_mm_idle_operations),
-	REG("swap_pages", S_IWUSR, proc_mm_swap_operations),
-#endif
 #ifdef CONFIG_SECURITY
 	DIR("attr",      S_IRUGO|S_IXUGO, proc_attr_dir_inode_operations, proc_attr_dir_operations),
 #endif
@@ -3899,9 +3586,6 @@ static const struct pid_entry tid_base_stuff[] = {
 	ONE("oom_score", S_IRUGO, proc_oom_score),
 	REG("oom_adj",   S_IRUGO|S_IWUSR, proc_oom_adj_operations),
 	REG("oom_score_adj", S_IRUGO|S_IWUSR, proc_oom_score_adj_operations),
-#ifdef CONFIG_MEMORY_RELIABLE
-	REG("reliable", S_IRUGO|S_IWUSR, proc_reliable_operations),
-#endif
 #ifdef CONFIG_AUDIT
 	REG("loginuid",  S_IWUSR|S_IRUGO, proc_loginuid_operations),
 	REG("sessionid",  S_IRUGO, proc_sessionid_operations),
@@ -3925,21 +3609,8 @@ static const struct pid_entry tid_base_stuff[] = {
 #ifdef CONFIG_PROC_PID_ARCH_STATUS
 	ONE("arch_status", S_IRUGO, proc_pid_arch_status),
 #endif
-#ifdef CONFIG_SECCOMP_CACHE_DEBUG
-	ONE("seccomp_cache", S_IRUSR, proc_pid_seccomp_cache),
-#endif
-#ifdef CONFIG_ASCEND_SHARE_POOL
-	ONE("sp_group", 0444, proc_sp_group_state),
-#endif
-#ifdef CONFIG_BPF_SCHED
-	REG("tag", 0644, proc_pid_tag_operations),
-#endif
-#ifdef CONFIG_QOS_SCHED_DYNAMIC_AFFINITY
-	REG("preferred_cpuset", 0644, proc_preferred_cpuset_operations),
-#endif
-#ifdef CONFIG_KSM
-	ONE("ksm_merging_pages",  S_IRUSR, proc_pid_ksm_merging_pages),
-	ONE("ksm_stat",  S_IRUSR, proc_pid_ksm_stat),
+#ifdef CONFIG_CPU_FREQ_TIMES
+	ONE("time_in_state", 0444, proc_time_in_state_show),
 #endif
 };
 
@@ -3972,8 +3643,7 @@ static struct dentry *proc_task_instantiate(struct dentry *dentry,
 	struct task_struct *task, const void *ptr)
 {
 	struct inode *inode;
-	inode = proc_pid_make_base_inode(dentry->d_sb, task,
-					 S_IFDIR | S_IRUGO | S_IXUGO);
+	inode = proc_pid_make_inode(dentry->d_sb, task, S_IFDIR | S_IRUGO | S_IXUGO);
 	if (!inode)
 		return ERR_PTR(-ENOENT);
 

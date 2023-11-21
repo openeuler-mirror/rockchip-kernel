@@ -2,11 +2,9 @@
 #ifndef BLK_MQ_H
 #define BLK_MQ_H
 
-#include <linux/kabi.h>
 #include <linux/blkdev.h>
 #include <linux/sbitmap.h>
 #include <linux/srcu.h>
-#include <linux/lockdep.h>
 
 struct blk_mq_tags;
 struct blk_flush_queue;
@@ -173,21 +171,6 @@ struct blk_mq_hw_ctx {
 	struct list_head	hctx_list;
 
 	/**
-	 * @dtag_wait_time: record when hardware queue is pending, specifically
-	 * when BLK_MQ_S_DTAG_WAIT is set in state.
-	 */
-	unsigned long		dtag_wait_time;
-
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
-	KABI_RESERVE(3)
-	KABI_RESERVE(4)
-	KABI_RESERVE(5)
-	KABI_RESERVE(6)
-	KABI_RESERVE(7)
-	KABI_RESERVE(8)
-
-	/**
 	 * @srcu: Sleepable RCU. Use as lock when type of the hardware queue is
 	 * blocking (BLK_MQ_F_BLOCKING). Must be the last member - see also
 	 * blk_mq_hw_ctx_size().
@@ -248,11 +231,13 @@ enum hctx_type {
  * @flags:	   Zero or more BLK_MQ_F_* flags.
  * @driver_data:   Pointer to data owned by the block driver that created this
  *		   tag set.
+ * @active_queues_shared_sbitmap:
+ * 		   number of active request queues per tag set.
+ * @__bitmap_tags: A shared tags sbitmap, used over all hctx's
+ * @__breserved_tags:
+ *		   A shared reserved tags sbitmap, used over all hctx's
  * @tags:	   Tag sets. One tag set per hardware queue. Has @nr_hw_queues
  *		   elements.
- * @shared_sbitmap_tags:
- *		   Shared sbitmap set of tags. Has @nr_hw_queues elements. If
- *		   set, shared by all @tags.
  * @tag_list_lock: Serializes tag_list accesses.
  * @tag_list:	   List of the request queues that use this tag set. See also
  *		   request_queue.tag_set_list.
@@ -269,25 +254,14 @@ struct blk_mq_tag_set {
 	unsigned int		timeout;
 	unsigned int		flags;
 	void			*driver_data;
+	atomic_t		active_queues_shared_sbitmap;
 
-	KABI_DEPRECATE(atomic_t, active_queues_shared_sbitmap)
-	KABI_DEPRECATE(atomic_t, pending_queues_shared_sbitmap)
-	KABI_DEPRECATE(struct sbitmap_queue, __bitmap_tags)
-	KABI_DEPRECATE(struct sbitmap_queue, __breserved_tags)
-
+	struct sbitmap_queue	__bitmap_tags;
+	struct sbitmap_queue	__breserved_tags;
 	struct blk_mq_tags	**tags;
 
 	struct mutex		tag_list_lock;
 	struct list_head	tag_list;
-
-	KABI_USE(1, struct blk_mq_tags *shared_sbitmap_tags)
-	KABI_RESERVE(2)
-	KABI_RESERVE(3)
-	KABI_RESERVE(4)
-	KABI_RESERVE(5)
-	KABI_RESERVE(6)
-	KABI_RESERVE(7)
-	KABI_RESERVE(8)
 };
 
 /**
@@ -299,8 +273,6 @@ struct blk_mq_tag_set {
 struct blk_mq_queue_data {
 	struct request *rq;
 	bool last;
-
-	KABI_RESERVE(1)
 };
 
 typedef bool (busy_iter_fn)(struct blk_mq_hw_ctx *, struct request *, void *,
@@ -410,15 +382,6 @@ struct blk_mq_ops {
 	 */
 	void (*show_rq)(struct seq_file *m, struct request *rq);
 #endif
-
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
-	KABI_RESERVE(3)
-	KABI_RESERVE(4)
-	KABI_RESERVE(5)
-	KABI_RESERVE(6)
-	KABI_RESERVE(7)
-	KABI_RESERVE(8)
 };
 
 enum {
@@ -448,9 +411,6 @@ enum {
 	/* hw queue is inactive after all its CPUs become offline */
 	BLK_MQ_S_INACTIVE	= 3,
 
-	/* hw queue is waiting for driver tag */
-	BLK_MQ_S_DTAG_WAIT	= 4,
-
 	BLK_MQ_MAX_DEPTH	= 10240,
 
 	BLK_MQ_CPU_WORK_BATCH	= 8,
@@ -461,8 +421,6 @@ enum {
 #define BLK_ALLOC_POLICY_TO_MQ_FLAG(policy) \
 	((policy & ((1 << BLK_MQ_F_ALLOC_POLICY_BITS) - 1)) \
 		<< BLK_MQ_F_ALLOC_POLICY_START_BIT)
-
-#define BLK_MQ_NO_HCTX_IDX	(-1U)
 
 struct request_queue *blk_mq_init_queue(struct blk_mq_tag_set *);
 struct request_queue *blk_mq_init_queue_data(struct blk_mq_tag_set *set,
@@ -613,20 +571,9 @@ static inline void *blk_mq_rq_to_pdu(struct request *rq)
 	return rq + 1;
 }
 
-static inline struct blk_mq_hw_ctx *queue_hctx(struct request_queue *q, int id)
-{
-	struct blk_mq_hw_ctx *hctx;
-
-	rcu_read_lock();
-	hctx = *(rcu_dereference(q->queue_hw_ctx) + id);
-	rcu_read_unlock();
-
-	return hctx;
-}
-
 #define queue_for_each_hw_ctx(q, hctx, i)				\
 	for ((i) = 0; (i) < (q)->nr_hw_queues &&			\
-	     ({ hctx = queue_hctx((q), i); 1; }); (i)++)
+	     ({ hctx = (q)->queue_hw_ctx[i]; 1; }); (i)++)
 
 #define hctx_for_each_ctx(hctx, ctx, i)					\
 	for ((i) = 0; (i) < (hctx)->nr_ctx &&				\
@@ -649,7 +596,5 @@ static inline void blk_mq_cleanup_rq(struct request *rq)
 }
 
 blk_qc_t blk_mq_submit_bio(struct bio *bio);
-void blk_mq_hctx_set_fq_lock_class(struct blk_mq_hw_ctx *hctx,
-		struct lock_class_key *key);
 
 #endif

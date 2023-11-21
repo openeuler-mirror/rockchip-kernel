@@ -19,7 +19,6 @@
 #include "xfs_error.h"
 #include "xfs_icache.h"
 #include "xfs_health.h"
-#include "xfs_trans.h"
 
 /*
  * Bulk Stat
@@ -107,11 +106,11 @@ xfs_bulkstat_one_int(
 	buf->bs_extsize_blks = dic->di_extsize;
 	buf->bs_extents = xfs_ifork_nextents(&ip->i_df);
 	xfs_bulkstat_health(ip, buf);
-	buf->bs_aextents = xfs_ifork_nextents(&ip->i_af);
-	buf->bs_forkoff = xfs_inode_fork_boff(ip);
+	buf->bs_aextents = xfs_ifork_nextents(ip->i_afp);
+	buf->bs_forkoff = XFS_IFORK_BOFF(ip);
 	buf->bs_version = XFS_BULKSTAT_VERSION_V5;
 
-	if (xfs_has_v3inodes(mp)) {
+	if (xfs_sb_version_has_v3inode(&mp->m_sb)) {
 		if (dic->di_flags2 & XFS_DIFLAG2_COWEXTSIZE)
 			buf->bs_cowextsize_blks = dic->di_cowextsize;
 	}
@@ -165,7 +164,6 @@ xfs_bulkstat_one(
 		.formatter	= formatter,
 		.breq		= breq,
 	};
-	struct xfs_trans	*tp;
 	int			error;
 
 	ASSERT(breq->icount == 1);
@@ -175,17 +173,8 @@ xfs_bulkstat_one(
 	if (!bc.buf)
 		return -ENOMEM;
 
-	/*
-	 * Grab an empty transaction so that we can use its recursive buffer
-	 * locking abilities to detect cycles in the inobt without deadlocking.
-	 */
-	error = xfs_trans_alloc_empty(breq->mp, &tp);
-	if (error)
-		goto out;
+	error = xfs_bulkstat_one_int(breq->mp, NULL, breq->startino, &bc);
 
-	error = xfs_bulkstat_one_int(breq->mp, tp, breq->startino, &bc);
-	xfs_trans_cancel(tp);
-out:
 	kmem_free(bc.buf);
 
 	/*
@@ -248,7 +237,6 @@ xfs_bulkstat(
 		.formatter	= formatter,
 		.breq		= breq,
 	};
-	struct xfs_trans	*tp;
 	int			error;
 
 	if (xfs_bulkstat_already_done(breq->mp, breq->startino))
@@ -259,18 +247,9 @@ xfs_bulkstat(
 	if (!bc.buf)
 		return -ENOMEM;
 
-	/*
-	 * Grab an empty transaction so that we can use its recursive buffer
-	 * locking abilities to detect cycles in the inobt without deadlocking.
-	 */
-	error = xfs_trans_alloc_empty(breq->mp, &tp);
-	if (error)
-		goto out;
-
-	error = xfs_iwalk(breq->mp, tp, breq->startino, breq->flags,
+	error = xfs_iwalk(breq->mp, NULL, breq->startino, breq->flags,
 			xfs_bulkstat_iwalk, breq->icount, &bc);
-	xfs_trans_cancel(tp);
-out:
+
 	kmem_free(bc.buf);
 
 	/*
@@ -383,24 +362,13 @@ xfs_inumbers(
 		.formatter	= formatter,
 		.breq		= breq,
 	};
-	struct xfs_trans	*tp;
 	int			error = 0;
 
 	if (xfs_bulkstat_already_done(breq->mp, breq->startino))
 		return 0;
 
-	/*
-	 * Grab an empty transaction so that we can use its recursive buffer
-	 * locking abilities to detect cycles in the inobt without deadlocking.
-	 */
-	error = xfs_trans_alloc_empty(breq->mp, &tp);
-	if (error)
-		goto out;
-
-	error = xfs_inobt_walk(breq->mp, tp, breq->startino, breq->flags,
+	error = xfs_inobt_walk(breq->mp, NULL, breq->startino, breq->flags,
 			xfs_inumbers_walk, breq->icount, &ic);
-	xfs_trans_cancel(tp);
-out:
 
 	/*
 	 * We found some inode groups, so clear the error status and return

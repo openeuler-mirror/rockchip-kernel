@@ -468,7 +468,7 @@ void vhost_dev_init(struct vhost_dev *dev,
 		    struct vhost_virtqueue **vqs, int nvqs,
 		    int iov_limit, int weight, int byte_weight,
 		    bool use_worker,
-		    int (*msg_handler)(struct vhost_dev *dev, u32 asid,
+		    int (*msg_handler)(struct vhost_dev *dev,
 				       struct vhost_iotlb_msg *msg))
 {
 	struct vhost_virtqueue *vq;
@@ -1090,13 +1090,10 @@ static bool umem_access_ok(u64 uaddr, u64 size, int access)
 	return true;
 }
 
-static int vhost_process_iotlb_msg(struct vhost_dev *dev, u32 asid,
+static int vhost_process_iotlb_msg(struct vhost_dev *dev,
 				   struct vhost_iotlb_msg *msg)
 {
 	int ret = 0;
-
-	if (asid != 0)
-		return -EINVAL;
 
 	mutex_lock(&dev->mutex);
 	vhost_dev_lock_vqs(dev);
@@ -1144,7 +1141,6 @@ ssize_t vhost_chr_write_iter(struct vhost_dev *dev,
 	struct vhost_iotlb_msg msg;
 	size_t offset;
 	int type, ret;
-	u32 asid = 0;
 
 	ret = copy_from_iter(&type, sizeof(type), from);
 	if (ret != sizeof(type)) {
@@ -1160,16 +1156,7 @@ ssize_t vhost_chr_write_iter(struct vhost_dev *dev,
 		offset = offsetof(struct vhost_msg, iotlb) - sizeof(int);
 		break;
 	case VHOST_IOTLB_MSG_V2:
-		if (vhost_backend_has_feature(dev->vqs[0],
-					      VHOST_BACKEND_F_IOTLB_ASID)) {
-			ret = copy_from_iter(&asid, sizeof(asid), from);
-			if (ret != sizeof(asid)) {
-				ret = -EINVAL;
-				goto done;
-			}
-			offset = 0;
-		} else
-			offset = sizeof(__u32);
+		offset = sizeof(__u32);
 		break;
 	default:
 		ret = -EINVAL;
@@ -1183,17 +1170,10 @@ ssize_t vhost_chr_write_iter(struct vhost_dev *dev,
 		goto done;
 	}
 
-	if ((msg.type == VHOST_IOTLB_UPDATE ||
-	     msg.type == VHOST_IOTLB_INVALIDATE) &&
-	     msg.size == 0) {
-		ret = -EINVAL;
-		goto done;
-	}
-
 	if (dev->msg_handler)
-		ret = dev->msg_handler(dev, asid, &msg);
+		ret = dev->msg_handler(dev, &msg);
 	else
-		ret = vhost_process_iotlb_msg(dev, asid, &msg);
+		ret = vhost_process_iotlb_msg(dev, &msg);
 	if (ret) {
 		ret = -EFAULT;
 		goto done;
@@ -2061,7 +2041,7 @@ static int translate_desc(struct vhost_virtqueue *vq, u64 addr, u32 len,
 	struct vhost_dev *dev = vq->dev;
 	struct vhost_iotlb *umem = dev->iotlb ? dev->iotlb : dev->umem;
 	struct iovec *_iov;
-	u64 s = 0, last = addr + len - 1;
+	u64 s = 0;
 	int ret = 0;
 
 	while ((u64)len > s) {
@@ -2071,7 +2051,7 @@ static int translate_desc(struct vhost_virtqueue *vq, u64 addr, u32 len,
 			break;
 		}
 
-		map = vhost_iotlb_itree_first(umem, addr, last);
+		map = vhost_iotlb_itree_first(umem, addr, addr + len - 1);
 		if (map == NULL || map->start > addr) {
 			if (umem != dev->iotlb) {
 				ret = -EFAULT;

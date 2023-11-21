@@ -499,7 +499,7 @@ static void mpam_enable_irqs(void)
 		rc = request_irq(irq, mpam_handle_error_irq, request_flags,
 				"MPAM ERR IRQ", dev);
 		if (rc) {
-			pr_warn_ratelimited("Not support to register irq %u\n", irq);
+			pr_err_ratelimited("Failed to register irq %u\n", irq);
 			continue;
 		}
 
@@ -1865,7 +1865,7 @@ static int __init arm_mpam_driver_init(void)
 	if (acpi_disabled)
 		return platform_driver_register(&arm_mpam_driver);
 	else
-		return acpi_mpam_parse_version();
+		return acpi_mpam_parse();
 }
 
 /*

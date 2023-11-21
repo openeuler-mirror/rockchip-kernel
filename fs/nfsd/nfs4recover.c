@@ -815,10 +815,8 @@ __cld_pipe_inprogress_downcall(const struct cld_msg_v2 __user *cmsg,
 				princhash.data = memdup_user(
 						&ci->cc_princhash.cp_data,
 						princhashlen);
-				if (IS_ERR_OR_NULL(princhash.data)) {
-					kfree(name.data);
+				if (IS_ERR_OR_NULL(princhash.data))
 					return -EFAULT;
-				}
 				princhash.len = princhashlen;
 			} else
 				princhash.len = 0;
@@ -2158,7 +2156,6 @@ static struct notifier_block nfsd4_cld_block = {
 int
 register_cld_notifier(void)
 {
-	WARN_ON(!nfsd_net_id);
 	return rpc_pipefs_notifier_register(&nfsd4_cld_block);
 }
 

@@ -804,11 +804,6 @@ xfs_growfs_rt_alloc(
 		xfs_ilock(ip, XFS_ILOCK_EXCL);
 		xfs_trans_ijoin(tp, ip, XFS_ILOCK_EXCL);
 
-		error = xfs_iext_count_may_overflow(ip, XFS_DATA_FORK,
-				XFS_IEXT_ADD_NOSPLIT_CNT);
-		if (error)
-			goto out_trans_cancel;
-
 		/*
 		 * Allocate blocks to the bitmap file.
 		 */
@@ -996,8 +991,7 @@ xfs_growfs_rt(
 		     ((sbp->sb_rextents & ((1 << mp->m_blkbit_log) - 1)) != 0);
 	     bmbno < nrbmblocks;
 	     bmbno++) {
-		struct xfs_trans	*tp;
-		xfs_rfsblock_t		nrblocks_step;
+		xfs_trans_t	*tp;
 
 		*nmp = *mp;
 		nsbp = &nmp->m_sb;
@@ -1006,9 +1000,10 @@ xfs_growfs_rt(
 		 */
 		nsbp->sb_rextsize = in->extsize;
 		nsbp->sb_rbmblocks = bmbno + 1;
-		nrblocks_step = (bmbno + 1) * NBBY * nsbp->sb_blocksize *
-				nsbp->sb_rextsize;
-		nsbp->sb_rblocks = min(nrblocks, nrblocks_step);
+		nsbp->sb_rblocks =
+			XFS_RTMIN(nrblocks,
+				  nsbp->sb_rbmblocks * NBBY *
+				  nsbp->sb_blocksize * nsbp->sb_rextsize);
 		nsbp->sb_rextents = nsbp->sb_rblocks;
 		do_div(nsbp->sb_rextents, nsbp->sb_rextsize);
 		ASSERT(nsbp->sb_rextents != 0);
@@ -1106,9 +1101,6 @@ error_cancel:
 		error = xfs_trans_commit(tp);
 		if (error)
 			break;
-
-		/* Ensure the mount RT feature flag is now set. */
-		mp->m_features |= XFS_FEAT_REALTIME;
 	}
 	if (error)
 		goto out_free;

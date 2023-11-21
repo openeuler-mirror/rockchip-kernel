@@ -30,7 +30,6 @@ struct bus_type container_subsys = {
 	.online = trivial_online,
 	.offline = container_offline,
 };
-EXPORT_SYMBOL_GPL(container_subsys);
 
 void __init container_dev_init(void)
 {

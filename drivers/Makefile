@@ -41,7 +41,7 @@ obj-$(CONFIG_DMADEVICES)	+= dma/
 # SOC specific infrastructure drivers.
 obj-y				+= soc/
 
-obj-y				+= virtio/
+obj-$(CONFIG_VIRTIO)		+= virtio/
 obj-$(CONFIG_VDPA)		+= vdpa/
 obj-$(CONFIG_XEN)		+= xen/
 
@@ -177,9 +177,7 @@ obj-$(CONFIG_USB4)		+= thunderbolt/
 obj-$(CONFIG_CORESIGHT)		+= hwtracing/coresight/
 obj-y				+= hwtracing/intel_th/
 obj-$(CONFIG_STM)		+= hwtracing/stm/
-obj-$(CONFIG_HISI_PTT)          += hwtracing/ptt/
 obj-$(CONFIG_ANDROID)		+= android/
-obj-$(CONFIG_VENDOR_HOOKS)	+= hooks/
 obj-$(CONFIG_NVMEM)		+= nvmem/
 obj-$(CONFIG_FPGA)		+= fpga/
 obj-$(CONFIG_FSI)		+= fsi/
@@ -191,4 +189,7 @@ obj-$(CONFIG_GNSS)		+= gnss/
 obj-$(CONFIG_INTERCONNECT)	+= interconnect/
 obj-$(CONFIG_COUNTER)		+= counter/
 obj-$(CONFIG_MOST)		+= most/
-obj-$(CONFIG_ROH)		+= roh/
+obj-$(CONFIG_RK_FLASH)		+= rkflash/
+obj-$(CONFIG_RK_HEADSET)	+= headset_observe/
+obj-$(CONFIG_RK_NAND)		+= rk_nand/
+obj-$(CONFIG_ROCKCHIP_RKNPU)	+= rknpu/

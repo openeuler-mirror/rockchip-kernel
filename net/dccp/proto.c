@@ -42,8 +42,8 @@ DEFINE_SNMP_STAT(struct dccp_mib, dccp_statistics) __read_mostly;
 
 EXPORT_SYMBOL_GPL(dccp_statistics);
 
-DEFINE_PER_CPU(unsigned int, dccp_orphan_count);
-EXPORT_PER_CPU_SYMBOL_GPL(dccp_orphan_count);
+struct percpu_counter dccp_orphan_count;
+EXPORT_SYMBOL_GPL(dccp_orphan_count);
 
 struct inet_hashinfo dccp_hashinfo;
 EXPORT_SYMBOL_GPL(dccp_hashinfo);
@@ -171,18 +171,12 @@ const char *dccp_packet_name(const int type)
 
 EXPORT_SYMBOL_GPL(dccp_packet_name);
 
-void dccp_destruct_common(struct sock *sk)
+static void dccp_sk_destruct(struct sock *sk)
 {
 	struct dccp_sock *dp = dccp_sk(sk);
 
 	ccid_hc_tx_delete(dp->dccps_hc_tx_ccid, sk);
 	dp->dccps_hc_tx_ccid = NULL;
-}
-EXPORT_SYMBOL_GPL(dccp_destruct_common);
-
-static void dccp_sk_destruct(struct sock *sk)
-{
-	dccp_destruct_common(sk);
 	inet_sock_destruct(sk);
 }
 
@@ -753,6 +747,11 @@ int dccp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 
 	lock_sock(sk);
 
+	if (dccp_qpolicy_full(sk)) {
+		rc = -EAGAIN;
+		goto out_release;
+	}
+
 	timeo = sock_sndtimeo(sk, noblock);
 
 	/*
@@ -770,11 +769,6 @@ int dccp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 	lock_sock(sk);
 	if (skb == NULL)
 		goto out_release;
-
-	if (dccp_qpolicy_full(sk)) {
-		rc = -EAGAIN;
-		goto out_discard;
-	}
 
 	if (sk->sk_state == DCCP_CLOSED) {
 		rc = -ENOTCONN;
@@ -1061,7 +1055,7 @@ adjudge_to_death:
 	bh_lock_sock(sk);
 	WARN_ON(sock_owned_by_user(sk));
 
-	this_cpu_inc(dccp_orphan_count);
+	percpu_counter_inc(sk->sk_prot->orphan_count);
 
 	/* Have we already been destroyed by a softirq or backlog? */
 	if (state != DCCP_CLOSED && sk->sk_state == DCCP_CLOSED)
@@ -1121,10 +1115,13 @@ static int __init dccp_init(void)
 
 	BUILD_BUG_ON(sizeof(struct dccp_skb_cb) >
 		     sizeof_field(struct sk_buff, cb));
+	rc = percpu_counter_init(&dccp_orphan_count, 0, GFP_KERNEL);
+	if (rc)
+		goto out_fail;
 	inet_hashinfo_init(&dccp_hashinfo);
 	rc = inet_hashinfo2_init_mod(&dccp_hashinfo);
 	if (rc)
-		goto out_fail;
+		goto out_free_percpu;
 	rc = -ENOBUFS;
 	dccp_hashinfo.bind_bucket_cachep =
 		kmem_cache_create("dccp_bind_bucket",
@@ -1229,6 +1226,8 @@ out_free_bind_bucket_cachep:
 	kmem_cache_destroy(dccp_hashinfo.bind_bucket_cachep);
 out_free_hashinfo2:
 	inet_hashinfo2_free_mod(&dccp_hashinfo);
+out_free_percpu:
+	percpu_counter_destroy(&dccp_orphan_count);
 out_fail:
 	dccp_hashinfo.bhash = NULL;
 	dccp_hashinfo.ehash = NULL;
@@ -1251,6 +1250,7 @@ static void __exit dccp_fini(void)
 	dccp_ackvec_exit();
 	dccp_sysctl_exit();
 	inet_hashinfo2_free_mod(&dccp_hashinfo);
+	percpu_counter_destroy(&dccp_orphan_count);
 }
 
 module_init(dccp_init);

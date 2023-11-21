@@ -157,9 +157,6 @@ struct hdmi_spec {
 
 	bool dyn_pin_out;
 	bool dyn_pcm_assign;
-	bool dyn_pcm_no_legacy;
-	bool nv_dp_workaround; /* workaround DP audio infoframe for Nvidia */
-
 	bool intel_hsw_fixup;	/* apply Intel platform-specific fixups */
 	/*
 	 * Non-generic VIA/NVIDIA specific
@@ -669,24 +666,15 @@ static void hdmi_pin_setup_infoframe(struct hda_codec *codec,
 				     int ca, int active_channels,
 				     int conn_type)
 {
-	struct hdmi_spec *spec = codec->spec;
 	union audio_infoframe ai;
 
 	memset(&ai, 0, sizeof(ai));
-	if ((conn_type == 0) || /* HDMI */
-		/* Nvidia DisplayPort: Nvidia HW expects same layout as HDMI */
-		(conn_type == 1 && spec->nv_dp_workaround)) {
+	if (conn_type == 0) { /* HDMI */
 		struct hdmi_audio_infoframe *hdmi_ai = &ai.hdmi;
 
-		if (conn_type == 0) { /* HDMI */
-			hdmi_ai->type		= 0x84;
-			hdmi_ai->ver		= 0x01;
-			hdmi_ai->len		= 0x0a;
-		} else {/* Nvidia DP */
-			hdmi_ai->type		= 0x84;
-			hdmi_ai->ver		= 0x1b;
-			hdmi_ai->len		= 0x11 << 2;
-		}
+		hdmi_ai->type		= 0x84;
+		hdmi_ai->ver		= 0x01;
+		hdmi_ai->len		= 0x0a;
 		hdmi_ai->CC02_CT47	= active_channels - 1;
 		hdmi_ai->CA		= ca;
 		hdmi_checksum_audio_infoframe(hdmi_ai);
@@ -1269,7 +1257,6 @@ static int hdmi_pcm_open(struct hda_pcm_stream *hinfo,
 	set_bit(pcm_idx, &spec->pcm_in_use);
 	per_pin = get_pin(spec, pin_idx);
 	per_pin->cvt_nid = per_cvt->cvt_nid;
-	per_pin->silent_stream = false;
 	hinfo->nid = per_cvt->cvt_nid;
 
 	/* flip stripe flag for the assigned stream if supported */
@@ -1361,12 +1348,6 @@ static int hdmi_find_pcm_slot(struct hdmi_spec *spec,
 {
 	int i;
 
-	/* on the new machines, try to assign the pcm slot dynamically,
-	 * not use the preferred fixed map (legacy way) anymore.
-	 */
-	if (spec->dyn_pcm_no_legacy)
-		goto last_try;
-
 	/*
 	 * generic_hdmi_build_pcms() may allocate extra PCMs on some
 	 * platforms (with maximum of 'num_nids + dev_num - 1')
@@ -1396,9 +1377,8 @@ static int hdmi_find_pcm_slot(struct hdmi_spec *spec,
 			return i;
 	}
 
- last_try:
 	/* the last try; check the empty slots in pins */
-	for (i = 0; i < spec->pcm_used; i++) {
+	for (i = 0; i < spec->num_nids; i++) {
 		if (!test_bit(i, &spec->pcm_bitmap))
 			return i;
 	}
@@ -1628,7 +1608,6 @@ static void hdmi_present_sense_via_verbs(struct hdmi_spec_per_pin *per_pin,
 	struct hda_codec *codec = per_pin->codec;
 	struct hdmi_spec *spec = codec->spec;
 	struct hdmi_eld *eld = &spec->temp_eld;
-	struct device *dev = hda_codec_dev(codec);
 	hda_nid_t pin_nid = per_pin->pin_nid;
 	int dev_id = per_pin->dev_id;
 	/*
@@ -1642,13 +1621,8 @@ static void hdmi_present_sense_via_verbs(struct hdmi_spec_per_pin *per_pin,
 	int present;
 	int ret;
 
-#ifdef	CONFIG_PM
-	if (dev->power.runtime_status == RPM_SUSPENDING)
-		return;
-#endif
-
 	ret = snd_hda_power_up_pm(codec);
-	if (ret < 0 && pm_runtime_suspended(dev))
+	if (ret < 0 && pm_runtime_suspended(hda_codec_dev(codec)))
 		goto out;
 
 	present = snd_hda_jack_pin_sense(codec, pin_nid, dev_id);
@@ -1965,8 +1939,6 @@ static int hdmi_add_cvt(struct hda_codec *codec, hda_nid_t cvt_nid)
 static const struct snd_pci_quirk force_connect_list[] = {
 	SND_PCI_QUIRK(0x103c, 0x870f, "HP", 1),
 	SND_PCI_QUIRK(0x103c, 0x871a, "HP", 1),
-	SND_PCI_QUIRK(0x103c, 0x8711, "HP", 1),
-	SND_PCI_QUIRK(0x103c, 0x8715, "HP", 1),
 	SND_PCI_QUIRK(0x1462, 0xec94, "MS-7C94", 1),
 	{}
 };
@@ -2276,9 +2248,7 @@ static int generic_hdmi_build_pcms(struct hda_codec *codec)
 	 * dev_num is the device entry number in a pin
 	 */
 
-	if (spec->dyn_pcm_no_legacy && codec->mst_no_extra_pcms)
-		pcm_num = spec->num_cvts;
-	else if (codec->mst_no_extra_pcms)
+	if (codec->mst_no_extra_pcms)
 		pcm_num = spec->num_nids;
 	else
 		pcm_num = spec->num_nids + spec->dev_num - 1;
@@ -2686,6 +2656,9 @@ static void generic_acomp_pin_eld_notify(void *audio_ptr, int port, int dev_id)
 	 */
 	if (codec->core.dev.power.power_state.event == PM_EVENT_SUSPEND)
 		return;
+	/* ditto during suspend/resume process itself */
+	if (snd_hdac_is_in_pm(&codec->core))
+		return;
 
 	check_presence_and_report(codec, pin_nid, dev_id);
 }
@@ -2869,6 +2842,9 @@ static void intel_pin_eld_notify(void *audio_ptr, int port, int pipe)
 	 */
 	if (codec->core.dev.power.power_state.event == PM_EVENT_SUSPEND)
 		return;
+	/* ditto during suspend/resume process itself */
+	if (snd_hdac_is_in_pm(&codec->core))
+		return;
 
 	snd_hdac_i915_set_bclk(&codec->bus->core);
 	check_presence_and_report(codec, pin_nid, dev_id);
@@ -3028,16 +3004,8 @@ static int patch_i915_tgl_hdmi(struct hda_codec *codec)
 	 * the index indicate the port number.
 	 */
 	static const int map[] = {0x4, 0x6, 0x8, 0xa, 0xb, 0xc, 0xd, 0xe, 0xf};
-	int ret;
 
-	ret = intel_hsw_common_init(codec, 0x02, map, ARRAY_SIZE(map));
-	if (!ret) {
-		struct hdmi_spec *spec = codec->spec;
-
-		spec->dyn_pcm_no_legacy = true;
-	}
-
-	return ret;
+	return intel_hsw_common_init(codec, 0x02, map, ARRAY_SIZE(map));
 }
 
 /* Intel Baytrail and Braswell; with eld notifier */
@@ -3536,7 +3504,6 @@ static int patch_nvhdmi_2ch(struct hda_codec *codec)
 	spec->pcm_playback.rates = SUPPORTED_RATES;
 	spec->pcm_playback.maxbps = SUPPORTED_MAXBPS;
 	spec->pcm_playback.formats = SUPPORTED_FORMATS;
-	spec->nv_dp_workaround = true;
 	return 0;
 }
 
@@ -3676,7 +3643,6 @@ static int patch_nvhdmi(struct hda_codec *codec)
 	spec->chmap.ops.chmap_cea_alloc_validate_get_type =
 		nvhdmi_chmap_cea_alloc_validate_get_type;
 	spec->chmap.ops.chmap_validate = nvhdmi_chmap_validate;
-	spec->nv_dp_workaround = true;
 
 	codec->link_down_at_suspend = 1;
 
@@ -3700,7 +3666,6 @@ static int patch_nvhdmi_legacy(struct hda_codec *codec)
 	spec->chmap.ops.chmap_cea_alloc_validate_get_type =
 		nvhdmi_chmap_cea_alloc_validate_get_type;
 	spec->chmap.ops.chmap_validate = nvhdmi_chmap_validate;
-	spec->nv_dp_workaround = true;
 
 	codec->link_down_at_suspend = 1;
 
@@ -3868,13 +3833,11 @@ static int patch_tegra_hdmi(struct hda_codec *codec)
 	if (err)
 		return err;
 
-	codec->depop_delay = 10;
 	codec->patch_ops.build_pcms = tegra_hdmi_build_pcms;
 	spec = codec->spec;
 	spec->chmap.ops.chmap_cea_alloc_validate_get_type =
 		nvhdmi_chmap_cea_alloc_validate_get_type;
 	spec->chmap.ops.chmap_validate = nvhdmi_chmap_validate;
-	spec->nv_dp_workaround = true;
 
 	return 0;
 }
@@ -4287,20 +4250,6 @@ static int patch_via_hdmi(struct hda_codec *codec)
 	return patch_simple_hdmi(codec, VIAHDMI_CVT_NID, VIAHDMI_PIN_NID);
 }
 
-/* ZHAOXIN HDMI Implementation */
-static int patch_zx_hdmi(struct hda_codec *codec)
-{
-	int err;
-
-	err = patch_generic_hdmi(codec);
-	codec->no_sticky_stream = 1;
-
-	if (err)
-		return err;
-
-	return 0;
-}
-
 /*
  * patch entries
  */
@@ -4394,12 +4343,6 @@ HDA_CODEC_ENTRY(0x11069f80, "VX900 HDMI/DP",	patch_via_hdmi),
 HDA_CODEC_ENTRY(0x11069f81, "VX900 HDMI/DP",	patch_via_hdmi),
 HDA_CODEC_ENTRY(0x11069f84, "VX11 HDMI/DP",	patch_generic_hdmi),
 HDA_CODEC_ENTRY(0x11069f85, "VX11 HDMI/DP",	patch_generic_hdmi),
-HDA_CODEC_ENTRY(0x11069f86, "CND001 HDMI/DP",	patch_generic_hdmi),
-HDA_CODEC_ENTRY(0x11069f87, "CND001 HDMI/DP",	patch_generic_hdmi),
-HDA_CODEC_ENTRY(0x11069f88, "CHX001 HDMI/DP",	patch_zx_hdmi),
-HDA_CODEC_ENTRY(0x11069f89, "CHX001 HDMI/DP",	patch_zx_hdmi),
-HDA_CODEC_ENTRY(0x11069f8a, "CHX002 HDMI/DP",	patch_zx_hdmi),
-HDA_CODEC_ENTRY(0x11069f8b, "CHX002 HDMI/DP",	patch_zx_hdmi),
 HDA_CODEC_ENTRY(0x80860054, "IbexPeak HDMI",	patch_i915_cpt_hdmi),
 HDA_CODEC_ENTRY(0x80862800, "Geminilake HDMI",	patch_i915_glk_hdmi),
 HDA_CODEC_ENTRY(0x80862801, "Bearlake HDMI",	patch_generic_hdmi),
@@ -4419,21 +4362,14 @@ HDA_CODEC_ENTRY(0x8086280f, "Icelake HDMI",	patch_i915_icl_hdmi),
 HDA_CODEC_ENTRY(0x80862812, "Tigerlake HDMI",	patch_i915_tgl_hdmi),
 HDA_CODEC_ENTRY(0x80862814, "DG1 HDMI",	patch_i915_tgl_hdmi),
 HDA_CODEC_ENTRY(0x80862815, "Alderlake HDMI",	patch_i915_tgl_hdmi),
+HDA_CODEC_ENTRY(0x8086281c, "Alderlake-P HDMI", patch_i915_tgl_hdmi),
 HDA_CODEC_ENTRY(0x80862816, "Rocketlake HDMI",	patch_i915_tgl_hdmi),
-HDA_CODEC_ENTRY(0x80862819, "DG2 HDMI",	patch_i915_tgl_hdmi),
 HDA_CODEC_ENTRY(0x8086281a, "Jasperlake HDMI",	patch_i915_icl_hdmi),
 HDA_CODEC_ENTRY(0x8086281b, "Elkhartlake HDMI",	patch_i915_icl_hdmi),
-HDA_CODEC_ENTRY(0x8086281c, "Alderlake-P HDMI", patch_i915_tgl_hdmi),
 HDA_CODEC_ENTRY(0x80862880, "CedarTrail HDMI",	patch_generic_hdmi),
 HDA_CODEC_ENTRY(0x80862882, "Valleyview2 HDMI",	patch_i915_byt_hdmi),
 HDA_CODEC_ENTRY(0x80862883, "Braswell HDMI",	patch_i915_byt_hdmi),
 HDA_CODEC_ENTRY(0x808629fb, "Crestline HDMI",	patch_generic_hdmi),
-HDA_CODEC_ENTRY(0x1d179f86, "CND001 HDMI/DP",	patch_generic_hdmi),
-HDA_CODEC_ENTRY(0x1d179f87, "CND001 HDMI/DP",	patch_generic_hdmi),
-HDA_CODEC_ENTRY(0x1d179f88, "CHX001 HDMI/DP",	patch_zx_hdmi),
-HDA_CODEC_ENTRY(0x1d179f89, "CHX001 HDMI/DP",	patch_zx_hdmi),
-HDA_CODEC_ENTRY(0x1d179f8a, "CHX002 HDMI/DP",	patch_zx_hdmi),
-HDA_CODEC_ENTRY(0x1d179f8b, "CHX002 HDMI/DP",	patch_zx_hdmi),
 /* special ID for generic HDMI */
 HDA_CODEC_ENTRY(HDA_CODEC_ID_GENERIC_HDMI, "Generic HDMI", patch_generic_hdmi),
 {} /* terminator */

@@ -15,7 +15,7 @@
 #include <linux/timer.h>
 #include <linux/hrtimer.h>
 #include <linux/completion.h>
-#include <linux/kabi.h>
+#include <linux/android_kabi.h>
 
 /*
  * Callbacks for platform drivers to implement.
@@ -300,6 +300,8 @@ struct dev_pm_ops {
 	int (*runtime_suspend)(struct device *dev);
 	int (*runtime_resume)(struct device *dev);
 	int (*runtime_idle)(struct device *dev);
+
+	ANDROID_KABI_RESERVE(1);
 };
 
 #ifdef CONFIG_PM_SLEEP
@@ -543,13 +545,6 @@ struct pm_subsys_data {
 #ifdef CONFIG_PM_GENERIC_DOMAINS
 	struct pm_domain_data *domain_data;
 #endif
-
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
-	KABI_RESERVE(3)
-	KABI_RESERVE(4)
-	KABI_RESERVE(5)
-	KABI_RESERVE(6)
 };
 
 /*
@@ -630,8 +625,8 @@ struct dev_pm_info {
 	void (*set_latency_tolerance)(struct device *, s32);
 	struct dev_pm_qos	*qos;
 
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
 };
 
 extern int dev_pm_get_subsys_data(struct device *dev);
@@ -659,8 +654,7 @@ struct dev_pm_domain {
 	void (*sync)(struct device *dev);
 	void (*dismiss)(struct device *dev);
 
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
+	ANDROID_KABI_RESERVE(1);
 };
 
 /*

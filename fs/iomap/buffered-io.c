@@ -21,8 +21,6 @@
 
 #include "../internal.h"
 
-#define IOEND_BATCH_SIZE	4096
-
 /*
  * Structure allocated for each page or THP when block size < page size
  * to track sub-page uptodate status and I/O completions.
@@ -217,7 +215,6 @@ iomap_read_inline_data(struct inode *inode, struct page *page,
 	if (PageUptodate(page))
 		return;
 
-	BUG_ON(page_has_private(page));
 	BUG_ON(page->index);
 	BUG_ON(size > PAGE_SIZE - offset_in_page(iomap->inline_data));
 
@@ -242,7 +239,7 @@ iomap_readpage_actor(struct inode *inode, loff_t pos, loff_t length, void *data,
 {
 	struct iomap_readpage_ctx *ctx = data;
 	struct page *page = ctx->cur_page;
-	struct iomap_page *iop;
+	struct iomap_page *iop = iomap_page_create(inode, page);
 	bool same_page = false, is_contig = false;
 	loff_t orig_pos = pos;
 	unsigned poff, plen;
@@ -255,7 +252,6 @@ iomap_readpage_actor(struct inode *inode, loff_t pos, loff_t length, void *data,
 	}
 
 	/* zero post-eof blocks as the page may be mapped */
-	iop = iomap_page_create(inode, page);
 	iomap_adjust_read_range(inode, iop, &pos, length, &poff, &plen);
 	if (plen == 0)
 		goto done;
@@ -532,8 +528,7 @@ iomap_write_failed(struct inode *inode, loff_t pos, unsigned len)
 	 * write started inside the existing inode size.
 	 */
 	if (pos + len > i_size)
-		truncate_pagecache_range(inode, max(pos, i_size),
-					 pos + len - 1);
+		truncate_pagecache_range(inode, max(pos, i_size), pos + len);
 }
 
 static int
@@ -620,25 +615,6 @@ iomap_write_begin(struct inode *inode, loff_t pos, unsigned len, unsigned flags,
 		goto out_no_page;
 	}
 
-	/*
-	 * Now we have a locked folio, before we do anything with it we need to
-	 * check that the iomap we have cached is not stale. The inode extent
-	 * mapping can change due to concurrent IO in flight (e.g.
-	 * IOMAP_UNWRITTEN state can change and memory reclaim could have
-	 * reclaimed a previously partially written page at this index after IO
-	 * completion before this write reaches this file offset) and hence we
-	 * could do the wrong thing here (zero a page range incorrectly or fail
-	 * to zero) and corrupt data.
-	 */
-	if (page_ops && page_ops->iomap_valid) {
-		bool iomap_valid = page_ops->iomap_valid(inode, iomap);
-		if (!iomap_valid) {
-			iomap->flags |= IOMAP_F_STALE;
-			status = 0;
-			goto out_unlock;
-		}
-	}
-
 	if (srcmap->type == IOMAP_INLINE)
 		iomap_read_inline_data(inode, page, srcmap);
 	else if (iomap->flags & IOMAP_F_BUFFER_HEAD)
@@ -674,7 +650,7 @@ iomap_set_page_dirty(struct page *page)
 		return !TestSetPageDirty(page);
 
 	/*
-	 * Lock out page's memcg migration to keep PageDirty
+	 * Lock out page->mem_cgroup migration to keep PageDirty
 	 * synchronized with per-memcg dirty page counters.
 	 */
 	lock_page_memcg(page);
@@ -795,6 +771,10 @@ again:
 		 * Otherwise there's a nasty deadlock on copying from the
 		 * same page as we're writing to, without it being marked
 		 * up-to-date.
+		 *
+		 * Not only is this an optimisation, but it is also required
+		 * to check that the address is actually valid, when atomic
+		 * usercopies are used, below.
 		 */
 		if (unlikely(iov_iter_fault_in_readable(i, bytes))) {
 			status = -EFAULT;
@@ -805,32 +785,31 @@ again:
 				srcmap);
 		if (unlikely(status))
 			break;
-		if (iomap->flags & IOMAP_F_STALE)
-			break;
 
 		if (mapping_writably_mapped(inode->i_mapping))
 			flush_dcache_page(page);
 
 		copied = iov_iter_copy_from_user_atomic(page, i, offset, bytes);
 
-		status = iomap_write_end(inode, pos, bytes, copied, page, iomap,
+		copied = iomap_write_end(inode, pos, bytes, copied, page, iomap,
 				srcmap);
 
 		cond_resched();
 
-		if (unlikely(status == 0)) {
+		iov_iter_advance(i, copied);
+		if (unlikely(copied == 0)) {
 			/*
-			 * A short copy made iomap_write_end() reject the
-			 * thing entirely.  Might be memory poisoning
-			 * halfway through, might be a race with munmap,
-			 * might be severe memory pressure.
+			 * If we were unable to copy any data at all, we must
+			 * fall back to a single segment length write.
+			 *
+			 * If we didn't fallback here, we could livelock
+			 * because not all segments in the iov can be copied at
+			 * once without a pagefault.
 			 */
-			if (copied)
-				bytes = copied;
+			bytes = min_t(unsigned long, PAGE_SIZE - offset,
+						iov_iter_single_seg_count(i));
 			goto again;
 		}
-		copied = status;
-		iov_iter_advance(i, copied);
 		pos += copied;
 		written += copied;
 		length -= copied;
@@ -884,8 +863,6 @@ iomap_unshare_actor(struct inode *inode, loff_t pos, loff_t length, void *data,
 				IOMAP_WRITE_F_UNSHARE, &page, iomap, srcmap);
 		if (unlikely(status))
 			return status;
-		if (iomap->flags & IOMAP_F_STALE)
-			break;
 
 		status = iomap_write_end(inode, pos, bytes, bytes, page, iomap,
 				srcmap);
@@ -934,8 +911,6 @@ static s64 iomap_zero(struct inode *inode, loff_t pos, u64 length,
 	status = iomap_write_begin(inode, pos, bytes, 0, &page, iomap, srcmap);
 	if (status)
 		return status;
-	if (iomap->flags & IOMAP_F_STALE)
-		return 0;
 
 	zero_user(page, offset, bytes);
 	mark_page_accessed(page);
@@ -963,8 +938,6 @@ static loff_t iomap_zero_range_actor(struct inode *inode, loff_t pos,
 			bytes = iomap_zero(inode, pos, length, iomap, srcmap);
 		if (bytes < 0)
 			return bytes;
-		if (iomap->flags & IOMAP_F_STALE)
-			break;
 
 		pos += bytes;
 		length -= bytes;
@@ -1024,6 +997,7 @@ iomap_page_mkwrite_actor(struct inode *inode, loff_t pos, loff_t length,
 		block_commit_write(page, 0, length);
 	} else {
 		WARN_ON_ONCE(!PageUptodate(page));
+		iomap_page_create(inode, page);
 		set_page_dirty(page);
 	}
 
@@ -1071,7 +1045,7 @@ iomap_finish_page_writeback(struct inode *inode, struct page *page,
 
 	if (error) {
 		SetPageError(page);
-		mapping_set_error(inode->i_mapping, error);
+		mapping_set_error(inode->i_mapping, -EIO);
 	}
 
 	WARN_ON_ONCE(i_blocks_per_page(inode, page) > 1 && !iop);
@@ -1086,7 +1060,7 @@ iomap_finish_page_writeback(struct inode *inode, struct page *page,
  * state, release holds on bios, and finally free up memory.  Do not use the
  * ioend after this.
  */
-static u32
+static void
 iomap_finish_ioend(struct iomap_ioend *ioend, int error)
 {
 	struct inode *inode = ioend->io_inode;
@@ -1095,7 +1069,6 @@ iomap_finish_ioend(struct iomap_ioend *ioend, int error)
 	u64 start = bio->bi_iter.bi_sector;
 	loff_t offset = ioend->io_offset;
 	bool quiet = bio_flagged(bio, BIO_QUIET);
-	u32 folio_count = 0;
 
 	for (bio = &ioend->io_inline_bio; bio; bio = next) {
 		struct bio_vec *bv;
@@ -1111,11 +1084,9 @@ iomap_finish_ioend(struct iomap_ioend *ioend, int error)
 			next = bio->bi_private;
 
 		/* walk each page on bio, ending page IO on them */
-		bio_for_each_segment_all(bv, bio, iter_all) {
+		bio_for_each_segment_all(bv, bio, iter_all)
 			iomap_finish_page_writeback(inode, bv->bv_page, error,
 					bv->bv_len);
-			folio_count++;
-		}
 		bio_put(bio);
 	}
 	/* The ioend has been freed by bio_put() */
@@ -1125,36 +1096,20 @@ iomap_finish_ioend(struct iomap_ioend *ioend, int error)
 "%s: writeback error on inode %lu, offset %lld, sector %llu",
 			inode->i_sb->s_id, inode->i_ino, offset, start);
 	}
-	return folio_count;
 }
 
-/*
- * Ioend completion routine for merged bios. This can only be called from task
- * contexts as merged ioends can be of unbound length. Hence we have to break up
- * the writeback completions into manageable chunks to avoid long scheduler
- * holdoffs. We aim to keep scheduler holdoffs down below 10ms so that we get
- * good batch processing throughput without creating adverse scheduler latency
- * conditions.
- */
 void
 iomap_finish_ioends(struct iomap_ioend *ioend, int error)
 {
 	struct list_head tmp;
-	u32 completions;
-
-	might_sleep();
 
 	list_replace_init(&ioend->io_list, &tmp);
-	completions = iomap_finish_ioend(ioend, error);
+	iomap_finish_ioend(ioend, error);
 
 	while (!list_empty(&tmp)) {
-		if (completions > IOEND_BATCH_SIZE * 8) {
-			cond_resched();
-			completions = 0;
-		}
 		ioend = list_first_entry(&tmp, struct iomap_ioend, io_list);
 		list_del_init(&ioend->io_list);
-		completions += iomap_finish_ioend(ioend, error);
+		iomap_finish_ioend(ioend, error);
 	}
 }
 EXPORT_SYMBOL_GPL(iomap_finish_ioends);
@@ -1174,18 +1129,6 @@ iomap_ioend_can_merge(struct iomap_ioend *ioend, struct iomap_ioend *next)
 	    (next->io_type == IOMAP_UNWRITTEN))
 		return false;
 	if (ioend->io_offset + ioend->io_size != next->io_offset)
-		return false;
-	/*
-	 * Do not merge physically discontiguous ioends. The filesystem
-	 * completion functions will have to iterate the physical
-	 * discontiguities even if we merge the ioends at a logical level, so
-	 * we don't gain anything by merging physical discontiguities here.
-	 *
-	 * We cannot use bio->bi_iter.bi_sector here as it is modified during
-	 * submission so does not point to the start sector of the bio at
-	 * completion.
-	 */
-	if (ioend->io_sector + (ioend->io_size >> 9) != next->io_sector)
 		return false;
 	return true;
 }
@@ -1212,8 +1155,7 @@ iomap_ioend_try_merge(struct iomap_ioend *ioend, struct list_head *more_ioends,
 EXPORT_SYMBOL_GPL(iomap_ioend_try_merge);
 
 static int
-iomap_ioend_compare(void *priv, const struct list_head *a,
-		const struct list_head *b)
+iomap_ioend_compare(void *priv, struct list_head *a, struct list_head *b)
 {
 	struct iomap_ioend *ia = container_of(a, struct iomap_ioend, io_list);
 	struct iomap_ioend *ib = container_of(b, struct iomap_ioend, io_list);
@@ -1292,11 +1234,9 @@ iomap_alloc_ioend(struct inode *inode, struct iomap_writepage_ctx *wpc,
 	ioend->io_flags = wpc->iomap.flags;
 	ioend->io_inode = inode;
 	ioend->io_size = 0;
-	ioend->io_folios = 0;
 	ioend->io_offset = offset;
 	ioend->io_private = NULL;
 	ioend->io_bio = bio;
-	ioend->io_sector = sector;
 	return ioend;
 }
 
@@ -1336,13 +1276,6 @@ iomap_can_add_to_ioend(struct iomap_writepage_ctx *wpc, loff_t offset,
 	if (offset != wpc->ioend->io_offset + wpc->ioend->io_size)
 		return false;
 	if (sector != bio_end_sector(wpc->ioend->io_bio))
-		return false;
-	/*
-	 * Limit ioend bio chain lengths to minimise IO completion latency. This
-	 * also prevents long tight loops ending page writeback on all the
-	 * folios in the ioend.
-	 */
-	if (wpc->ioend->io_folios >= IOEND_BATCH_SIZE)
 		return false;
 	return true;
 }
@@ -1405,13 +1338,14 @@ iomap_writepage_map(struct iomap_writepage_ctx *wpc,
 		struct writeback_control *wbc, struct inode *inode,
 		struct page *page, u64 end_offset)
 {
-	struct iomap_page *iop = iomap_page_create(inode, page);
+	struct iomap_page *iop = to_iomap_page(page);
 	struct iomap_ioend *ioend, *next;
 	unsigned len = i_blocksize(inode);
 	u64 file_offset; /* file offset of page */
 	int error = 0, count = 0, i;
 	LIST_HEAD(submit_list);
 
+	WARN_ON_ONCE(i_blocks_per_page(inode, page) > 1 && !iop);
 	WARN_ON_ONCE(iop && atomic_read(&iop->write_bytes_pending) != 0);
 
 	/*
@@ -1436,8 +1370,6 @@ iomap_writepage_map(struct iomap_writepage_ctx *wpc,
 				 &submit_list);
 		count++;
 	}
-	if (count)
-		wpc->ioend->io_folios++;
 
 	WARN_ON_ONCE(!wpc->ioend && !list_empty(&submit_list));
 	WARN_ON_ONCE(!PageLocked(page));
@@ -1460,6 +1392,7 @@ iomap_writepage_map(struct iomap_writepage_ctx *wpc,
 		if (wpc->ops->discard_page)
 			wpc->ops->discard_page(page, file_offset);
 		if (!count) {
+			ClearPageUptodate(page);
 			unlock_page(page);
 			goto done;
 		}
@@ -1489,7 +1422,7 @@ iomap_writepage_map(struct iomap_writepage_ctx *wpc,
 	if (!count)
 		end_page_writeback(page);
 done:
-	mapping_set_error(inode->i_mapping, error);
+	mapping_set_error(page->mapping, error);
 	return error;
 }
 
@@ -1523,6 +1456,13 @@ iomap_do_writepage(struct page *page, struct writeback_control *wbc, void *data)
 	 */
 	if (WARN_ON_ONCE((current->flags & (PF_MEMALLOC|PF_KSWAPD)) ==
 			PF_MEMALLOC))
+		goto redirty;
+
+	/*
+	 * Given that we do not allow direct reclaim to call us, we should
+	 * never be called in a recursive filesystem reclaim context.
+	 */
+	if (WARN_ON_ONCE(current->flags & PF_MEMALLOC_NOFS))
 		goto redirty;
 
 	/*

@@ -47,16 +47,6 @@
 #define VFIO_NOIOMMU_IOMMU		8
 
 /*
- * The vfio_iommu driver may support user clears dirty log manually, which means
- * dirty log can be requested to not cleared automatically after dirty log is
- * copied to userspace, it's user's duty to clear dirty log.
- *
- * Note: please refer to VFIO_IOMMU_DIRTY_PAGES_FLAG_GET_BITMAP_NOCLEAR and
- * VFIO_IOMMU_DIRTY_PAGES_FLAG_CLEAR_BITMAP.
- */
-#define VFIO_DIRTY_LOG_MANUAL_CLEAR	11
-
-/*
  * The IOCTL interface is designed for extensibility by embedding the
  * structure length (argsz) and flags into structures passed between
  * kernel and userspace.  We therefore use the _IO() macro for these
@@ -1170,30 +1160,8 @@ struct vfio_iommu_type1_dma_unmap {
  * actual bitmap. If dirty pages logging is not enabled, an error will be
  * returned.
  *
- * The VFIO_IOMMU_DIRTY_PAGES_FLAG_GET_BITMAP_NOCLEAR flag is almost same as
- * VFIO_IOMMU_DIRTY_PAGES_FLAG_GET_BITMAP, except that it requires underlying
- * dirty bitmap is not cleared automatically. The user can clear it manually by
- * calling the IOCTL with VFIO_IOMMU_DIRTY_PAGES_FLAG_CLEAR_BITMAP flag set.
+ * Only one of the flags _START, _STOP and _GET may be specified at a time.
  *
- * Calling the IOCTL with VFIO_IOMMU_DIRTY_PAGES_FLAG_CLEAR_BITMAP flag set,
- * instructs the IOMMU driver to clear the dirty status of pages in a bitmap
- * for IOMMU container for a given IOVA range. The user must specify the IOVA
- * range, the bitmap and the pgsize through the structure
- * vfio_iommu_type1_dirty_bitmap_get in the data[] portion. This interface
- * supports clearing a bitmap of the smallest supported pgsize only and can be
- * modified in future to clear a bitmap of any specified supported pgsize. The
- * user must provide a memory area for the bitmap memory and specify its size
- * in bitmap.size. One bit is used to represent one page consecutively starting
- * from iova offset. The user should provide page size in bitmap.pgsize field.
- * A bit set in the bitmap indicates that the page at that offset from iova is
- * cleared the dirty status, and dirty tracking is re-enabled for that page. The
- * caller must set argsz to a value including the size of structure
- * vfio_iommu_dirty_bitmap_get, but excluing the size of the actual bitmap. If
- * dirty pages logging is not enabled, an error will be returned. Note: user
- * should clear dirty log before handle corresponding dirty pages.
- *
- * Only one of the flags _START, _STOP, _GET, _GET_NOCLEAR_, and _CLEAR may be
- * specified at a time.
  */
 struct vfio_iommu_type1_dirty_bitmap {
 	__u32        argsz;
@@ -1201,8 +1169,6 @@ struct vfio_iommu_type1_dirty_bitmap {
 #define VFIO_IOMMU_DIRTY_PAGES_FLAG_START	(1 << 0)
 #define VFIO_IOMMU_DIRTY_PAGES_FLAG_STOP	(1 << 1)
 #define VFIO_IOMMU_DIRTY_PAGES_FLAG_GET_BITMAP	(1 << 2)
-#define VFIO_IOMMU_DIRTY_PAGES_FLAG_GET_BITMAP_NOCLEAR	(1 << 3)
-#define VFIO_IOMMU_DIRTY_PAGES_FLAG_CLEAR_BITMAP	(1 << 4)
 	__u8         data[];
 };
 
@@ -1213,82 +1179,6 @@ struct vfio_iommu_type1_dirty_bitmap_get {
 };
 
 #define VFIO_IOMMU_DIRTY_PAGES             _IO(VFIO_TYPE, VFIO_BASE + 17)
-
-/*
- * VFIO_IOMMU_BIND_PROCESS
- *
- * Allocate a PASID for a process address space, and use it to attach this
- * process to all devices in the container. Devices can then tag their DMA
- * traffic with the returned @pasid to perform transactions on the associated
- * virtual address space. Mapping and unmapping buffers is performed by standard
- * functions such as mmap and malloc.
- *
- * If flag is VFIO_IOMMU_BIND_PID, @pid contains the pid of a foreign process to
- * bind. Otherwise the current task is bound. Given that the caller owns the
- * device, setting this flag grants the caller read and write permissions on the
- * entire address space of foreign process described by @pid. Therefore,
- * permission to perform the bind operation on a foreign process is governed by
- * the ptrace access mode PTRACE_MODE_ATTACH_REALCREDS check. See man ptrace(2)
- * for more information.
- *
- * On success, VFIO writes a Process Address Space ID (PASID) into @pasid. This
- * ID is unique to a process and can be used on all devices in the container.
- *
- * On fork, the child inherits the device fd and can use the bonds setup by its
- * parent. Consequently, the child has R/W access on the address spaces bound by
- * its parent. After an execv, the device fd is closed and the child doesn't
- * have access to the address space anymore.
- *
- * To remove a bond between process and container, VFIO_IOMMU_UNBIND ioctl is
- * issued with the same parameters. If a pid was specified in VFIO_IOMMU_BIND,
- * it should also be present for VFIO_IOMMU_UNBIND. Otherwise unbind the current
- * task from the container.
- */
-struct vfio_iommu_type1_bind_process {
-	__u32	flags;
-#define VFIO_IOMMU_BIND_PID		(1 << 0)
-	__u32	pasid;
-	__s32	pid;
-};
-
-/*
- * Only mode supported at the moment is VFIO_IOMMU_BIND_PROCESS, which takes
- * vfio_iommu_type1_bind_process in data.
- */
-struct vfio_iommu_type1_bind {
-	__u32	argsz;
-	__u32	flags;
-#define VFIO_IOMMU_BIND_PROCESS		(1 << 0)
-	__u8	data[];
-};
-
-/*
- * VFIO_IOMMU_BIND - _IOWR(VFIO_TYPE, VFIO_BASE + 22, struct vfio_iommu_bind)
- *
- * Manage address spaces of devices in this container. Initially a TYPE1
- * container can only have one address space, managed with
- * VFIO_IOMMU_MAP/UNMAP_DMA.
- *
- * An IOMMU of type VFIO_TYPE1_NESTING_IOMMU can be managed by both MAP/UNMAP
- * and BIND ioctls at the same time. MAP/UNMAP acts on the stage-2 (host) page
- * tables, and BIND manages the stage-1 (guest) page tables. Other types of
- * IOMMU may allow MAP/UNMAP and BIND to coexist, where MAP/UNMAP controls
- * non-PASID traffic and BIND controls PASID traffic. But this depends on the
- * underlying IOMMU architecture and isn't guaranteed.
- *
- * Availability of this feature depends on the device, its bus, the underlying
- * IOMMU and the CPU architecture.
- *
- * returns: 0 on success, -errno on failure.
- */
-#define VFIO_IOMMU_BIND		_IO(VFIO_TYPE, VFIO_BASE + 22)
-
-/*
- * VFIO_IOMMU_UNBIND - _IOWR(VFIO_TYPE, VFIO_BASE + 23, struct vfio_iommu_bind)
- *
- * Undo what was done by the corresponding VFIO_IOMMU_BIND ioctl.
- */
-#define VFIO_IOMMU_UNBIND	_IO(VFIO_TYPE, VFIO_BASE + 23)
 
 /* -------- Additional API for SPAPR TCE (Server POWERPC) IOMMU -------- */
 

@@ -22,21 +22,7 @@
 #include <linux/atomic.h>
 #include <linux/nmi.h>
 #include <linux/sched/wake_q.h>
-
-#ifdef CONFIG_ARM64
-#include <linux/arm_sdei.h>
-#include <asm/arch_gicv3.h>
-#endif
-
-/*
- * Structure to determine completion condition and record errors.  May
- * be shared by works on different cpus.
- */
-struct cpu_stop_done {
-	atomic_t		nr_todo;	/* nr left to execute */
-	int			ret;		/* collected return value */
-	struct completion	completion;	/* fired if nr_todo reaches 0 */
-};
+#include <linux/slab.h>
 
 /* the actual stopper, one per every possible cpu, enabled on online cpus */
 struct cpu_stopper {
@@ -223,10 +209,6 @@ static int multi_cpu_stop(void *data)
 			case MULTI_STOP_DISABLE_IRQ:
 				local_irq_disable();
 				hard_irq_disable();
-#ifdef CONFIG_ARM64
-				gic_arch_disable_irqs();
-				sdei_mask_local_cpu();
-#endif
 				break;
 			case MULTI_STOP_RUN:
 				if (is_active)
@@ -247,10 +229,6 @@ static int multi_cpu_stop(void *data)
 		rcu_momentary_dyntick_idle();
 	} while (curstate != MULTI_STOP_EXIT);
 
-#ifdef CONFIG_ARM64
-	sdei_unmask_local_cpu();
-	gic_arch_restore_irqs(flags);
-#endif
 	local_irq_restore(flags);
 	return err;
 }
@@ -382,6 +360,55 @@ bool stop_one_cpu_nowait(unsigned int cpu, cpu_stop_fn_t fn, void *arg,
 {
 	*work_buf = (struct cpu_stop_work){ .fn = fn, .arg = arg, };
 	return cpu_stop_queue_work(cpu, work_buf);
+}
+EXPORT_SYMBOL_GPL(stop_one_cpu_nowait);
+
+/**
+ * stop_one_cpu_async - stop a cpu and wait for completion in a separated
+ *			function: stop_wait_work()
+ * @cpu: cpu to stop
+ * @fn: function to execute
+ * @arg: argument to @fn
+ * @work_buf: pointer to cpu_stop_work structure
+ *
+ * CONTEXT:
+ * Might sleep.
+ *
+ * RETURNS:
+ * 0 if cpu_stop_work was queued successfully and @fn will be called.
+ * ENOENT if @fn(@arg) was not executed because @cpu was offline.
+ */
+int stop_one_cpu_async(unsigned int cpu, cpu_stop_fn_t fn, void *arg,
+		       struct cpu_stop_work *work_buf,
+		       struct cpu_stop_done *done)
+{
+	cpu_stop_init_done(done, 1);
+
+	work_buf->done = done;
+	work_buf->fn = fn;
+	work_buf->arg = arg;
+
+	if (cpu_stop_queue_work(cpu, work_buf))
+		return 0;
+
+	work_buf->done = NULL;
+
+	return -ENOENT;
+}
+
+/**
+ * cpu_stop_work_wait - wait for a stop initiated by stop_one_cpu_async().
+ * @work_buf: pointer to cpu_stop_work structure
+ *
+ * CONTEXT:
+ * Might sleep.
+ */
+void cpu_stop_work_wait(struct cpu_stop_work *work_buf)
+{
+	struct cpu_stop_done *done = work_buf->done;
+
+	wait_for_completion(&done->completion);
+	work_buf->done = NULL;
 }
 
 static bool queue_stop_cpus_work(const struct cpumask *cpumask,
@@ -623,27 +650,6 @@ int stop_machine(cpu_stop_fn_t fn, void *data, const struct cpumask *cpus)
 	return ret;
 }
 EXPORT_SYMBOL_GPL(stop_machine);
-
-#ifdef CONFIG_SCHED_SMT
-int stop_core_cpuslocked(unsigned int cpu, cpu_stop_fn_t fn, void *data)
-{
-	const struct cpumask *smt_mask = cpu_smt_mask(cpu);
-
-	struct multi_stop_data msdata = {
-		.fn = fn,
-		.data = data,
-		.num_threads = cpumask_weight(smt_mask),
-		.active_cpus = smt_mask,
-	};
-
-	lockdep_assert_cpus_held();
-
-	/* Set the initial state and stop all online cpus. */
-	set_state(&msdata, MULTI_STOP_PREPARE);
-	return stop_cpus(smt_mask, multi_cpu_stop, &msdata);
-}
-EXPORT_SYMBOL_GPL(stop_core_cpuslocked);
-#endif
 
 /**
  * stop_machine_from_inactive_cpu - stop_machine() from inactive CPU

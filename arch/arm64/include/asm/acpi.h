@@ -42,9 +42,6 @@
 #define ACPI_MADT_GICC_SPE  (offsetof(struct acpi_madt_generic_interrupt, \
 	spe_interrupt) + sizeof(u16))
 
-#define ACPI_MADT_GICC_TRBE  (offsetof(struct acpi_madt_generic_interrupt, \
-	trbe_interrupt) + sizeof(u16))
-
 /* Basic configuration for ACPI */
 #ifdef	CONFIG_ACPI
 pgprot_t __acpi_get_mem_attribute(phys_addr_t addr);
@@ -103,11 +100,6 @@ static inline u32 get_acpi_id_for_cpu(unsigned int cpu)
 static inline void arch_fix_phys_package_id(int num, u32 slot) { }
 void __init acpi_init_cpus(void);
 int apei_claim_sea(struct pt_regs *regs);
-void acpi_pptt_find_min_physid_cpu_node(struct acpi_table_header *table_hdr,
-			struct acpi_pptt_processor *cpu_node,
-			phys_cpuid_t *min_physid,
-			struct acpi_pptt_processor **min_cpu_node);
-
 #else
 static inline void acpi_init_cpus(void) { }
 static inline int apei_claim_sea(struct pt_regs *regs) { return -ENOENT; }

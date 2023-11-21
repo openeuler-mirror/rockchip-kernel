@@ -167,11 +167,29 @@ static struct mxs_dma_type mxs_dma_types[] = {
 	}
 };
 
+static const struct platform_device_id mxs_dma_ids[] = {
+	{
+		.name = "imx23-dma-apbh",
+		.driver_data = (kernel_ulong_t) &mxs_dma_types[0],
+	}, {
+		.name = "imx23-dma-apbx",
+		.driver_data = (kernel_ulong_t) &mxs_dma_types[1],
+	}, {
+		.name = "imx28-dma-apbh",
+		.driver_data = (kernel_ulong_t) &mxs_dma_types[2],
+	}, {
+		.name = "imx28-dma-apbx",
+		.driver_data = (kernel_ulong_t) &mxs_dma_types[3],
+	}, {
+		/* end of list */
+	}
+};
+
 static const struct of_device_id mxs_dma_dt_ids[] = {
-	{ .compatible = "fsl,imx23-dma-apbh", .data = &mxs_dma_types[0], },
-	{ .compatible = "fsl,imx23-dma-apbx", .data = &mxs_dma_types[1], },
-	{ .compatible = "fsl,imx28-dma-apbh", .data = &mxs_dma_types[2], },
-	{ .compatible = "fsl,imx28-dma-apbx", .data = &mxs_dma_types[3], },
+	{ .compatible = "fsl,imx23-dma-apbh", .data = &mxs_dma_ids[0], },
+	{ .compatible = "fsl,imx23-dma-apbx", .data = &mxs_dma_ids[1], },
+	{ .compatible = "fsl,imx28-dma-apbh", .data = &mxs_dma_ids[2], },
+	{ .compatible = "fsl,imx28-dma-apbx", .data = &mxs_dma_ids[3], },
 	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(of, mxs_dma_dt_ids);
@@ -670,7 +688,7 @@ static enum dma_status mxs_dma_tx_status(struct dma_chan *chan,
 	return mxs_chan->status;
 }
 
-static int mxs_dma_init(struct mxs_dma_engine *mxs_dma)
+static int __init mxs_dma_init(struct mxs_dma_engine *mxs_dma)
 {
 	int ret;
 
@@ -741,9 +759,11 @@ static struct dma_chan *mxs_dma_xlate(struct of_phandle_args *dma_spec,
 				     ofdma->of_node);
 }
 
-static int mxs_dma_probe(struct platform_device *pdev)
+static int __init mxs_dma_probe(struct platform_device *pdev)
 {
 	struct device_node *np = pdev->dev.of_node;
+	const struct platform_device_id *id_entry;
+	const struct of_device_id *of_id;
 	const struct mxs_dma_type *dma_type;
 	struct mxs_dma_engine *mxs_dma;
 	struct resource *iores;
@@ -759,7 +779,13 @@ static int mxs_dma_probe(struct platform_device *pdev)
 		return ret;
 	}
 
-	dma_type = (struct mxs_dma_type *)of_device_get_match_data(&pdev->dev);
+	of_id = of_match_device(mxs_dma_dt_ids, &pdev->dev);
+	if (of_id)
+		id_entry = of_id->data;
+	else
+		id_entry = platform_get_device_id(pdev);
+
+	dma_type = (struct mxs_dma_type *)id_entry->driver_data;
 	mxs_dma->type = dma_type->type;
 	mxs_dma->dev_id = dma_type->id;
 
@@ -839,7 +865,11 @@ static struct platform_driver mxs_dma_driver = {
 		.name	= "mxs-dma",
 		.of_match_table = mxs_dma_dt_ids,
 	},
-	.probe = mxs_dma_probe,
+	.id_table	= mxs_dma_ids,
 };
 
-builtin_platform_driver(mxs_dma_driver);
+static int __init mxs_dma_module_init(void)
+{
+	return platform_driver_probe(&mxs_dma_driver, mxs_dma_probe);
+}
+subsys_initcall(mxs_dma_module_init);

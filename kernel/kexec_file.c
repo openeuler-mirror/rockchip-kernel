@@ -20,7 +20,7 @@
 #include <linux/fs.h>
 #include <linux/ima.h>
 #include <crypto/hash.h>
-#include <crypto/sha2.h>
+#include <crypto/sha.h>
 #include <linux/elf.h>
 #include <linux/elfcore.h>
 #include <linux/kernel.h>
@@ -28,15 +28,6 @@
 #include <linux/syscalls.h>
 #include <linux/vmalloc.h>
 #include "kexec_internal.h"
-
-#ifdef CONFIG_KEXEC_SIG
-static bool sig_enforce = IS_ENABLED(CONFIG_KEXEC_SIG_FORCE);
-
-void set_kexec_sig_enforced(void)
-{
-	sig_enforce = true;
-}
-#endif
 
 static int kexec_calculate_store_digests(struct kimage *image);
 
@@ -202,7 +193,7 @@ kimage_validate_signature(struct kimage *image)
 					   image->kernel_buf_len);
 	if (ret) {
 
-		if (sig_enforce) {
+		if (IS_ENABLED(CONFIG_KEXEC_SIG_FORCE)) {
 			pr_notice("Enforced kernel signature verification failed (%d).\n", ret);
 			return ret;
 		}

@@ -137,11 +137,6 @@ MODULE_FIRMWARE("amdgpu/green_sardine_rlc.bin");
 #define mmTCP_CHAN_STEER_5_ARCT								0x0b0c
 #define mmTCP_CHAN_STEER_5_ARCT_BASE_IDX							0
 
-#define mmGOLDEN_TSC_COUNT_UPPER_Renoir                0x0025
-#define mmGOLDEN_TSC_COUNT_UPPER_Renoir_BASE_IDX       1
-#define mmGOLDEN_TSC_COUNT_LOWER_Renoir                0x0026
-#define mmGOLDEN_TSC_COUNT_LOWER_Renoir_BASE_IDX       1
-
 enum ta_ras_gfx_subblock {
 	/*CPC*/
 	TA_RAS_BLOCK__GFX_CPC_INDEX_START = 0,
@@ -1248,8 +1243,6 @@ static const struct amdgpu_gfxoff_quirk amdgpu_gfxoff_quirk_list[] = {
 	{ 0x1002, 0x15dd, 0x103c, 0x83e7, 0xd3 },
 	/* GFXOFF is unstable on C6 parts with a VBIOS 113-RAVEN-114 */
 	{ 0x1002, 0x15dd, 0x1002, 0x15dd, 0xc6 },
-	/* Apple MacBook Pro (15-inch, 2019) Radeon Pro Vega 20 4 GB */
-	{ 0x1002, 0x69af, 0x106b, 0x019a, 0xc0 },
 	{ 0, 0, 0, 0, 0 },
 };
 
@@ -1978,11 +1971,7 @@ static int gfx_v9_0_mec_init(struct amdgpu_device *adev)
 			return r;
 		}
 
-#if IS_ENABLED(CONFIG_SW64)
-		memset_io(hpd, 0, mec_hpd_size);
-#else
 		memset(hpd, 0, mec_hpd_size);
-#endif
 
 		amdgpu_bo_kunmap(adev->gfx.mec.hpd_eop_obj);
 		amdgpu_bo_unreserve(adev->gfx.mec.hpd_eop_obj);
@@ -2574,8 +2563,7 @@ static void gfx_v9_0_constants_init(struct amdgpu_device *adev)
 
 	gfx_v9_0_tiling_mode_table_init(adev);
 
-	if (adev->gfx.num_gfx_rings)
-		gfx_v9_0_setup_rb(adev);
+	gfx_v9_0_setup_rb(adev);
 	gfx_v9_0_get_cu_info(adev, &adev->gfx.cu_info);
 	adev->gfx.config.db_debug2 = RREG32_SOC15(GC, 0, mmDB_DEBUG2);
 
@@ -3009,8 +2997,8 @@ static void gfx_v9_0_init_pg(struct amdgpu_device *adev)
 			      AMD_PG_SUPPORT_CP |
 			      AMD_PG_SUPPORT_GDS |
 			      AMD_PG_SUPPORT_RLC_SMU_HS)) {
-		WREG32_SOC15(GC, 0, mmRLC_JUMP_TABLE_RESTORE,
-			     adev->gfx.rlc.cp_table_gpu_addr >> 8);
+		WREG32(mmRLC_JUMP_TABLE_RESTORE,
+		       adev->gfx.rlc.cp_table_gpu_addr >> 8);
 		gfx_v9_0_init_gfx_power_gating(adev);
 	}
 }
@@ -3554,7 +3542,7 @@ static int gfx_v9_0_mqd_init(struct amdgpu_ring *ring)
 
 	/* set static priority for a queue/ring */
 	gfx_v9_0_mqd_set_priority(ring, mqd);
-	mqd->cp_hqd_quantum = RREG32_SOC15(GC, 0, mmCP_HQD_QUANTUM);
+	mqd->cp_hqd_quantum = RREG32(mmCP_HQD_QUANTUM);
 
 	/* map_queues packet doesn't need activate the queue,
 	 * so only kiq need set this field.
@@ -3728,13 +3716,8 @@ static int gfx_v9_0_kiq_init_queue(struct amdgpu_ring *ring)
 
 	if (amdgpu_in_reset(adev)) { /* for GPU_RESET case */
 		/* reset MQD to a clean status */
-		if (adev->gfx.mec.mqd_backup[mqd_idx]) {
-#if IS_ENABLED(CONFIG_SW64)
-			memcpy_toio(mqd, adev->gfx.mec.mqd_backup[mqd_idx], sizeof(struct v9_mqd_allocation));
-#else
+		if (adev->gfx.mec.mqd_backup[mqd_idx])
 			memcpy(mqd, adev->gfx.mec.mqd_backup[mqd_idx], sizeof(struct v9_mqd_allocation));
-#endif
-		}
 
 		/* reset ring buffer */
 		ring->wptr = 0;
@@ -3746,11 +3729,7 @@ static int gfx_v9_0_kiq_init_queue(struct amdgpu_ring *ring)
 		soc15_grbm_select(adev, 0, 0, 0, 0);
 		mutex_unlock(&adev->srbm_mutex);
 	} else {
-#if IS_ENABLED(CONFIG_SW64)
-		memset_io((void *)mqd, 0, sizeof(struct v9_mqd_allocation));
-#else
 		memset((void *)mqd, 0, sizeof(struct v9_mqd_allocation));
-#endif
 		((struct v9_mqd_allocation *)mqd)->dynamic_cu_mask = 0xFFFFFFFF;
 		((struct v9_mqd_allocation *)mqd)->dynamic_rb_mask = 0xFFFFFFFF;
 		mutex_lock(&adev->srbm_mutex);
@@ -3760,13 +3739,8 @@ static int gfx_v9_0_kiq_init_queue(struct amdgpu_ring *ring)
 		soc15_grbm_select(adev, 0, 0, 0, 0);
 		mutex_unlock(&adev->srbm_mutex);
 
-		if (adev->gfx.mec.mqd_backup[mqd_idx]) {
-#if IS_ENABLED(CONFIG_SW64)
-			memcpy_fromio(adev->gfx.mec.mqd_backup[mqd_idx], mqd, sizeof(struct v9_mqd_allocation));
-#else
+		if (adev->gfx.mec.mqd_backup[mqd_idx])
 			memcpy(adev->gfx.mec.mqd_backup[mqd_idx], mqd, sizeof(struct v9_mqd_allocation));
-#endif
-		}
 	}
 
 	return 0;
@@ -3779,11 +3753,7 @@ static int gfx_v9_0_kcq_init_queue(struct amdgpu_ring *ring)
 	int mqd_idx = ring - &adev->gfx.compute_ring[0];
 
 	if (!amdgpu_in_reset(adev) && !adev->in_suspend) {
-#if IS_ENABLED(CONFIG_SW64)
-		memset_io((void *)mqd, 0, sizeof(struct v9_mqd_allocation));
-#else
 		memset((void *)mqd, 0, sizeof(struct v9_mqd_allocation));
-#endif
 		((struct v9_mqd_allocation *)mqd)->dynamic_cu_mask = 0xFFFFFFFF;
 		((struct v9_mqd_allocation *)mqd)->dynamic_rb_mask = 0xFFFFFFFF;
 		mutex_lock(&adev->srbm_mutex);
@@ -3793,23 +3763,11 @@ static int gfx_v9_0_kcq_init_queue(struct amdgpu_ring *ring)
 		mutex_unlock(&adev->srbm_mutex);
 
 		if (adev->gfx.mec.mqd_backup[mqd_idx])
-		if (adev->gfx.mec.mqd_backup[mqd_idx]) {
-#if IS_ENABLED(CONFIG_SW64)
-			memcpy_fromio(adev->gfx.mec.mqd_backup[mqd_idx], mqd, sizeof(struct v9_mqd_allocation));
-#else
 			memcpy(adev->gfx.mec.mqd_backup[mqd_idx], mqd, sizeof(struct v9_mqd_allocation));
-#endif
-		}
 	} else if (amdgpu_in_reset(adev)) { /* for GPU_RESET case */
 		/* reset MQD to a clean status */
 		if (adev->gfx.mec.mqd_backup[mqd_idx])
-		if (adev->gfx.mec.mqd_backup[mqd_idx]) {
-#if IS_ENABLED(CONFIG_SW64)
-			memcpy_toio(mqd, adev->gfx.mec.mqd_backup[mqd_idx], sizeof(struct v9_mqd_allocation));
-#else
 			memcpy(mqd, adev->gfx.mec.mqd_backup[mqd_idx], sizeof(struct v9_mqd_allocation));
-#endif
-		}
 
 		/* reset ring buffer */
 		ring->wptr = 0;
@@ -4189,38 +4147,19 @@ failed_kiq_read:
 
 static uint64_t gfx_v9_0_get_gpu_clock_counter(struct amdgpu_device *adev)
 {
-	uint64_t clock, clock_lo, clock_hi, hi_check;
+	uint64_t clock;
 
-	switch (adev->asic_type) {
-	case CHIP_RENOIR:
-		preempt_disable();
-		clock_hi = RREG32_SOC15_NO_KIQ(SMUIO, 0, mmGOLDEN_TSC_COUNT_UPPER_Renoir);
-		clock_lo = RREG32_SOC15_NO_KIQ(SMUIO, 0, mmGOLDEN_TSC_COUNT_LOWER_Renoir);
-		hi_check = RREG32_SOC15_NO_KIQ(SMUIO, 0, mmGOLDEN_TSC_COUNT_UPPER_Renoir);
-		/* The SMUIO TSC clock frequency is 100MHz, which sets 32-bit carry over
-		 * roughly every 42 seconds.
-		 */
-		if (hi_check != clock_hi) {
-			clock_lo = RREG32_SOC15_NO_KIQ(SMUIO, 0, mmGOLDEN_TSC_COUNT_LOWER_Renoir);
-			clock_hi = hi_check;
-		}
-		preempt_enable();
-		clock = clock_lo | (clock_hi << 32ULL);
-		break;
-	default:
-		amdgpu_gfx_off_ctrl(adev, false);
-		mutex_lock(&adev->gfx.gpu_clock_mutex);
-		if (adev->asic_type == CHIP_VEGA10 && amdgpu_sriov_runtime(adev)) {
-			clock = gfx_v9_0_kiq_read_clock(adev);
-		} else {
-			WREG32_SOC15(GC, 0, mmRLC_CAPTURE_GPU_CLOCK_COUNT, 1);
-			clock = (uint64_t)RREG32_SOC15(GC, 0, mmRLC_GPU_CLOCK_COUNT_LSB) |
-				((uint64_t)RREG32_SOC15(GC, 0, mmRLC_GPU_CLOCK_COUNT_MSB) << 32ULL);
-		}
-		mutex_unlock(&adev->gfx.gpu_clock_mutex);
-		amdgpu_gfx_off_ctrl(adev, true);
-		break;
+	amdgpu_gfx_off_ctrl(adev, false);
+	mutex_lock(&adev->gfx.gpu_clock_mutex);
+	if (adev->asic_type == CHIP_VEGA10 && amdgpu_sriov_runtime(adev)) {
+		clock = gfx_v9_0_kiq_read_clock(adev);
+	} else {
+		WREG32_SOC15(GC, 0, mmRLC_CAPTURE_GPU_CLOCK_COUNT, 1);
+		clock = (uint64_t)RREG32_SOC15(GC, 0, mmRLC_GPU_CLOCK_COUNT_LSB) |
+			((uint64_t)RREG32_SOC15(GC, 0, mmRLC_GPU_CLOCK_COUNT_MSB) << 32ULL);
 	}
+	mutex_unlock(&adev->gfx.gpu_clock_mutex);
+	amdgpu_gfx_off_ctrl(adev, true);
 	return clock;
 }
 

@@ -9,7 +9,6 @@
 /x86_64/evmcs_test
 /x86_64/kvm_pv_test
 /x86_64/hyperv_cpuid
-/x86_64/max_vcpuid_cap_test
 /x86_64/mmio_warning_test
 /x86_64/platform_info_test
 /x86_64/set_sregs_test
@@ -26,7 +25,6 @@
 /x86_64/vmx_tsc_adjust_test
 /x86_64/xss_msr_test
 /clear_dirty_log_test
-/x86_64/triple_fault_event_test
 /demand_paging_test
 /dirty_log_test
 /dirty_log_perf_test

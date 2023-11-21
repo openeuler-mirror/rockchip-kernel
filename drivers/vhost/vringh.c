@@ -274,7 +274,7 @@ __vringh_iov(struct vringh *vrh, u16 i,
 	     int (*copy)(const struct vringh *vrh,
 			 void *dst, const void *src, size_t len))
 {
-	int err, count = 0, indirect_count = 0, up_next, desc_max;
+	int err, count = 0, up_next, desc_max;
 	struct vring_desc desc, *descs;
 	struct vringh_range range = { -1ULL, 0 }, slowrange;
 	bool slow = false;
@@ -331,12 +331,7 @@ __vringh_iov(struct vringh *vrh, u16 i,
 			continue;
 		}
 
-		if (up_next == -1)
-			count++;
-		else
-			indirect_count++;
-
-		if (count > vrh->vring.num || indirect_count > desc_max) {
+		if (count++ == vrh->vring.num) {
 			vringh_bad("Descriptor loop in %p", descs);
 			err = -ELOOP;
 			goto fail;
@@ -398,7 +393,6 @@ __vringh_iov(struct vringh *vrh, u16 i,
 				i = return_from_indirect(vrh, &up_next,
 							 &descs, &desc_max);
 				slow = false;
-				indirect_count = 0;
 			} else
 				break;
 		}
@@ -1077,7 +1071,7 @@ static int iotlb_translate(const struct vringh *vrh,
 	struct vhost_iotlb_map *map;
 	struct vhost_iotlb *iotlb = vrh->iotlb;
 	int ret = 0;
-	u64 s = 0, last = addr + len - 1;
+	u64 s = 0;
 
 	while (len > s) {
 		u64 size, pa, pfn;
@@ -1087,7 +1081,8 @@ static int iotlb_translate(const struct vringh *vrh,
 			break;
 		}
 
-		map = vhost_iotlb_itree_first(iotlb, addr, last);
+		map = vhost_iotlb_itree_first(iotlb, addr,
+					      addr + len - 1);
 		if (!map || map->start > addr) {
 			ret = -EINVAL;
 			break;

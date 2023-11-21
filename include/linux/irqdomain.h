@@ -35,7 +35,7 @@
 #include <linux/of.h>
 #include <linux/mutex.h>
 #include <linux/radix-tree.h>
-#include <linux/kabi.h>
+#include <linux/android_kabi.h>
 
 struct device_node;
 struct irq_domain;
@@ -179,13 +179,17 @@ struct irq_domain {
 	struct dentry		*debugfs_file;
 #endif
 
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
+	ANDROID_KABI_RESERVE(3);
+	ANDROID_KABI_RESERVE(4);
+
 	/* reverse map data. The linear map gets appended to the irq_domain */
 	irq_hw_number_t hwirq_max;
 	unsigned int revmap_direct_max_irq;
 	unsigned int revmap_size;
 	struct radix_tree_root revmap_tree;
 	struct mutex revmap_tree_mutex;
-	KABI_RESERVE(1)
 	unsigned int linear_revmap[];
 };
 

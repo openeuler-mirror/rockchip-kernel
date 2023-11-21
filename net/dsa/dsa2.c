@@ -459,7 +459,7 @@ static int dsa_switch_setup(struct dsa_switch *ds)
 	devlink_params_publish(ds->devlink);
 
 	if (!ds->slave_mii_bus && ds->ops->phy_read) {
-		ds->slave_mii_bus = mdiobus_alloc();
+		ds->slave_mii_bus = devm_mdiobus_alloc(ds->dev);
 		if (!ds->slave_mii_bus) {
 			err = -ENOMEM;
 			goto teardown;
@@ -469,16 +469,13 @@ static int dsa_switch_setup(struct dsa_switch *ds)
 
 		err = mdiobus_register(ds->slave_mii_bus);
 		if (err < 0)
-			goto free_slave_mii_bus;
+			goto teardown;
 	}
 
 	ds->setup = true;
 
 	return 0;
 
-free_slave_mii_bus:
-	if (ds->slave_mii_bus && ds->ops->phy_read)
-		mdiobus_free(ds->slave_mii_bus);
 teardown:
 	if (ds->ops->teardown)
 		ds->ops->teardown(ds);
@@ -503,11 +500,8 @@ static void dsa_switch_teardown(struct dsa_switch *ds)
 	if (!ds->setup)
 		return;
 
-	if (ds->slave_mii_bus && ds->ops->phy_read) {
+	if (ds->slave_mii_bus && ds->ops->phy_read)
 		mdiobus_unregister(ds->slave_mii_bus);
-		mdiobus_free(ds->slave_mii_bus);
-		ds->slave_mii_bus = NULL;
-	}
 
 	dsa_switch_unregister_notifier(ds);
 
@@ -766,7 +760,6 @@ static int dsa_port_parse_of(struct dsa_port *dp, struct device_node *dn)
 		struct net_device *master;
 
 		master = of_find_net_device_by_node(ethernet);
-		of_node_put(ethernet);
 		if (!master)
 			return -EPROBE_DEFER;
 

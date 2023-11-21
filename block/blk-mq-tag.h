@@ -2,9 +2,6 @@
 #ifndef INT_BLK_MQ_TAG_H
 #define INT_BLK_MQ_TAG_H
 
-#include <linux/kabi.h>
-
-extern bool mq_unfair_dtag;
 /*
  * Tag address space map.
  */
@@ -13,18 +10,12 @@ struct blk_mq_tags {
 	unsigned int nr_reserved_tags;
 
 	atomic_t active_queues;
-	/*
-	 * If multiple queues share a tag set, pending_queues record the
-	 * number of queues that can't get driver tag.
-	 */
-	atomic_t pending_queues;
 
-	KABI_DEPRECATE(struct sbitmap_queue *, bitmap_tags)
-	KABI_DEPRECATE(struct sbitmap_queue *, breserved_tags)
-	KABI_REPLACE(struct sbitmap_queue __bitmap_tags,
-		     struct sbitmap_queue bitmap_tags)
-	KABI_REPLACE(struct sbitmap_queue __breserved_tags,
-		     struct sbitmap_queue breserved_tags)
+	struct sbitmap_queue *bitmap_tags;
+	struct sbitmap_queue *breserved_tags;
+
+	struct sbitmap_queue __bitmap_tags;
+	struct sbitmap_queue __breserved_tags;
 
 	struct request **rqs;
 	struct request **static_rqs;
@@ -36,21 +27,17 @@ struct blk_mq_tags {
 	 */
 	spinlock_t lock;
 
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
-	KABI_RESERVE(3)
-	KABI_RESERVE(4)
+	ANDROID_OEM_DATA(1);
 };
 
 extern struct blk_mq_tags *blk_mq_init_tags(unsigned int nr_tags,
 					unsigned int reserved_tags,
-					int node, int alloc_policy);
-extern void blk_mq_free_tags(struct blk_mq_tags *tags);
-extern int blk_mq_init_bitmaps(struct sbitmap_queue *bitmap_tags,
-			       struct sbitmap_queue *breserved_tags,
-			       unsigned int queue_depth,
-			       unsigned int reserved,
-			       int node, int alloc_policy);
+					int node, unsigned int flags);
+extern void blk_mq_free_tags(struct blk_mq_tags *tags, unsigned int flags);
+
+extern int blk_mq_init_shared_sbitmap(struct blk_mq_tag_set *set,
+				      unsigned int flags);
+extern void blk_mq_exit_shared_sbitmap(struct blk_mq_tag_set *set);
 
 extern unsigned int blk_mq_get_tag(struct blk_mq_alloc_data *data);
 extern void blk_mq_put_tag(struct blk_mq_tags *tags, struct blk_mq_ctx *ctx,
@@ -60,7 +47,6 @@ extern int blk_mq_tag_update_depth(struct blk_mq_hw_ctx *hctx,
 					unsigned int depth, bool can_grow);
 extern void blk_mq_tag_resize_shared_sbitmap(struct blk_mq_tag_set *set,
 					     unsigned int size);
-extern void blk_mq_tag_update_sched_shared_sbitmap(struct request_queue *q);
 
 extern void blk_mq_tag_wakeup_all(struct blk_mq_tags *tags, bool);
 void blk_mq_queue_tag_busy_iter(struct request_queue *q, busy_iter_fn *fn,
@@ -82,11 +68,8 @@ enum {
 	BLK_MQ_TAG_MAX		= BLK_MQ_NO_TAG - 1,
 };
 
-extern bool __blk_mq_tag_busy(struct blk_mq_hw_ctx *hctx);
-extern void __blk_mq_tag_idle(struct blk_mq_hw_ctx *hctx);
-extern void __blk_mq_dtag_busy(struct blk_mq_hw_ctx *hctx);
-extern void __blk_mq_dtag_idle(struct blk_mq_hw_ctx *hctx, bool force);
-
+extern bool __blk_mq_tag_busy(struct blk_mq_hw_ctx *);
+extern void __blk_mq_tag_idle(struct blk_mq_hw_ctx *);
 
 static inline bool blk_mq_tag_busy(struct blk_mq_hw_ctx *hctx)
 {
@@ -102,22 +85,6 @@ static inline void blk_mq_tag_idle(struct blk_mq_hw_ctx *hctx)
 		return;
 
 	__blk_mq_tag_idle(hctx);
-}
-
-static inline void blk_mq_dtag_busy(struct blk_mq_hw_ctx *hctx)
-{
-	if (!(mq_unfair_dtag && (hctx->flags & BLK_MQ_F_TAG_QUEUE_SHARED)))
-		return;
-
-	__blk_mq_dtag_busy(hctx);
-}
-
-static inline void blk_mq_dtag_idle(struct blk_mq_hw_ctx *hctx, bool force)
-{
-	if (!(mq_unfair_dtag && (hctx->flags & BLK_MQ_F_TAG_QUEUE_SHARED)))
-		return;
-
-	__blk_mq_dtag_idle(hctx, force);
 }
 
 static inline bool blk_mq_tag_is_reserved(struct blk_mq_tags *tags,

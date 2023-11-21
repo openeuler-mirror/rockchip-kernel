@@ -172,8 +172,6 @@ int mpam_resctrl_cpu_offline(unsigned int cpu)
 		list_del(&d->list);
 		dom = container_of(d, struct mpam_resctrl_dom, resctrl_dom);
 		kfree(dom);
-
-		res->resctrl_res.dom_num--;
 	}
 
 	mpam_resctrl_clear_default_cpu(cpu);
@@ -419,9 +417,6 @@ static int mpam_resctrl_resource_init(struct mpam_resctrl_res *res)
 		 * of 1 would appear too fine to make percentage conversions.
 		 */
 		r->mbw.bw_gran = GRAN_MBA_BW;
-		/* do not allow mbw_max/min below mbw.bw_gran */
-		if (r->mbw.min_bw < r->mbw.bw_gran)
-			r->mbw.min_bw = r->mbw.bw_gran;
 
 		/* We will only pick a class that can monitor and control */
 		r->alloc_capable = true;
