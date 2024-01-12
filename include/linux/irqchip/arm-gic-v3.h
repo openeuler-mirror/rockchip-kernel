@@ -689,14 +689,23 @@ struct rdists {
 struct irq_domain;
 struct fwnode_handle;
 int its_cpu_init(void);
-#ifdef CONFIG_ASCEND_INIT_ALL_GICR
-void its_set_gicr_nr(int nr);
-bool its_init_all_gicr(void);
-int its_cpu_init_others(void __iomem *base, phys_addr_t phys_base, int idx);
-#endif
 int its_init(struct fwnode_handle *handle, struct rdists *rdists,
 	     struct irq_domain *domain);
 int mbi_init(struct fwnode_handle *fwnode, struct irq_domain *parent);
+
+struct gic_chip_data {
+	struct fwnode_handle	*fwnode;
+	void __iomem		*dist_base;
+	struct redist_region	*redist_regions;
+	struct rdists		rdists;
+	struct irq_domain	*domain;
+	u64			redist_stride;
+	u32			nr_redist_regions;
+	u64			flags;
+	bool			has_rss;
+	unsigned int		ppi_nr;
+	struct partition_desc	**ppi_descs;
+};
 
 static inline bool gic_enable_sre(void)
 {
@@ -712,6 +721,8 @@ static inline bool gic_enable_sre(void)
 
 	return !!(val & ICC_SRE_EL1_SRE);
 }
+
+void gic_resume(void);
 
 #endif
 
