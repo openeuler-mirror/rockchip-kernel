@@ -18,6 +18,7 @@
 #include <linux/iopoll.h>
 #include <linux/ioport.h>
 #include <linux/module.h>
+#include <linux/of_address.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 #include <linux/seq_file.h>
@@ -35,6 +36,7 @@
 #include <linux/of.h>
 #include <linux/of_gpio.h>
 #include <linux/mmc/slot-gpio.h>
+#include <linux/soc/rockchip/rockchip_decompress.h>
 
 #include "dw_mmc.h"
 
@@ -208,6 +210,7 @@ static bool dw_mci_ctrl_reset(struct dw_mci *host, u32 reset)
 static void dw_mci_wait_while_busy(struct dw_mci *host, u32 cmd_flags)
 {
 	u32 status;
+	u32 delay = 10;
 
 	/*
 	 * Databook says that before issuing a new data transfer command
@@ -217,12 +220,17 @@ static void dw_mci_wait_while_busy(struct dw_mci *host, u32 cmd_flags)
 	 * ...also allow sending for SDMMC_CMD_VOLT_SWITCH where busy is
 	 * expected.
 	 */
+#ifdef CONFIG_ROCKCHIP_THUNDER_BOOT
+	if (host->slot->mmc->caps2 & MMC_CAP2_NO_SD &&
+	    host->slot->mmc->caps2 & MMC_CAP2_NO_SDIO)
+		delay = 0;
+#endif
 	if ((cmd_flags & SDMMC_CMD_PRV_DAT_WAIT) &&
 	    !(cmd_flags & SDMMC_CMD_VOLT_SWITCH)) {
 		if (readl_poll_timeout_atomic(host->regs + SDMMC_STATUS,
 					      status,
 					      !(status & SDMMC_STATUS_BUSY),
-					      10, 500 * USEC_PER_MSEC))
+					      delay, 500 * USEC_PER_MSEC))
 			dev_err(host->dev, "Busy; trying anyway\n");
 	}
 }
@@ -491,6 +499,10 @@ static void dw_mci_dmac_complete_dma(void *arg)
 		set_bit(EVENT_XFER_COMPLETE, &host->pending_events);
 		tasklet_schedule(&host->tasklet);
 	}
+
+	if (host->need_xfer_timer &&
+	    host->dir_status == DW_MCI_RECV_STATUS)
+		del_timer(&host->xfer_timer);
 }
 
 static int dw_mci_idmac_init(struct dw_mci *host)
@@ -1923,6 +1935,30 @@ static void dw_mci_set_drto(struct dw_mci *host)
 	spin_unlock_irqrestore(&host->irq_lock, irqflags);
 }
 
+static void dw_mci_set_xfer_timeout(struct dw_mci *host)
+{
+	unsigned int xfer_clks;
+	unsigned int xfer_div;
+	unsigned int xfer_ms;
+	unsigned long irqflags;
+
+	xfer_clks = mci_readl(host, TMOUT) >> 8;
+	xfer_div = (mci_readl(host, CLKDIV) & 0xff) * 2;
+	if (xfer_div == 0)
+		xfer_div = 1;
+	xfer_ms = DIV_ROUND_UP_ULL((u64)MSEC_PER_SEC * xfer_clks * xfer_div,
+				   host->bus_hz);
+
+	/* add a bit spare time */
+	xfer_ms += 100;
+
+	spin_lock_irqsave(&host->irq_lock, irqflags);
+	if (!test_bit(EVENT_XFER_COMPLETE, &host->pending_events))
+		mod_timer(&host->xfer_timer,
+			  jiffies + msecs_to_jiffies(xfer_ms));
+	spin_unlock_irqrestore(&host->irq_lock, irqflags);
+}
+
 static bool dw_mci_clear_pending_cmd_complete(struct dw_mci *host)
 {
 	if (!test_bit(EVENT_CMD_COMPLETE, &host->pending_events))
@@ -2014,8 +2050,7 @@ static void dw_mci_tasklet_func(unsigned long priv)
 				 * delayed. Allowing the transfer to take place
 				 * avoids races and keeps things simple.
 				 */
-				if (err != -ETIMEDOUT &&
-				    host->dir_status == DW_MCI_RECV_STATUS) {
+				if (err != -ETIMEDOUT) {
 					state = STATE_SENDING_DATA;
 					continue;
 				}
@@ -2061,6 +2096,9 @@ static void dw_mci_tasklet_func(unsigned long priv)
 				 */
 				if (host->dir_status == DW_MCI_RECV_STATUS)
 					dw_mci_set_drto(host);
+				if (host->need_xfer_timer &&
+				    host->dir_status == DW_MCI_RECV_STATUS)
+					dw_mci_set_xfer_timeout(host);
 				break;
 			}
 
@@ -2535,6 +2573,8 @@ done:
 	host->sg = NULL;
 	smp_wmb(); /* drain writebuffer */
 	set_bit(EVENT_XFER_COMPLETE, &host->pending_events);
+	if (host->need_xfer_timer)
+		del_timer(&host->xfer_timer);
 }
 
 static void dw_mci_write_data_pio(struct dw_mci *host)
@@ -2647,6 +2687,9 @@ static irqreturn_t dw_mci_interrupt(int irq, void *dev_id)
 			del_timer(&host->cto_timer);
 			mci_writel(host, RINTSTS, DW_MCI_CMD_ERROR_FLAGS);
 			host->cmd_status = pending;
+			if ((host->need_xfer_timer) &&
+			     host->dir_status == DW_MCI_RECV_STATUS)
+				del_timer(&host->xfer_timer);
 			smp_wmb(); /* drain writebuffer */
 			set_bit(EVENT_CMD_COMPLETE, &host->pending_events);
 
@@ -3032,6 +3075,36 @@ exit:
 	spin_unlock_irqrestore(&host->irq_lock, irqflags);
 }
 
+static void dw_mci_xfer_timer(struct timer_list *t)
+{
+	struct dw_mci *host = from_timer(host, t, xfer_timer);
+	unsigned long irqflags;
+
+	spin_lock_irqsave(&host->irq_lock, irqflags);
+
+	if (test_bit(EVENT_XFER_COMPLETE, &host->pending_events)) {
+		/* Presumably interrupt handler couldn't delete the timer */
+		dev_warn(host->dev, "xfer when already completed\n");
+		goto exit;
+	}
+
+	switch (host->state) {
+	case STATE_SENDING_DATA:
+		host->data_status = SDMMC_INT_DRTO;
+		set_bit(EVENT_DATA_ERROR, &host->pending_events);
+		set_bit(EVENT_DATA_COMPLETE, &host->pending_events);
+		tasklet_schedule(&host->tasklet);
+		break;
+	default:
+		dev_warn(host->dev, "Unexpected xfer timeout, state %d\n",
+			 host->state);
+		break;
+	}
+
+exit:
+	spin_unlock_irqrestore(&host->irq_lock, irqflags);
+}
+
 static void dw_mci_dto_timer(struct timer_list *t)
 {
 	struct dw_mci *host = from_timer(host, t, dto_timer);
@@ -3161,6 +3234,60 @@ int dw_mci_probe(struct dw_mci *host)
 	int width, i, ret = 0;
 	u32 fifo_size;
 
+#if defined(CONFIG_ROCKCHIP_THUNDER_BOOT) && defined(CONFIG_ROCKCHIP_HW_DECOMPRESS)
+	struct resource idmac, ramdisk_src, ramdisk_dst;
+	struct device_node *dma, *rds, *rdd;
+	struct device *dev = host->dev;
+	u32 intr;
+
+	if (host->slot->mmc->caps2 & MMC_CAP2_NO_SD &&
+	    host->slot->mmc->caps2 & MMC_CAP2_NO_SDIO) {
+		if (readl_poll_timeout(host->regs + SDMMC_STATUS,
+				fifo_size,
+				!(fifo_size & (BIT(10) | GENMASK(7, 4))),
+				0, 500 * USEC_PER_MSEC))
+			dev_err(dev, "Controller is occupied!\n");
+
+		if (readl_poll_timeout(host->regs + SDMMC_IDSTS,
+				fifo_size, !(fifo_size & GENMASK(16, 13)),
+				0, 500 * USEC_PER_MSEC))
+			dev_err(dev, "DMA is still running!\n");
+
+		intr = mci_readl(host, RINTSTS);
+		if (intr & DW_MCI_CMD_ERROR_FLAGS || intr & DW_MCI_DATA_ERROR_FLAGS) {
+			WARN_ON(1);
+			return -EINVAL;
+		}
+
+		/* Release idmac descriptor */
+		dma = of_parse_phandle(dev->of_node, "memory-region-idamc", 0);
+		if (dma) {
+			ret = of_address_to_resource(dma, 0, &idmac);
+			if (ret >= 0)
+				free_reserved_area(phys_to_virt(idmac.start),
+					phys_to_virt(idmac.start) + resource_size(&idmac),
+					-1, NULL);
+		}
+
+		/* Parse ramdisk addr and help start decompressing */
+		rds = of_parse_phandle(dev->of_node, "memory-region-src", 0);
+		rdd = of_parse_phandle(dev->of_node, "memory-region-dst", 0);
+		if (rds && rdd) {
+			if (of_address_to_resource(rds, 0, &ramdisk_src) >= 0 &&
+				of_address_to_resource(rdd, 0, &ramdisk_dst) >= 0)
+				/*
+				 * Decompress HW driver will free reserved area of
+				 * memory-region-src.
+				 */
+				ret = rk_decom_start(GZIP_MOD, ramdisk_src.start,
+						     ramdisk_dst.start,
+						     resource_size(&ramdisk_dst));
+			if (ret < 0)
+				dev_err(dev, "fail to start decom\n");
+		}
+	}
+#endif
+
 	if (!host->pdata) {
 		host->pdata = dw_mci_parse_dt(host);
 		if (IS_ERR(host->pdata))
@@ -3225,6 +3352,8 @@ int dw_mci_probe(struct dw_mci *host)
 	timer_setup(&host->cmd11_timer, dw_mci_cmd11_timer, 0);
 	timer_setup(&host->cto_timer, dw_mci_cto_timer, 0);
 	timer_setup(&host->dto_timer, dw_mci_dto_timer, 0);
+	if (host->need_xfer_timer)
+		timer_setup(&host->xfer_timer, dw_mci_xfer_timer, 0);
 
 	spin_lock_init(&host->lock);
 	spin_lock_init(&host->irq_lock);
