@@ -137,7 +137,7 @@ static int dw_hdmi_i2s_get_eld(struct device *dev, void *data, uint8_t *buf,
 	struct dw_hdmi_i2s_audio_data *audio = data;
 	u8 *eld;
 
-	eld = audio->get_eld(audio->hdmi);
+	eld = audio->eld;
 	if (eld)
 		memcpy(buf, eld, min_t(size_t, MAX_ELD_BYTES, len));
 	else

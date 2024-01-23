@@ -48,6 +48,16 @@ source "drivers/net/wireless/st/Kconfig"
 source "drivers/net/wireless/ti/Kconfig"
 source "drivers/net/wireless/zydas/Kconfig"
 source "drivers/net/wireless/quantenna/Kconfig"
+source "drivers/net/wireless/rockchip_wlan/Kconfig"
+
+config MXMWIFIEX
+    tristate "NXP MxM WiFi Driver"
+    depends on CFG80211
+    help
+        This driver is multi-chip-multi-interface driver
+        (indicating Multi-Chip x Multi-Interface support) based on
+        NXP 802.11n/ac chipsets. If you choose to build it as a module,
+        it will be build 2 modules moal.ko and mlan.ko.
 
 config PCMCIA_RAYCS
 	tristate "Aviator/Raytheon 2.4GHz wireless support"
