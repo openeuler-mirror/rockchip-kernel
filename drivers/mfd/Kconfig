@@ -1142,6 +1142,25 @@ config MFD_RC5T583
 	  Additional drivers must be enabled in order to use the
 	  different functionality of the device.
 
+config MFD_RK806
+	tristate "Rockchip RK806 Power Management Chip"
+	select MFD_CORE
+	select REGMAP
+	select REGMAP_IRQ
+	help
+	  If you say yes here you get support for the RK806 Power Management chips.
+	  This driver provides common support for accessing the device
+	  through SPI interface. The device supports multiple sub-devices
+	  including interrupts, LDO & DCDC regulators, and onkey.
+
+config MFD_RK806_SPI
+	tristate "RK806 Power Management chip with SPI"
+	select MFD_RK806
+	select REGMAP_SPI
+	depends on SPI_MASTER
+	help
+	  If you say yes here you get support for the RK806 PM chips with SPI interface.
+
 config MFD_RK808
 	tristate "Rockchip RK805/RK808/RK809/RK817/RK818 Power Management Chip"
 	depends on I2C && OF
@@ -1154,6 +1173,27 @@ config MFD_RK808
 	  This driver provides common support for accessing the device
 	  through I2C interface. The device supports multiple sub-devices
 	  including interrupts, RTC, LDO & DCDC regulators, and onkey.
+
+config MFD_RK618
+	tristate "Rockchip RK618 MFD Driver"
+	depends on I2C
+	depends on OF
+	select MFD_CORE
+	select REGMAP_I2C
+	select REGMAP_IRQ
+	help
+	  if you say yes here you get support for the RK618 from Rockchip.
+
+config MFD_RK628
+	tristate "Rockchip RK628 MFD Driver"
+	depends on I2C
+	depends on OF
+	select MFD_CORE
+	select REGMAP_I2C
+	select REGMAP_IRQ
+	select PINCTRL_RK628
+	help
+	  if you say yes here you get support for the RK628 from Rockchip.
 
 config MFD_RN5T618
 	tristate "Ricoh RN5T567/618 PMIC"
