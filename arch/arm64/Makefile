@@ -195,9 +195,24 @@ endif
 define archhelp
   echo  '* Image.gz      - Compressed kernel image (arch/$(ARCH)/boot/Image.gz)'
   echo  '  Image         - Uncompressed kernel image (arch/$(ARCH)/boot/Image)'
+  echo  '* dtbs          - Build device tree blobs for enabled boards'
+  echo  '  dtbs_install  - Install dtbs to $(INSTALL_DTBS_PATH)'
   echo  '  install       - Install uncompressed kernel'
   echo  '  zinstall      - Install compressed kernel'
   echo  '                  Install using (your) ~/bin/installkernel or'
   echo  '                  (distribution) /sbin/installkernel or'
   echo  '                  install to $$(INSTALL_PATH) and run lilo'
 endef
+kernel.img: Image.lz4
+	$(Q)scripts/mkkrnlimg $(objtree)/arch/arm64/boot/Image $(objtree)/kernel.img >/dev/null
+	@echo '  Image:  kernel.img is ready'
+ifdef CONFIG_MODULES
+	$(Q)if [ "$(srctree)" = "$(objtree)" ]; then $(MAKE) modules; fi
+endif
+LOGO := $(notdir $(wildcard $(srctree)/logo.bmp))
+LOGO_KERNEL := $(notdir $(wildcard $(srctree)/logo_kernel.bmp))
+%.img: rockchip/%.dtb kernel.img $(LOGO) $(LOGO_KERNEL)
+	$(Q)$(srctree)/scripts/mkimg --dtb $*.dtb
+CLEAN_DIRS += out
+CLEAN_FILES += boot.img kernel.img resource.img zboot.img
+
