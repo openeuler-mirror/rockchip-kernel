@@ -41,6 +41,7 @@
 #include <net/pkt_cls.h>
 #include "stmmac_ptp.h"
 #include "stmmac.h"
+#include "dwmac-rk-tool.h"
 #include <linux/reset.h>
 #include <linux/of_mdio.h>
 #include "dwmac1000.h"
@@ -1820,6 +1821,14 @@ static int alloc_dma_tx_desc_resources(struct stmmac_priv *priv)
 		else
 			tx_q->dma_tx = addr;
 	}
+
+#ifdef CONFIG_DWMAC_RK_AUTO_DELAYLINE
+	if (!priv->delayline_scanned) {
+		if (dwmac_rk_get_rgmii_delayline_from_vendor(priv))
+			schedule_delayed_work(&priv->scan_dwork, msecs_to_jiffies(6000));
+		priv->delayline_scanned = true;
+	}
+#endif
 
 	return 0;
 
@@ -4972,6 +4981,16 @@ int stmmac_reinit_ringparam(struct net_device *dev, u32 rx_size, u32 tx_size)
 	return ret;
 }
 
+#ifdef CONFIG_DWMAC_RK_AUTO_DELAYLINE
+static void stmmac_scan_delayline_dwork(struct work_struct *work)
+{
+	struct stmmac_priv *priv = container_of(work, struct stmmac_priv,
+						scan_dwork.work);
+
+	dwmac_rk_search_rgmii_delayline(priv);
+};
+#endif
+
 /**
  * stmmac_dvr_probe
  * @device: device pointer
@@ -5211,7 +5230,9 @@ int stmmac_dvr_probe(struct device *device,
 	 * If CONFIG_PM is not enabled, the clocks will stay powered.
 	 */
 	pm_runtime_put(device);
-
+#ifdef CONFIG_DWMAC_RK_AUTO_DELAYLINE
+	INIT_DELAYED_WORK(&priv->scan_dwork, stmmac_scan_delayline_dwork);
+#endif
 	return ret;
 
 error_netdev_register:
