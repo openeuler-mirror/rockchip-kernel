@@ -47,10 +47,13 @@
 
 #include <linux/uaccess.h>
 
+#include <trace/hooks/mmc_core.h>
+
 #include "queue.h"
 #include "block.h"
 #include "core.h"
 #include "card.h"
+#include "crypto.h"
 #include "host.h"
 #include "bus.h"
 #include "mmc_ops.h"
@@ -419,16 +422,24 @@ static int card_busy_detect(struct mmc_card *card, unsigned int timeout_ms,
 	do {
 		bool done = time_after(jiffies, timeout);
 
-		err = __mmc_send_status(card, &status, 5);
-		if (err) {
-			dev_err(mmc_dev(card->host),
-				"error %d requesting status\n", err);
-			return err;
-		}
+		if (!(card->host->caps2 & MMC_CAP2_NO_SD) && card->host->ops->card_busy) {
+			status = card->host->ops->card_busy(card->host) ?
+				 0 : R1_READY_FOR_DATA | R1_STATE_TRAN << 9;
 
-		/* Accumulate any response error bits seen */
-		if (resp_errs)
-			*resp_errs |= status;
+			if (!status)
+				usleep_range(100, 150);
+		} else {
+			err = __mmc_send_status(card, &status, 5);
+			if (err) {
+				dev_err(mmc_dev(card->host),
+					"error %d requesting status\n", err);
+				return err;
+			}
+
+			/* Accumulate any response error bits seen */
+			if (resp_errs)
+				*resp_errs |= status;
+		}
 
 		/*
 		 * Timeout if the device never becomes ready for data and never
@@ -541,7 +552,6 @@ static int __mmc_blk_ioctl_cmd(struct mmc_card *card, struct mmc_blk_data *md,
 		return mmc_sanitize(card);
 
 	mmc_wait_for_req(card->host, &mrq);
-	memcpy(&idata->ic.response, cmd.resp, sizeof(cmd.resp));
 
 	if (cmd.error) {
 		dev_err(mmc_dev(card->host), "%s: cmd error %d\n",
@@ -590,6 +600,8 @@ static int __mmc_blk_ioctl_cmd(struct mmc_card *card, struct mmc_blk_data *md,
 	 */
 	if (idata->ic.postsleep_min_us)
 		usleep_range(idata->ic.postsleep_min_us, idata->ic.postsleep_max_us);
+
+	memcpy(&(idata->ic.response), cmd.resp, sizeof(cmd.resp));
 
 	if (idata->rpmb || (cmd.flags & MMC_RSP_R1B) == MMC_RSP_R1B) {
 		/*
@@ -961,6 +973,11 @@ static int mmc_blk_reset(struct mmc_blk_data *md, struct mmc_host *host,
 		struct mmc_blk_data *main_md =
 			dev_get_drvdata(&host->card->dev);
 		int part_err;
+		bool allow = true;
+
+		trace_android_vh_mmc_blk_reset(host, err, &allow);
+		if (!allow)
+			return -ENODEV;
 
 		main_md->part_curr = main_md->part_type;
 		part_err = mmc_blk_part_switch(host->card, md->part_type);
@@ -1270,6 +1287,8 @@ static void mmc_blk_data_prep(struct mmc_queue *mq, struct mmc_queue_req *mqrq,
 		    (md->flags & MMC_BLK_REL_WR);
 
 	memset(brq, 0, sizeof(struct mmc_blk_request));
+
+	mmc_crypto_prepare_req(mqrq);
 
 	brq->mrq.data = &brq->data;
 	brq->mrq.tag = req->tag;
@@ -1646,32 +1665,32 @@ static void mmc_blk_read_single(struct mmc_queue *mq, struct request *req)
 	struct mmc_card *card = mq->card;
 	struct mmc_host *host = card->host;
 	blk_status_t error = BLK_STS_OK;
+	int retries = 0;
 	size_t bytes_per_read = queue_physical_block_size(mq->queue);
 
 	do {
 		u32 status;
 		int err;
-		int retries = 0;
 
-		while (retries++ <= MMC_READ_SINGLE_RETRIES) {
-			mmc_blk_rw_rq_prep(mqrq, card, 1, mq);
+		mmc_blk_rw_rq_prep(mqrq, card, 1, mq);
 
-			mmc_wait_for_req(host, mrq);
+		mmc_wait_for_req(host, mrq);
 
-			err = mmc_send_status(card, &status);
+		err = mmc_send_status(card, &status);
+		if (err)
+			goto error_exit;
+
+		if (!mmc_host_is_spi(host) &&
+		    !mmc_ready_for_data(status)) {
+			err = mmc_blk_fix_state(card, req);
 			if (err)
 				goto error_exit;
-
-			if (!mmc_host_is_spi(host) &&
-			    !mmc_ready_for_data(status)) {
-				err = mmc_blk_fix_state(card, req);
-				if (err)
-					goto error_exit;
-			}
-
-			if (!mrq->cmd->error)
-				break;
 		}
+
+		if (mrq->cmd->error && retries++ < MMC_READ_SINGLE_RETRIES)
+			continue;
+
+		retries = 0;
 
 		if (mrq->cmd->error ||
 		    mrq->data->error ||
@@ -1804,6 +1823,7 @@ static void mmc_blk_mq_rw_recovery(struct mmc_queue *mq, struct request *req)
 	    err && mmc_blk_reset(md, card->host, type)) {
 		pr_err("%s: recovery failed!\n", req->rq_disk->disk_name);
 		mqrq->retries = MMC_NO_RETRIES;
+		trace_android_vh_mmc_blk_mq_rw_recovery(card);
 		return;
 	}
 
@@ -2897,6 +2917,9 @@ static void mmc_blk_remove_debugfs(struct mmc_card *card,
 
 #endif /* CONFIG_DEBUG_FS */
 
+struct mmc_card *this_card;
+EXPORT_SYMBOL(this_card);
+
 static int mmc_blk_probe(struct mmc_card *card)
 {
 	struct mmc_blk_data *md, *part_md;
@@ -2931,6 +2954,11 @@ static int mmc_blk_probe(struct mmc_card *card)
 		goto out;
 
 	dev_set_drvdata(&card->dev, md);
+
+#if defined(CONFIG_MMC_DW_ROCKCHIP) || defined(CONFIG_MMC_SDHCI_OF_ARASAN)
+	if (card->type == MMC_TYPE_MMC)
+		this_card = card;
+#endif
 
 	if (mmc_add_disk(md))
 		goto out;
@@ -2968,6 +2996,12 @@ static void mmc_blk_remove(struct mmc_card *card)
 	struct mmc_blk_data *md = dev_get_drvdata(&card->dev);
 
 	mmc_blk_remove_debugfs(card, md);
+
+	#if defined(CONFIG_MMC_DW_ROCKCHIP)
+	if (card->type == MMC_TYPE_MMC)
+		this_card = NULL;
+	#endif
+
 	mmc_blk_remove_parts(card, md);
 	pm_runtime_get_sync(&card->dev);
 	if (md->part_curr != md->part_type) {
