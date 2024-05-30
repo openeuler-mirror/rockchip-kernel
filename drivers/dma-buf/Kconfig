@@ -1,6 +1,14 @@
 # SPDX-License-Identifier: GPL-2.0-only
 menu "DMABUF options"
 
+config DMABUF_CACHE
+	bool "DMABUF cache attachment"
+	default ARCH_ROCKCHIP
+	depends on NO_GKI
+	help
+	  This option support to store attachments in a list and destroy them by
+	  set to a callback list in the dtor of dma-buf.
+
 config SYNC_FILE
 	bool "Explicit Synchronization Framework"
 	default n
@@ -65,6 +73,18 @@ menuconfig DMABUF_HEAPS
 	  allows userspace to allocate dma-bufs that can be shared
 	  between drivers.
 
+menuconfig DMABUF_SYSFS_STATS
+	bool "DMA-BUF sysfs statistics"
+	select DMA_SHARED_BUFFER
+	help
+	   Choose this option to enable DMA-BUF sysfs statistics
+	   in location /sys/kernel/dmabuf/buffers.
+
+	   /sys/kernel/dmabuf/buffers/<inode_number> will contain
+	   statistics for the DMA-BUF with the unique inode number
+	   <inode_number>.
+
 source "drivers/dma-buf/heaps/Kconfig"
+source "drivers/dma-buf/rk_heaps/Kconfig"
 
 endmenu
