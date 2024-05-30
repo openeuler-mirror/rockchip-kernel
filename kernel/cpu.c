@@ -1391,17 +1391,35 @@ int bringup_hibernate_cpu(unsigned int sleep_cpu)
 	return 0;
 }
 
+static cpumask_var_t offline_mask;
 void bringup_nonboot_cpus(unsigned int setup_max_cpus)
 {
 	unsigned int cpu;
-
+	
 	for_each_present_cpu(cpu) {
-		if (num_online_cpus() >= setup_max_cpus)
-			break;
-		if (!cpu_online(cpu))
+		if(!cpumask_subset(cpumask_of(cpu),offline_mask)){
+			if (num_online_cpus() >= setup_max_cpus)
+				break;
+			if (!cpu_online(cpu))
 			cpu_up(cpu, CPUHP_ONLINE);
+		}
+		
 	}
 }
+
+static int __init offcpus(char *str)
+{
+	int err;
+
+	alloc_bootmem_cpumask_var(&offline_mask);
+	err = cpulist_parse(str, offline_mask);
+	if (err < 0 || cpumask_last(offline_mask) >= nr_cpu_ids) {
+		pr_warn("offline_mask: offcpus= incorrect CPU range\n");
+	}
+	return 0;
+}
+
+early_param("offcpus", offcpus);
 
 #ifdef CONFIG_PM_SLEEP_SMP
 static cpumask_var_t frozen_cpus;
