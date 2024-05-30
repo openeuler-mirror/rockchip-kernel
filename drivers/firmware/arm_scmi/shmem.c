@@ -11,6 +11,8 @@
 
 #include "common.h"
 
+#define SCMI_MAX_TX_PREPARE_TIMEOUT_MS 50
+
 /*
  * SCMI specification requires all parameters, message headers, return
  * arguments or any protocol data to be expressed in little endian
@@ -32,14 +34,23 @@ struct scmi_shared_mem {
 void shmem_tx_prepare(struct scmi_shared_mem __iomem *shmem,
 		      struct scmi_xfer *xfer)
 {
+	ktime_t stop = ktime_add_ms(ktime_get(), SCMI_MAX_TX_PREPARE_TIMEOUT_MS);
 	/*
 	 * Ideally channel must be free by now unless OS timeout last
 	 * request and platform continued to process the same, wait
 	 * until it releases the shared memory, otherwise we may endup
 	 * overwriting its response with new message payload or vice-versa
 	 */
-	spin_until_cond(ioread32(&shmem->channel_status) &
-			SCMI_SHMEM_CHAN_STAT_CHANNEL_FREE);
+	// spin_until_cond((ioread32(&shmem->channel_status) &
+	//		SCMI_SHMEM_CHAN_STAT_CHANNEL_FREE) || ktime_after(ktime_get(), stop));
+
+	spin_until_cond((ioread32(&shmem->channel_status) &
+			SCMI_SHMEM_CHAN_STAT_CHANNEL_FREE) || ktime_after(ktime_get(), stop));
+
+	if (unlikely(ktime_after(ktime_get(), stop))) {
+		pr_err("time out in shmem_t_prepare(caller: %pS).\n", (void *)_RET_IP_);
+	}
+
 	/* Mark channel busy + clear error */
 	iowrite32(0x0, &shmem->channel_status);
 	iowrite32(xfer->hdr.poll_completion ? 0 : SCMI_SHMEM_FLAG_INTR_ENABLED,
