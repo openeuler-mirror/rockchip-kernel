@@ -7,6 +7,12 @@ menu "Character devices"
 
 source "drivers/tty/Kconfig"
 
+config RYD_GPIO_CONTROL
+	tristate "Support New RYD GPIO Control (Not use anymore)"
+	default y
+	help
+	  If you say Y here, you will get support for a character device
+
 config TTY_PRINTK
 	tristate "TTY driver to output user messages via printk"
 	depends on EXPERT && TTY
