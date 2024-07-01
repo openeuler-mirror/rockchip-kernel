@@ -357,7 +357,7 @@ camera: &i2c7 {
 	sdmode-gpios = <&gpio0 2 GPIO_ACTIVE_HIGH>;
 };
 
-&mipi_dsi {
+/*&mipi_dsi {
 	status = "okay";
 	clock-master;
 
@@ -372,7 +372,7 @@ camera: &i2c7 {
 	};
 
 	mipi_panel: panel@0 {
-		/* 2 different panels are used, compatibles are in dts files */
+		// 2 different panels are used, compatibles are in dts files
 		reg = <0>;
 		backlight = <&backlight>;
 		enable-gpios = <&gpio4 25 GPIO_ACTIVE_HIGH>;
@@ -414,7 +414,7 @@ camera: &i2c7 {
 			};
 		};
 	};
-};
+};*/
 
 &pcie0 {
 	ep-gpios = <&gpio0 3 GPIO_ACTIVE_HIGH>;

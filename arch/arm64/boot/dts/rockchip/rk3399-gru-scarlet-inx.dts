@@ -26,8 +26,8 @@
 		     "google,scarlet", "google,gru", "rockchip,rk3399";
 };
 
-&mipi_panel {
+/*&mipi_panel {
 	compatible = "innolux,p097pfg";
 	avdd-supply = <&ppvarp_lcd>;
 	avee-supply = <&ppvarn_lcd>;
-};
+};*/
