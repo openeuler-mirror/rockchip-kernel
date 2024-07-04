@@ -27,7 +27,7 @@
 		     "google,scarlet", "google,gru", "rockchip,rk3399";
 };
 
-&mipi_panel {
+/*&mipi_panel {
 	compatible = "kingdisplay,kd097d04";
 	power-supply = <&pp3300_s0>;
-};
+};*/

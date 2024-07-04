@@ -535,7 +535,6 @@
 		resets = <&cru SRST_P_SARADC>;
 		reset-names = "saradc-apb";
 		status = "disabled";
-		vref-supply = <&vcc_1v8>;
 	};
 
 	i2c0: i2c@ff3c0000 {
@@ -771,25 +770,25 @@
 	};
 
 	thermal_zones: thermal-zones {
-		soc_thermal: soc-thermal {
-			polling-delay-passive = <20>; /* milliseconds */
-			polling-delay = <1000>; /* milliseconds */
+		soc_thermal: cpu_thermal: cpu-thermal {
+			polling-delay-passive = <20>;
+			polling-delay = <1000>;
 			sustainable-power = <1000>; /* milliwatts */
 
 			thermal-sensors = <&tsadc 0>;
 
 			trips {
-				threshold: trip-point-0 {
-					temperature = <70000>; /* millicelsius */
-					hysteresis = <2000>; /* millicelsius */
+				threshold: cpu_alert0: cpu_alert0 {
+					temperature = <70000>;
+					hysteresis = <2000>;
 					type = "passive";
 				};
-				target: trip-point-1 {
-					temperature = <85000>; /* millicelsius */
-					hysteresis = <2000>; /* millicelsius */
+				target: cpu_alert1: cpu_alert1 {
+					temperature = <85000>;
+					hysteresis = <2000>;
 					type = "passive";
 				};
-				soc_crit: soc-crit {
+				soc_crit: cpu_crit: cpu_crit {
 					temperature = <115000>; /* millicelsius */
 					hysteresis = <2000>; /* millicelsius */
 					type = "critical";
