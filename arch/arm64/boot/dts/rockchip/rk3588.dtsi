@@ -415,7 +415,8 @@
 			 <&cru DCLK_VOP1>,
 			 <&cru DCLK_VOP2>,
 			 <&cru DCLK_VOP3>,
-			 <&hclk_vo1>;
+			 <&hclk_vo1>,
+			 <&hdptxphy_hdmi_clk1>;
 		clock-names = "pclk",
 			      "hpd",
 			      "earc",
@@ -805,6 +806,11 @@
 		#phy-cells = <0>;
 		#clock-cells = <0>;
 		status = "disabled";
+		
+		hdptxphy_hdmi_clk1: clk-port {
+			#clock-cells = <0>;
+			status = "okay";
+		};
 	};
 
 
