@@ -50,6 +50,7 @@ dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3399-orangepi-4-lts.dtb
 dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3568-8897-ddr4-v1-linux-base.dtb
 dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3568-8897-ddr4-v1-linux-hdmi.dtb
 dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3568-roc-pc-se.dtb
+dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3568-roc-pc.dtb
 dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3566-roc-pc.dtb
 dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3588s-roc-pc.dtb
 dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3588-rock-5b.dtb
