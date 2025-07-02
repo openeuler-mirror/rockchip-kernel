@@ -45,6 +45,18 @@ struct pt_regs;
 
 extern int sysctl_page_lock_unfairness;
 
+static inline void vm_flags_set(struct vm_area_struct *vma,
+	vm_flags_t flags)
+	{
+			vma->vm_flags |= flags;
+	}
+	static inline void vm_flags_clear(struct vm_area_struct *vma,
+	vm_flags_t flags)
+	{
+			vma->vm_flags &= ~flags;
+	}
+
+
 void init_mm_internals(void);
 
 #ifndef CONFIG_NEED_MULTIPLE_NODES	/* Don't use mapnrs, do it properly */
