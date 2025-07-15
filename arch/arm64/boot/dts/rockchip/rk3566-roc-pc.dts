@@ -51,6 +51,16 @@
 			pinctrl-0 = <&user_led_enable_h>;
 			retain-state-suspended;
 		};
+		
+		led-firefly {
+			label = "firefly-led";
+			default-state = "off";
+			gpios = <&gpio0 RK_PD4 GPIO_ACTIVE_HIGH>;
+			linux,default-trigger = "heartbeat";
+			pinctrl-names = "default";
+			pinctrl-0 = <&firefly_led_enable_h>;
+			retain-state-suspended;
+		};
 	};
 
 	rk809-sound {
@@ -67,6 +77,14 @@
 		simple-audio-card,codec {
 			sound-dai = <&rk809>;
 		};
+	};
+
+	rk_headset: rk-headset {
+		compatible = "rockchip_headset";
+		headset_gpio = <&gpio2 RK_PD2 GPIO_ACTIVE_HIGH>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&hp_det>;
+		io-channels = <&saradc 2>;    //HP_HOOK pin
 	};
 
 	sdio_pwrseq: sdio-pwrseq {
@@ -123,7 +141,7 @@
 		compatible = "regulator-fixed";
 		regulator-name = "vcc5v0_usb30_host";
 		enable-active-high;
-		gpio = <&gpio0 RK_PC5 GPIO_ACTIVE_HIGH>;
+		gpio = <&gpio0 RK_PA6 GPIO_ACTIVE_HIGH>;
 		pinctrl-names = "default";
 		pinctrl-0 = <&vcc5v0_usb30_host_en_h>;
 		regulator-always-on;
@@ -136,7 +154,7 @@
 		compatible = "regulator-fixed";
 		regulator-name = "vcc5v0_usb_otg";
 		enable-active-high;
-		gpio = <&gpio0 RK_PC6 GPIO_ACTIVE_HIGH>;
+		gpio = <&gpio0 RK_PA5 GPIO_ACTIVE_HIGH>;
 		pinctrl-names = "default";
 		pinctrl-0 = <&vcc5v0_usb_otg_en_h>;
 		regulator-always-on;
@@ -168,6 +186,16 @@
 
 &cpu3 {
 	cpu-supply = <&vdd_cpu>;
+};
+
+&cpu_thermal {
+	trips {
+		cpu_hot: cpu_hot {
+			temperature = <55000>;
+			hysteresis = <2000>;
+			type = "active";
+		};
+	};
 };
 
 &gmac1 {
@@ -464,20 +492,6 @@
 	};
 };
 
-&i2c1 {
-	status = "okay";
-};
-
-&i2c2 {
-	status = "okay";
-};
-
-&i2c3 {
-	pinctrl-names = "default";
-	pinctrl-0 = <&i2c3m0_xfer>;
-	status = "okay";
-};
-
 &i2s0_8ch {
 	status = "okay";
 };
@@ -508,21 +522,25 @@
 &pinctrl {
 	bt {
 		bt_enable_h: bt-enable-h {
-			rockchip,pins = <0 RK_PC1 RK_FUNC_GPIO &pcfg_pull_none>;
+			rockchip,pins = <2 RK_PC1 RK_FUNC_GPIO &pcfg_pull_none>;
 		};
 
 		bt_host_wake_l: bt-host-wake-l {
-			rockchip,pins = <0 RK_PB3 RK_FUNC_GPIO &pcfg_pull_down>;
+			rockchip,pins = <2 RK_PC0 RK_FUNC_GPIO &pcfg_pull_down>;
 		};
 
 		bt_wake_l: bt-wake-l {
-			rockchip,pins = <0 RK_PB4 RK_FUNC_GPIO &pcfg_pull_none>;
+			rockchip,pins = <2 RK_PB7 RK_FUNC_GPIO &pcfg_pull_none>;
 		};
 	};
 
 	leds {
 		user_led_enable_h: user-led-enable-h {
 			rockchip,pins = <0 RK_PD3 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+
+		firefly_led_enable_h: firefly-led-enable-h {
+			rockchip,pins = <0 RK_PD4 RK_FUNC_GPIO &pcfg_pull_none>;
 		};
 	};
 
@@ -542,7 +560,7 @@
 				<0 RK_PA3 RK_FUNC_GPIO &pcfg_pull_up>;
 		};
 	};
-
+	
 	sdio-pwrseq {
 		wifi_enable_h: wifi-enable-h {
 			rockchip,pins = <2 RK_PB1 RK_FUNC_GPIO &pcfg_pull_none>;
@@ -550,12 +568,18 @@
 	};
 
 	usb {
-		vcc5v0_usb30_host_en_h: vcc5v0-usb30-host-en_h {
-			rockchip,pins = <0 RK_PC5 RK_FUNC_GPIO &pcfg_pull_none>;
+		vcc5v0_usb30_host_en_h: vcc5v0-usb30-host-en-h {
+			rockchip,pins = <0 RK_PA6 RK_FUNC_GPIO &pcfg_pull_none>;
 		};
 
-		vcc5v0_usb_otg_en_h: vcc5v0-usb-otg-en_h {
-			rockchip,pins = <0 RK_PC6 RK_FUNC_GPIO &pcfg_pull_none>;
+		vcc5v0_usb_otg_en_h: vcc5v0-usb-otg-en-h {
+			rockchip,pins = <0 RK_PA5 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+	};
+
+	headphone {
+		hp_det: hp-det {
+			rockchip,pins = <2 RK_PD2 RK_FUNC_GPIO &pcfg_pull_up>;
 		};
 	};
 };
@@ -571,6 +595,11 @@
 	vccio5-supply = <&vcc_3v3>;
 	vccio6-supply = <&vcc_1v8>;
 	vccio7-supply = <&vcc_3v3>;
+};
+
+&saradc {
+	vref-supply = <&vcca_1v8>;
+	status = "okay";
 };
 
 &sdhci {
@@ -599,12 +628,26 @@
 	bus-width = <4>;
 	cap-sd-highspeed;
 	cap-sdio-irq;
+	disable-wp;
 	keep-power-in-suspend;
 	mmc-pwrseq = <&sdio_pwrseq>;
+	non-removable;
 	vmmc-supply = <&vcc3v3_sys>;
 	vqmmc-supply = <&vcca1v8_pmu>;
 	pinctrl-names = "default";
-	pinctrl-0 = <&sdmmc1_bus4 &sdmmc1_cmd &sdmmc1_clk>;
+	pinctrl-0 = <&sdmmc1_bus4 &sdmmc1_cmd &sdmmc1_clk &uart9m1_xfer &uart8m1_xfer>;
+	status = "okay";
+};
+
+&sdmmc2 {
+	cap-sd-highspeed;
+	cap-sdio-irq;
+	bus-width = <4>;
+	vmmc-supply = <&vcc_3v3>;
+	vqmmc-supply = <&vcca1v8_pmu>;
+	pinctrl-names = "default";
+	pinctrl-0 = <&sdmmc2m0_bus4 &sdmmc2m0_cmd &sdmmc2m0_clk>;
+	sd-uhs-sdr104;
 	status = "okay";
 };
 
@@ -614,7 +657,7 @@
 
 &uart1 {
 	pinctrl-names = "default";
-	pinctrl-0 = <&uart1m0_xfer &uart1m0_ctsn>;
+	pinctrl-0 = <&uart1m0_xfer &uart1m0_ctsn &uart1m0_rtsn>;
 	status = "okay";
 	uart-has-rtscts;
 
@@ -646,6 +689,11 @@
 	status = "okay";
 };
 
+&usb2phy1_host {
+	phy-supply = <&vcc5v0_usb30_host>;
+	status = "okay";
+};
+
 &usb2phy1_otg {
 	phy-supply = <&vcc5v0_usb30_host>;
 	status = "okay";
@@ -672,6 +720,14 @@
 };
 
 &usb_host0_ohci {
+	status = "okay";
+};
+
+&usb_host1_ehci {
+	status = "okay";
+};
+
+&usb_host1_ohci {
 	status = "okay";
 };
 
