@@ -223,6 +223,13 @@ config MICROSEMI_PHY
 	help
 	  Currently supports VSC8514, VSC8530, VSC8531, VSC8540 and VSC8541 PHYs
 
+config MOTORCOMM_PHY
+        tristate "Motorcomm PHYs"
+        help
+          Supports the YT8010, YT8011, YT8510, YT8511, YT8512, YT8522,
+      	  YT8521S, YT8531, YT8531S, YT8543, YT8614, YT8614Q, YT8618,
+          YT8821 PHYs.
+
 config NATIONAL_PHY
 	tristate "National Semiconductor PHYs"
 	help
