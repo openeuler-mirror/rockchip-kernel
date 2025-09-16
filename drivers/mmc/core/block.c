@@ -51,7 +51,6 @@
 
 #include "queue.h"
 #include "block.h"
-#include "block_data.h"
 #include "core.h"
 #include "card.h"
 #include "crypto.h"
@@ -66,8 +65,6 @@ MODULE_ALIAS("mmc:block");
 #undef MODULE_PARAM_PREFIX
 #endif
 #define MODULE_PARAM_PREFIX "mmcblk."
-
-struct mmc_rpmb_blk_data gmrbd;
 
 /*
  * Set a 10 second timeout for polling write request busy state. Note, mmc core
@@ -2967,14 +2964,10 @@ static int mmc_blk_probe(struct mmc_card *card)
 
 	if (mmc_add_disk(md))
 		goto out;
-
+		
 	list_for_each_entry(part_md, &md->part, part) {
 		if (mmc_add_disk(part_md))
 			goto out;
-	}
-
-	if (!(card->host->caps2 & MMC_CAP2_NO_MMC)) {
-		mmc_blk_data_init(md);
 	}
 
 	/* Add two debugfs entries */
@@ -3010,10 +3003,6 @@ static void mmc_blk_remove(struct mmc_card *card)
 	if (card->type == MMC_TYPE_MMC)
 		this_card = NULL;
 	#endif
-
-	if (!(card->host->caps2 & MMC_CAP2_NO_MMC)) {
-		mmc_blk_data_deinit(md);
-	}
 
 	mmc_blk_remove_parts(card, md);
 	pm_runtime_get_sync(&card->dev);
