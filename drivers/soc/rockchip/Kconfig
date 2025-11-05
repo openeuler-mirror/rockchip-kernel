@@ -42,4 +42,8 @@ config ROCKCHIP_DTPM
 	  on this platform. That will create all the power capping capable
 	  devices.
 
+menu "FIQ Debugger"
+source "drivers/soc/rockchip/fiq_debugger/Kconfig"
+endmenu
+
 endif
