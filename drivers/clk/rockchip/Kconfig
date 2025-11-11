@@ -107,4 +107,7 @@ config CLK_RK3588
 	help
 	  Build the driver for RK3588 Clock Driver.
 
+config ROCKCHIP_DDRCLK
+        bool
+
 endif

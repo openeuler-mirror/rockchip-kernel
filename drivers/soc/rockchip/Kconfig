@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: GPL-2.0-only
 if ARCH_ROCKCHIP || COMPILE_TEST
 
+menu "Rockchip SoC drivers"
+
+source "drivers/soc/rockchip/Kconfig.cpu"
+
 #
 # Rockchip Soc drivers
 #
@@ -44,6 +48,8 @@ config ROCKCHIP_DTPM
 
 menu "FIQ Debugger"
 source "drivers/soc/rockchip/fiq_debugger/Kconfig"
+endmenu
+
 endmenu
 
 endif
