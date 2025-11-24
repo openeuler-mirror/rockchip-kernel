@@ -1,0 +1,19 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * Copyright (c) 2024 Rockchip Electronics Co., Ltd.
+ *
+ */
+
+/dts-v1/;
+
+#include "OK3576-C-common.dtsi"
+#include "OK3576-C-cam.dtsi"
+#include "rk3576-linux.dtsi"
+
+/ {
+	model = "Forlinx OK3576-C Board";
+	compatible = "rockchip,OK3576-C", "rockchip,rk3576";
+	fiq_debugger: fiq-debugger{
+		rockchip,baudrate = <115200>;
+	};
+};
