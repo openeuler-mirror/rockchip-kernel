@@ -966,7 +966,6 @@
 	disable-wp;
 	sd-uhs-sdr104;
 	/delete-property/ rockchip,use-v2-tuning;
-	vqmmc-supply = <&vccio_sd_s0>;
 	status = "okay";
 };
 
