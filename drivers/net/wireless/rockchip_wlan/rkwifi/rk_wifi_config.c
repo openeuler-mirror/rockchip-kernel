@@ -18,8 +18,8 @@
  * Set Firmware Path
  */
  
-#define VENDOR_ETC_FIRMWARE "/vendor/etc/firmware/"
-#define SYSTEM_ETC_FIRMWARE "/system/etc/firmware/"
+#define VENDOR_ETC_FIRMWARE "/lib/firmware/bcmdhd/"
+#define SYSTEM_ETC_FIRMWARE "/lib/firmware/bcmdhd/"
 char ANDROID_FW_PATH[64] = {0};
 
 extern int get_wifi_chip_type(void);
