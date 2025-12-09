@@ -12,7 +12,8 @@ clk-rockchip-y += clk-half-divider.o
 clk-rockchip-y += clk-inverter.o
 clk-rockchip-y += clk-mmc-phase.o
 clk-rockchip-y += clk-muxgrf.o
-clk-rockchip-y += clk-ddr.o
+clk-rockchip-y += clk-fractional-divider-v2.o
+clk-rockchip-$(CONFIG_ROCKCHIP_DDRCLK) += clk-ddr.o
 clk-rockchip-$(CONFIG_RESET_CONTROLLER) += softrst.o
 
 obj-$(CONFIG_CLK_PX30)          += clk-px30.o
