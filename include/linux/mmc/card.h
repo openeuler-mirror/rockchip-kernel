@@ -9,7 +9,6 @@
 
 #include <linux/device.h>
 #include <linux/mod_devicetable.h>
-#include <linux/kabi.h>
 
 struct mmc_cid {
 	unsigned int		manfid;
@@ -127,8 +126,6 @@ struct mmc_ext_csd {
 	u8			device_life_time_est_typ_b;	/* 269 */
 
 	unsigned int            feature_support;
-	KABI_RESERVE(0)
-	KABI_RESERVE(1)
 #define MMC_DISCARD_FEATURE	BIT(0)                  /* CMD38 feature */
 };
 
@@ -299,6 +296,7 @@ struct mmc_card {
 #define MMC_QUIRK_BROKEN_SD_DISCARD	(1<<14)	/* Disable broken SD discard support */
 #define MMC_QUIRK_BROKEN_SD_CACHE	(1<<15)	/* Disable broken SD cache support */
 #define MMC_QUIRK_BROKEN_CACHE_FLUSH	(1<<16)	/* Don't flush cache until the write has occurred */
+#define MMC_QUIRK_BROKEN_SD_POWEROFF_NOTIFY	(1<<17) /* Disable broken SD poweroff notify support */
 
 	bool			written_flag;	/* Indicates eMMC has been written since power on */
 	bool			reenable_cmdq;	/* Re-enable Command Queue */
@@ -344,9 +342,6 @@ struct mmc_card {
 	unsigned int    nr_parts;
 
 	struct workqueue_struct *complete_wq;	/* Private workqueue */
-	KABI_RESERVE(0)
-	KABI_RESERVE(1)
-	KABI_RESERVE(2)
 };
 
 static inline bool mmc_large_sector(struct mmc_card *card)
