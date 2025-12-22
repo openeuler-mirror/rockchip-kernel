@@ -7,7 +7,6 @@
 /dts-v1/;
 
 #include "OK3576-C-common.dtsi"
-#include "OK3576-C-cam.dtsi"
 #include "rk3576-linux.dtsi"
 
 / {
