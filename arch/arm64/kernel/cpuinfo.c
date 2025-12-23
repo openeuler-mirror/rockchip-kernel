@@ -10,6 +10,7 @@
 #include <asm/cputype.h>
 #include <asm/cpufeature.h>
 #include <asm/fpsimd.h>
+#include <asm/hwcap.h>
 
 #include <linux/bitops.h>
 #include <linux/bug.h>
@@ -24,6 +25,12 @@
 #include <linux/sched.h>
 #include <linux/smp.h>
 #include <linux/delay.h>
+
+unsigned int system_serial_low;
+EXPORT_SYMBOL(system_serial_low);
+
+unsigned int system_serial_high;
+EXPORT_SYMBOL(system_serial_high);
 
 /*
  * In case the boot CPU is hotpluggable, we record its initial state and
@@ -129,7 +136,7 @@ static const char *const hwcap_str[] = {
 	[KERNEL_HWCAP_HBC]		= "hbc",
 };
 
-#ifdef CONFIG_AARCH32_EL0
+#ifdef CONFIG_COMPAT
 #define COMPAT_KERNEL_HWCAP(x)	const_ilog2(COMPAT_HWCAP_ ## x)
 static const char *const compat_hwcap_str[] = {
 	[COMPAT_KERNEL_HWCAP(SWP)]	= "swp",
@@ -172,12 +179,13 @@ static const char *const compat_hwcap2_str[] = {
 	[COMPAT_KERNEL_HWCAP2(SB)]	= "sb",
 	[COMPAT_KERNEL_HWCAP2(SSBS)]	= "ssbs",
 };
-#endif /* CONFIG_AARCH32_EL0 */
+#endif /* CONFIG_COMPAT */
 
 static int c_show(struct seq_file *m, void *v)
 {
 	int i, j;
-	bool aarch32 = personality(current->personality) == PER_LINUX32;
+	bool compat = personality(current->personality) == PER_LINUX32 ||
+		      is_compat_task();
 
 	for_each_online_cpu(i) {
 		struct cpuinfo_arm64 *cpuinfo = &per_cpu(cpu_data, i);
@@ -189,7 +197,7 @@ static int c_show(struct seq_file *m, void *v)
 		 * "processor".  Give glibc what it expects.
 		 */
 		seq_printf(m, "processor\t: %d\n", i);
-		if (aarch32)
+		if (compat)
 			seq_printf(m, "model name\t: ARMv8 Processor rev %d (%s)\n",
 				   MIDR_REVISION(midr), COMPAT_ELF_PLATFORM);
 
@@ -204,7 +212,8 @@ static int c_show(struct seq_file *m, void *v)
 		 * software which does already (at least for 32-bit).
 		 */
 		seq_puts(m, "Features\t:");
-		if (aarch32) {
+		if (compat) {
+#ifdef CONFIG_COMPAT
 #ifdef CONFIG_AARCH32_EL0
 			for (j = 0; j < ARRAY_SIZE(compat_hwcap_str); j++) {
 				if (a32_elf_hwcap & (1 << j)) {
@@ -223,6 +232,7 @@ static int c_show(struct seq_file *m, void *v)
 				if (a32_elf_hwcap2 & (1 << j))
 					seq_printf(m, " %s", compat_hwcap2_str[j]);
 #endif /* CONFIG_AARCH32_EL0 */
+#endif /* CONFIG_COMPAT */
 		} else {
 			for (j = 0; j < ARRAY_SIZE(hwcap_str); j++)
 				if (cpu_have_feature(j))
@@ -237,6 +247,9 @@ static int c_show(struct seq_file *m, void *v)
 		seq_printf(m, "CPU part\t: 0x%03x\n", MIDR_PARTNUM(midr));
 		seq_printf(m, "CPU revision\t: %d\n\n", MIDR_REVISION(midr));
 	}
+
+	seq_printf(m, "Serial\t\t: %08x%08x\n",
+		   system_serial_high, system_serial_low);
 
 	return 0;
 }
@@ -459,11 +472,6 @@ static void __cpuinfo_store_cpu(struct cpuinfo_arm64 *info)
 
 	if (id_aa64pfr0_32bit_el0(info->reg_id_aa64pfr0))
 		__cpuinfo_store_cpu_32bit(&info->aarch32);
-
-	if (IS_ENABLED(CONFIG_ARM64_MPAM) &&
-	   (id_aa64pfr0_mpam(info->reg_id_aa64pfr0) ||
-	    id_aa64pfr1_mpamfrac(info->reg_id_aa64pfr1)))
-		info->reg_mpamidr = read_cpuid(MPAMIDR_EL1);
 
 	cpuinfo_detect_icache_policy(info);
 }
