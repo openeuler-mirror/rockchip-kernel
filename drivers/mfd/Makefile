@@ -224,6 +224,7 @@ obj-$(CONFIG_MFD_RC5T583)	+= rc5t583.o rc5t583-irq.o
 obj-$(CONFIG_MFD_RK806)		+= rk806-core.o
 obj-$(CONFIG_MFD_RK806_I2C)	+= rk806-i2c.o
 obj-$(CONFIG_MFD_RK806_SPI)	+= rk806-spi.o
+obj-$(CONFIG_MFD_RK808)         += rk808.o
 obj-$(CONFIG_MFD_RK8XX)		+= rk8xx-core.o
 obj-$(CONFIG_MFD_RK8XX_I2C)	+= rk8xx-i2c.o
 obj-$(CONFIG_MFD_RK8XX_SPI)	+= rk8xx-spi.o
