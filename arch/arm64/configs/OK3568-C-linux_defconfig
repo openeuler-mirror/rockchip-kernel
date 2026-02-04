@@ -3860,6 +3860,7 @@ CONFIG_SPI_PL022=m
 # CONFIG_SPI_PXA2XX is not set
 # CONFIG_SPI_QCOM_QSPI is not set
 CONFIG_SPI_QUP=y
+CONFIG_SPI_ROCKCHIP=y
 # CONFIG_SPI_SC18IS602 is not set
 # CONFIG_SPI_SIFIVE is not set
 # CONFIG_SPI_SN_F_OSPI is not set
@@ -3879,7 +3880,7 @@ CONFIG_SPI_XLP=m
 #
 # SPI Protocol Masters
 #
-# CONFIG_SPI_SPIDEV is not set
+CONFIG_SPI_SPIDEV=y
 # CONFIG_SPI_LOOPBACK_TEST is not set
 # CONFIG_SPI_TLE62X0 is not set
 # CONFIG_SPI_SLAVE is not set
@@ -6371,7 +6372,7 @@ CONFIG_DMA_OF=y
 # CONFIG_INTEL_IDMA64 is not set
 # CONFIG_K3_DMA is not set
 # CONFIG_MV_XOR_V2 is not set
-# CONFIG_PL330_DMA is not set
+CONFIG_PL330_DMA=y
 # CONFIG_PLX_DMA is not set
 # CONFIG_XGENE_DMA is not set
 # CONFIG_XILINX_DMA is not set
