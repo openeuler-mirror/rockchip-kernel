@@ -33,6 +33,7 @@
 #define TCS4525_VSEL1		0x10
 #define TCS4525_TIME		0x13
 #define TCS4525_COMMAND		0x14
+#define TCS4525_LIMCONF		0x16
 
 /* Control register */
 #define FAN53555_CONTROL	0x02
@@ -113,7 +114,6 @@ enum {
 enum {
 	FAN53555_CHIP_REV_00 = 0x3,
 	FAN53555_CHIP_REV_13 = 0xf,
-	FAN53555_CHIP_REV_23 = 0xc,
 };
 
 enum {
@@ -123,6 +123,7 @@ enum {
 
 struct fan53555_device_info {
 	enum fan53555_vendor vendor;
+	struct regmap *regmap;
 	struct device *dev;
 	struct regulator_desc desc;
 	struct regulator_init_data *regulator;
@@ -150,6 +151,12 @@ struct fan53555_device_info {
 	unsigned int n_ramp_values;
 	unsigned int slew_rate;
 };
+
+static unsigned int fan53555_map_mode(unsigned int mode)
+{
+	return mode == REGULATOR_MODE_FAST ?
+		REGULATOR_MODE_FAST : REGULATOR_MODE_NORMAL;
+}
 
 static int fan53555_set_suspend_voltage(struct regulator_dev *rdev, int uV)
 {
@@ -301,11 +308,6 @@ static int fan53555_voltages_setup_fairchild(struct fan53555_device_info *di)
 		case FAN53555_CHIP_REV_13:
 			di->vsel_min = 800000;
 			di->vsel_step = 10000;
-			break;
-		case FAN53555_CHIP_REV_23:
-			dev_info(di->dev, "setup fairchild REV_23 vsel\n");
-			di->vsel_min = 600000;
-			di->vsel_step = 12500;
 			break;
 		default:
 			dev_err(di->dev,
@@ -640,12 +642,14 @@ static const struct of_device_id __maybe_unused fan53555_dt_ids[] = {
 	}, {
 		.compatible = "fcs,fan53555",
 		.data = (void *)FAN53555_VENDOR_FAIRCHILD
+#if !IS_ENABLED(CONFIG_REGULATOR_RK860X)
 	}, {
 		.compatible = "rockchip,rk8600",
 		.data = (void *)FAN53555_VENDOR_ROCKCHIP
 	}, {
 		.compatible = "rockchip,rk8602",
 		.data = (void *)RK8602_VENDOR_ROCKCHIP
+#endif
 	}, {
 		.compatible = "silergy,syr827",
 		.data = (void *)FAN53555_VENDOR_SILERGY,
@@ -657,6 +661,9 @@ static const struct of_device_id __maybe_unused fan53555_dt_ids[] = {
 		.data = (void *)FAN53526_VENDOR_TCS
 	}, {
 		.compatible = "tcs,tcs4526",
+		.data = (void *)FAN53526_VENDOR_TCS
+	}, {
+		.compatible = "tcs,tcs452x",
 		.data = (void *)FAN53526_VENDOR_TCS
 	},
 	{ }
@@ -678,6 +685,8 @@ static int fan53555_regulator_probe(struct i2c_client *client)
 					GFP_KERNEL);
 	if (!di)
 		return -ENOMEM;
+
+	di->desc.of_map_mode = fan53555_map_mode;
 
 	pdata = dev_get_platdata(&client->dev);
 	if (!pdata)
@@ -710,6 +719,7 @@ static int fan53555_regulator_probe(struct i2c_client *client)
 		return dev_err_probe(&client->dev, PTR_ERR(regmap),
 				     "Failed to allocate regmap!\n");
 
+	di->regmap = regmap;
 	di->dev = &client->dev;
 	i2c_set_clientdata(client, di);
 	/* Get chip ID */
@@ -745,6 +755,42 @@ static int fan53555_regulator_probe(struct i2c_client *client)
 	return ret;
 }
 
+static void fan53555_regulator_shutdown(struct i2c_client *client)
+{
+	struct fan53555_device_info *di;
+	int ret;
+
+	di = i2c_get_clientdata(client);
+
+	dev_info(di->dev, "fan53555..... reset\n");
+
+	switch (di->vendor) {
+	case FAN53555_VENDOR_FAIRCHILD:
+	case FAN53555_VENDOR_SILERGY:
+		ret = regmap_update_bits(di->regmap, di->slew_reg,
+					 CTL_RESET, CTL_RESET);
+		break;
+	case FAN53526_VENDOR_TCS:
+		ret = regmap_update_bits(di->regmap, TCS4525_LIMCONF,
+					 CTL_RESET, CTL_RESET);
+		/*
+		 * the device can't return 'ack' during the reset,
+		 * it will return -ENXIO, ignore this error.
+		 */
+		if (ret == -ENXIO)
+			ret = 0;
+		break;
+	default:
+		ret = -EINVAL;
+		break;
+	}
+
+	if (ret < 0)
+		dev_err(di->dev, "reset: force fan53555_reset error! ret=%d\n", ret);
+	else
+		dev_info(di->dev, "reset: force fan53555_reset ok!\n");
+}
+
 static const struct i2c_device_id fan53555_id[] = {
 	{
 		.name = "fan53526",
@@ -752,12 +798,14 @@ static const struct i2c_device_id fan53555_id[] = {
 	}, {
 		.name = "fan53555",
 		.driver_data = FAN53555_VENDOR_FAIRCHILD
+#if !IS_ENABLED(CONFIG_REGULATOR_RK860X)
 	}, {
 		.name = "rk8600",
 		.driver_data = FAN53555_VENDOR_ROCKCHIP
 	}, {
 		.name = "rk8602",
 		.driver_data = RK8602_VENDOR_ROCKCHIP
+#endif
 	}, {
 		.name = "syr827",
 		.driver_data = FAN53555_VENDOR_SILERGY
@@ -769,6 +817,9 @@ static const struct i2c_device_id fan53555_id[] = {
 		.driver_data = FAN53526_VENDOR_TCS
 	}, {
 		.name = "tcs4526",
+		.driver_data = FAN53526_VENDOR_TCS
+	}, {
+		.name = "tcs452x",
 		.driver_data = FAN53526_VENDOR_TCS
 	},
 	{ },
@@ -782,6 +833,7 @@ static struct i2c_driver fan53555_regulator_driver = {
 		.of_match_table = of_match_ptr(fan53555_dt_ids),
 	},
 	.probe = fan53555_regulator_probe,
+	.shutdown = fan53555_regulator_shutdown,
 	.id_table = fan53555_id,
 };
 
